@@ -1,0 +1,1 @@
+# Este archivo hace que la carpeta 'documents' se considere un paquete Python

@@ -1,0 +1,247 @@
+"""
+Configuración de fixtures y setup para tests
+"""
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
+from unittest.mock import MagicMock, patch
+import asyncio
+from typing import Dict, Any
+
+# Test app import
+from main import app
+from models.schemas import AuthenticatedUser, SectorPermission
+
+# Mock data para tests
+MOCK_USER_AUTH = AuthenticatedUser(
+    user_id="a1000000-0000-0000-0000-000000000001",
+    auth_id="auth0|test_user_123",
+    email="test.user@municipalidad.test",
+    full_name="Usuario Test",
+    permissions=[
+        SectorPermission(
+            sector_id="51000000-0000-0000-0000-000000000001",
+            sector_acronym="PRIV",
+            department_id="d1000000-0000-0000-0000-000000000001",
+            department_name="Intendencia",
+            department_acronym="INTE",
+            can_view=True,
+            can_edit=True,
+            is_primary=True
+        )
+    ]
+)
+
+MOCK_USER_DB = {
+    "user_id": "550e8400-e29b-41d4-a716-446655440000",
+    "auth_id": "auth0|test_user_123",
+    "full_name": "Usuario Test",
+    "email": "test.user@municipalidad.test",
+    "sector_id": "770e8400-e29b-41d4-a716-446655440001",
+    "estado": 1
+}
+
+MOCK_CASE = {
+    "id": "ef102207-86c4-415a-883b-088b51ee5d45",
+    "case_number": "EE-2025-000001-SMG-OBPU",
+    "reference": "Expediente de prueba para testing",
+    "status": "active",
+    "created_at": "2025-10-01T14:53:05.470279+00:00",
+    "case_template_id": "3da979f0-3d01-4ba5-8b10-cd4258351440",
+    "created_by_user_id": "550e8400-e29b-41d4-a716-446655440000",
+    "owner_department_id": "3b5b8451-1f23-4662-a2b1-aa70e46b6594",
+    "owner_sector_id": "770e8400-e29b-41d4-a716-446655440001"
+}
+
+MOCK_CASE_TEMPLATE = {
+    "id": "3da979f0-3d01-4ba5-8b10-cd4258351440",
+    "type_name": "Licitación Pública",
+    "description": "Procesos de licitación para compras y obras",
+    "acronym": "LIC",
+    "filing_department_id": "3b5b8451-1f23-4662-a2b1-aa70e46b6594",
+    "is_active": True
+}
+
+MOCK_MOVEMENT = {
+    "id": "mov123456-86c4-415a-883b-088b51ee5d45",
+    "case_id": "ef102207-86c4-415a-883b-088b51ee5d45",
+    "type": "creation",
+    "reason": "Creación del expediente",
+    "created_at": "2025-10-01T14:53:05.470279+00:00",
+    "user_id": "550e8400-e29b-41d4-a716-446655440000",
+    "creator_sector_id": "770e8400-e29b-41d4-a716-446655440001",
+    "is_active": True
+}
+
+MOCK_DOCUMENT = {
+    "id": "doc123456-86c4-415a-883b-088b51ee5d45",
+    "reference": "Documento de prueba",
+    "document_type": "official",
+    "official_number": "OF-2025-000001-SMG",
+    "signed_at": "2025-10-01T14:53:05.470279+00:00"
+}
+
+MOCK_SECTOR = {
+    "sector_id": "770e8400-e29b-41d4-a716-446655440001",
+    "department_id": "3b5b8451-1f23-4662-a2b1-aa70e46b6594",
+    "acronym": "OBPU",
+    "is_active": True
+}
+
+MOCK_DEPARTMENT = {
+    "department_id": "3b5b8451-1f23-4662-a2b1-aa70e46b6594",
+    "name": "Obras Públicas",
+    "acronym": "OBPU",
+    "is_active": True
+}
+
+@pytest.fixture
+def event_loop():
+    """Fixture para manejar el event loop de asyncio"""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+@pytest_asyncio.fixture
+async def client():
+    """Cliente HTTP asíncrono para tests"""
+    from httpx import ASGITransport
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+@pytest.fixture
+def mock_auth_headers():
+    """Headers de autenticación mock"""
+    return {"Authorization": "Bearer test_jwt_token"}
+
+@pytest.fixture
+def mock_authenticated_user():
+    """Mock del usuario autenticado"""
+    return MOCK_USER_AUTH
+
+@pytest.fixture
+def mock_db_user():
+    """Mock del usuario en base de datos"""
+    return MOCK_USER_DB
+
+@pytest.fixture
+def mock_case_data():
+    """Mock de datos de expediente"""
+    return MOCK_CASE
+
+@pytest.fixture
+def mock_case_template():
+    """Mock de plantilla de expediente"""
+    return MOCK_CASE_TEMPLATE
+
+@pytest.fixture
+def mock_movement_data():
+    """Mock de movimiento de expediente"""
+    return MOCK_MOVEMENT
+
+@pytest.fixture
+def mock_document_data():
+    """Mock de documento"""
+    return MOCK_DOCUMENT
+
+@pytest.fixture
+def mock_sector_data():
+    """Mock de sector"""
+    return MOCK_SECTOR
+
+@pytest.fixture
+def mock_department_data():
+    """Mock de departamento"""
+    return MOCK_DEPARTMENT
+
+@pytest.fixture
+def mock_db_connection():
+    """Mock de conexión a base de datos"""
+    with patch('database.get_db_connection') as mock_conn:
+        mock_cursor = MagicMock()
+        mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cursor
+        yield mock_cursor
+
+@pytest.fixture
+def mock_case_service():
+    """Mock del servicio de casos"""
+    with patch('services.case_service.CaseService') as mock_service:
+        yield mock_service
+
+@pytest.fixture
+def mock_user_service():
+    """Mock del servicio de usuarios"""
+    with patch('services.user_service.UserService') as mock_service:
+        yield mock_service
+
+@pytest.fixture
+def mock_auth():
+    """Mock del sistema de autenticación"""
+    with patch('auth.get_current_user') as mock_auth:
+        mock_auth.return_value = MOCK_USER_AUTH
+        yield mock_auth
+
+# Utilidades para tests
+def create_mock_response(data: Dict[str, Any], status_code: int = 200):
+    """Crear una respuesta mock"""
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.json.return_value = data
+    return mock_response
+
+def assert_response_success(response, expected_keys=None):
+    """Verificar que la respuesta sea exitosa"""
+    assert response.status_code == 200
+    data = response.json()
+    assert "success" in data
+    assert data["success"] is True
+    
+    if expected_keys:
+        for key in expected_keys:
+            assert key in data
+
+def assert_response_error(response, expected_status_code, expected_message=None):
+    """Verificar que la respuesta sea de error"""
+    assert response.status_code == expected_status_code
+
+    if expected_message:
+        data = response.json()
+        assert "detail" in data
+        assert expected_message in data["detail"]
+
+# ==================== FIXTURES ACTUALIZADAS PARA TESTING_MODE ====================
+
+@pytest.fixture
+def mock_sector_permission():
+    """Fixture para crear un SectorPermission de prueba."""
+    from models.schemas import SectorPermission
+    return SectorPermission(
+        sector_id="51000000-0000-0000-0000-000000000001",
+        sector_acronym="PRIV",
+        department_id="d1000000-0000-0000-0000-000000000001",
+        department_name="Intendencia",
+        department_acronym="INTE",
+        can_view=True,
+        can_edit=True,
+        is_primary=True
+    )
+
+@pytest.fixture
+def test_headers():
+    """Headers requeridos para tests en TESTING_MODE."""
+    return {
+        "X-Tenant-Schema": "100_test",
+        "X-User-ID": "a1000000-0000-0000-0000-000000000001"
+    }
+
+@pytest.fixture
+def mock_authenticated_user_new(mock_sector_permission):
+    """Usuario autenticado con SectorPermission correcto."""
+    from models.schemas import AuthenticatedUser
+    return AuthenticatedUser(
+        user_id="a1000000-0000-0000-0000-000000000001",
+        auth_id="auth0|test123",
+        email="mrodriguez@munitest.com",
+        full_name="Maria Rodriguez",
+        permissions=[mock_sector_permission]
+    )

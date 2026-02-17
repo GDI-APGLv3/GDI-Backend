@@ -1,0 +1,89 @@
+# Variables de entorno
+.env
+.env.*
+!.env.example
+.env_backup
+aaa.env
+
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+
+# Archivos compilados y cachés
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Logs
+*.log
+logs/
+
+# Archivos de configuración IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Archivos temporales
+*.tmp
+*.bak
+*.swp
+*~
+tmpclaude-*
+
+# Archivos de distribución / empaquetado
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Covertura de código
+.coverage
+
+# Archivos de testing temporales (excluye tests/)
+test_*.py
+!tests/test_*.py
+test_*.json
+test_*.pdf
+create_*.py
+!endpoints/*/create_*.py
+check_*.py
+!endpoints/*/check_*.py
+
+# Archivos de documentación temporal
+*_TEMP.md
+*_TEST.md
+htmlcov/
+
+# Archivos temporales de previsualización
+temp_previews/
+temp_*.json
+nul
+temp_yanina_service.txt
+
+# Archivos de listados temporales
+*_files.txt
+*_files_raw.txt
+# Claude / agent config
+.claude/
+
+# Documentacion interna (no open source)
+Documentacion/
+
+# Archivos internos de agentes / guias
+AGENTS.md
+GUIA_REFACTORIZACION.md

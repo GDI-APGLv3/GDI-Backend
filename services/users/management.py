@@ -1,0 +1,505 @@
+"""
+Servicios para gestión avanzada de usuarios.
+Maneja operaciones de administración y consultas especializadas de usuarios.
+"""
+
+from typing import Dict, Any, List, Optional
+from database import get_db_connection, execute_query, execute_transaction
+from shared.exceptions import ValidationError, UserNotFoundError, UserInactiveError
+from shared.validation import validate_user_id, validate_email, validate_required_string
+from shared.utils import calculate_offset, calculate_total_pages
+
+def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, Any]:
+    """
+    Obtiene estadísticas completas de actividad de un usuario.
+
+    Args:
+        user_id: UUID del usuario
+        schema_name: Schema del tenant (multi-tenant, compatible con PgBouncer transaction mode)
+
+    Returns:
+        Dict con estadísticas del usuario
+
+    Raises:
+        ValidationError: Si el user_id es inválido
+        UserNotFoundError: Si el usuario no existe
+    """
+    # Validar user_id
+    user_error = validate_user_id(user_id)
+    if user_error:
+        raise ValidationError(user_error)
+
+    with get_db_connection(schema_name) as conn:
+        with conn.cursor() as cursor:
+            # Verificar que el usuario existe
+            cursor.execute("SELECT id, first_name, last_name FROM users WHERE id = %s", (user_id,))
+            user = cursor.fetchone()
+            
+            if not user:
+                raise UserNotFoundError(user_id)
+            
+            # Estadísticas de documentos creados
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total_created,
+                    COUNT(CASE WHEN status = 'draft' THEN 1 END) as drafts,
+                    COUNT(CASE WHEN status = 'sent_to_sign' THEN 1 END) as pending,
+                    COUNT(CASE WHEN status = 'signed' THEN 1 END) as signed,
+                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed,
+                    COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected
+                FROM documents WHERE creator_id = %s
+            """, (user_id,))
+            
+            created_stats = cursor.fetchone()
+            
+            # Estadísticas de documentos para firmar
+            cursor.execute("""
+                SELECT 
+                    COUNT(ds.*) as assigned_to_sign,
+                    COUNT(dsig.*) as already_signed,
+                    COUNT(ds.*) - COUNT(dsig.*) as pending_signature
+                FROM document_signers ds
+                LEFT JOIN document_signatures dsig ON ds.document_id = dsig.document_id 
+                                                  AND ds.user_id = dsig.user_id
+                WHERE ds.user_id = %s
+            """, (user_id,))
+            
+            signing_stats = cursor.fetchone()
+            
+            # Estadísticas de numeración (si es numerador)
+            cursor.execute("""
+                SELECT 
+                    COUNT(ds.*) as assigned_to_numerate,
+                    COUNT(dn.*) as numerations_completed
+                FROM document_signers ds
+                LEFT JOIN document_numerations dn ON ds.document_id = dn.document_id 
+                                                  AND ds.user_id = dn.numerator_id
+                WHERE ds.user_id = %s AND ds.is_numerator = true
+            """, (user_id,))
+            
+            numeration_stats = cursor.fetchone()
+            
+            # Actividad reciente (últimos 30 días)
+            cursor.execute("""
+                SELECT 
+                    COUNT(CASE WHEN d.created_at >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as documents_created_30d,
+                    COUNT(CASE WHEN dsig.signed_at >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as documents_signed_30d
+                FROM documents d
+                FULL OUTER JOIN document_signatures dsig ON dsig.user_id = %s
+                WHERE d.creator_id = %s OR dsig.user_id = %s
+            """, (user_id, user_id, user_id))
+            
+            recent_activity = cursor.fetchone()
+            
+            return {
+                "user_info": {
+                    "user_id": user_id,
+                    "full_name": f"{user['first_name']} {user['last_name']}"
+                },
+                "documents_created": {
+                    "total": created_stats['total_created'],
+                    "by_status": {
+                        "draft": created_stats['drafts'],
+                        "pending_signature": created_stats['pending'],
+                        "signed": created_stats['signed'],
+                        "completed": created_stats['completed'],
+                        "rejected": created_stats['rejected']
+                    }
+                },
+                "documents_signing": {
+                    "assigned_to_sign": signing_stats['assigned_to_sign'],
+                    "already_signed": signing_stats['already_signed'],
+                    "pending_signature": signing_stats['pending_signature']
+                },
+                "numeration": {
+                    "assigned_to_numerate": numeration_stats['assigned_to_numerate'],
+                    "numerations_completed": numeration_stats['numerations_completed']
+                },
+                "recent_activity": {
+                    "documents_created_last_30d": recent_activity['documents_created_30d'],
+                    "documents_signed_last_30d": recent_activity['documents_signed_30d']
+                }
+            }
+
+def get_user_document_activity(user_id: str, schema_name: str, days: int = 30) -> Dict[str, Any]:
+    """
+    Obtiene la actividad detallada de documentos de un usuario.
+
+    Args:
+        user_id: UUID del usuario
+        schema_name: Nombre del schema de la base de datos
+        days: Número de días hacia atrás para la actividad
+
+    Returns:
+        Dict con actividad detallada
+    """
+    # Validar user_id
+    user_error = validate_user_id(user_id)
+    if user_error:
+        raise ValidationError(user_error)
+
+    # Documentos creados recientemente
+    created_query = """
+        SELECT d.id, d.reference, d.status, d.created_at,
+               dt.name as document_type_name
+        FROM documents d
+        JOIN document_types dt ON d.document_type_id = dt.id
+        WHERE d.creator_id = %s
+          AND d.created_at >= CURRENT_DATE - INTERVAL '%s days'
+        ORDER BY d.created_at DESC
+        LIMIT 10
+    """
+
+    created_docs = execute_query(created_query, [user_id, days], schema_name=schema_name)
+    
+    # Documentos firmados recientemente
+    signed_query = """
+        SELECT d.id, d.reference, d.status, dsig.signed_at,
+               dt.name as document_type_name,
+               ds.is_numerator
+        FROM document_signatures dsig
+        JOIN documents d ON dsig.document_id = d.id
+        JOIN document_types dt ON d.document_type_id = dt.id
+        JOIN document_signers ds ON d.id = ds.document_id AND ds.user_id = dsig.user_id
+        WHERE dsig.user_id = %s
+          AND dsig.signed_at >= CURRENT_DATE - INTERVAL '%s days'
+        ORDER BY dsig.signed_at DESC
+        LIMIT 10
+    """
+
+    signed_docs = execute_query(signed_query, [user_id, days], schema_name=schema_name)
+    
+    # Documentos pendientes de firma
+    pending_query = """
+        SELECT d.id, d.reference, d.status, d.updated_at,
+               dt.name as document_type_name,
+               ds.signing_order, ds.is_numerator
+        FROM document_signers ds
+        JOIN documents d ON ds.document_id = d.id
+        JOIN document_types dt ON d.document_type_id = dt.id
+        LEFT JOIN document_signatures dsig ON d.id = dsig.document_id AND ds.user_id = dsig.user_id
+        WHERE ds.user_id = %s
+          AND dsig.id IS NULL
+          AND d.status IN ('sent_to_sign', 'signed')
+        ORDER BY d.updated_at DESC
+        LIMIT 10
+    """
+
+    pending_docs = execute_query(pending_query, [user_id], schema_name=schema_name)
+    
+    # Formatear resultados
+    created_formatted = []
+    for doc in created_docs:
+        created_formatted.append({
+            "document_id": doc['id'],
+            "reference": doc['reference'],
+            "document_type": doc['document_type_name'],
+            "status": doc['status'],
+            "created_at": doc['created_at'].isoformat() if doc['created_at'] else None
+        })
+    
+    signed_formatted = []
+    for doc in signed_docs:
+        signed_formatted.append({
+            "document_id": doc['id'],
+            "reference": doc['reference'],
+            "document_type": doc['document_type_name'],
+            "status": doc['status'],
+            "signed_as": "numerator" if doc['is_numerator'] else "signer",
+            "signed_at": doc['signed_at'].isoformat() if doc['signed_at'] else None
+        })
+    
+    pending_formatted = []
+    for doc in pending_docs:
+        pending_formatted.append({
+            "document_id": doc['id'],
+            "reference": doc['reference'],
+            "document_type": doc['document_type_name'],
+            "status": doc['status'],
+            "role": "numerator" if doc['is_numerator'] else "signer",
+            "signing_order": doc['signing_order'],
+            "updated_at": doc['updated_at'].isoformat() if doc['updated_at'] else None
+        })
+    
+    return {
+        "user_id": user_id,
+        "period_days": days,
+        "activity": {
+            "documents_created": created_formatted,
+            "documents_signed": signed_formatted,
+            "documents_pending": pending_formatted
+        },
+        "summary": {
+            "created_count": len(created_formatted),
+            "signed_count": len(signed_formatted),
+            "pending_count": len(pending_formatted)
+        }
+    }
+
+def get_users_with_roles(schema_name: str) -> Dict[str, Any]:
+    """
+    Obtiene lista de usuarios con sus roles y capacidades especiales.
+
+    Args:
+        schema_name: Nombre del schema de la base de datos
+
+    Returns:
+        Dict con usuarios y sus roles
+    """
+    query = """
+        SELECT DISTINCT
+            u.id,
+            u.first_name,
+            u.last_name,
+            u.email,
+            u.is_active,
+            u.position,
+            d.name as department_name,
+            d.code as department_code,
+            -- Verificar si puede numerar documentos
+            (SELECT COUNT(*) > 0 FROM document_signers ds
+             WHERE ds.user_id = u.id AND ds.is_numerator = true) as can_numerate,
+            -- Contar documentos creados
+            (SELECT COUNT(*) FROM documents doc WHERE doc.creator_id = u.id) as documents_created,
+            -- Contar documentos firmados
+            (SELECT COUNT(*) FROM document_signatures dsig WHERE dsig.user_id = u.id) as documents_signed
+        FROM users u
+        LEFT JOIN departments d ON u.department_id = d.id
+        WHERE u.is_active = true
+        ORDER BY u.first_name, u.last_name
+    """
+
+    users_data = execute_query(query, [], schema_name=schema_name)
+    
+    # Categorizar usuarios por roles
+    creators = []
+    signers = []
+    numerators = []
+    inactive_users = []
+    
+    for user in users_data:
+        user_info = {
+            "user_id": user['id'],
+            "first_name": user['first_name'],
+            "last_name": user['last_name'],
+            "full_name": f"{user['first_name']} {user['last_name']}",
+            "email": user['email'],
+            "position": user['position'],
+            "department": {
+                "name": user['department_name'],
+                "code": user['department_code']
+            } if user['department_name'] else None,
+            "activity": {
+                "documents_created": user['documents_created'],
+                "documents_signed": user['documents_signed']
+            }
+        }
+        
+        if not user['is_active']:
+            inactive_users.append(user_info)
+            continue
+        
+        # Clasificar por actividad
+        if user['documents_created'] > 0:
+            creators.append(user_info)
+        
+        if user['documents_signed'] > 0:
+            signers.append(user_info)
+        
+        if user['can_numerate']:
+            numerators.append({
+                **user_info,
+                "can_numerate": True
+            })
+    
+    return {
+        "users_by_role": {
+            "creators": creators,
+            "signers": signers,
+            "numerators": numerators,
+            "inactive": inactive_users
+        },
+        "summary": {
+            "total_active_users": len([u for u in users_data if u['is_active']]),
+            "creators_count": len(creators),
+            "signers_count": len(signers),
+            "numerators_count": len(numerators),
+            "inactive_count": len(inactive_users)
+        }
+    }
+
+def get_department_users_summary(schema_name: str) -> Dict[str, Any]:
+    """
+    Obtiene resumen de usuarios por departamento.
+
+    Args:
+        schema_name: Nombre del schema de la base de datos
+
+    Returns:
+        Dict con usuarios agrupados por departamento
+    """
+    query = """
+        SELECT
+            d.id as department_id,
+            d.name as department_name,
+            d.code as department_code,
+            d.description as department_description,
+            COUNT(u.id) as total_users,
+            COUNT(CASE WHEN u.is_active = true THEN 1 END) as active_users,
+            -- Usuarios que han creado documentos
+            COUNT(CASE WHEN doc_count.created_count > 0 THEN 1 END) as users_with_documents,
+            -- Usuarios que pueden numerar
+            COUNT(CASE WHEN num_count.numerator_count > 0 THEN 1 END) as numerator_users
+        FROM departments d
+        LEFT JOIN users u ON d.id = u.department_id
+        LEFT JOIN (
+            SELECT creator_id, COUNT(*) as created_count
+            FROM documents
+            GROUP BY creator_id
+        ) doc_count ON u.id = doc_count.creator_id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) as numerator_count
+            FROM document_signers
+            WHERE is_numerator = true
+            GROUP BY user_id
+        ) num_count ON u.id = num_count.user_id
+        GROUP BY d.id, d.name, d.code, d.description
+        HAVING COUNT(u.id) > 0  -- Solo departamentos con usuarios
+        ORDER BY d.name
+    """
+
+    departments_data = execute_query(query, [], schema_name=schema_name)
+    
+    departments = []
+    total_users = 0
+    total_active = 0
+    
+    for dept in departments_data:
+        departments.append({
+            "department_id": dept['department_id'],
+            "name": dept['department_name'],
+            "code": dept['department_code'],
+            "description": dept['department_description'],
+            "user_stats": {
+                "total_users": dept['total_users'],
+                "active_users": dept['active_users'],
+                "inactive_users": dept['total_users'] - dept['active_users'],
+                "users_with_documents": dept['users_with_documents'],
+                "numerator_users": dept['numerator_users']
+            }
+        })
+        
+        total_users += dept['total_users']
+        total_active += dept['active_users']
+    
+    return {
+        "departments": departments,
+        "summary": {
+            "total_departments": len(departments),
+            "total_users": total_users,
+            "total_active_users": total_active,
+            "total_inactive_users": total_users - total_active
+        }
+    }
+
+def validate_user_permissions(user_id: str, schema_name: str, permission_type: str, resource_id: str = None) -> Dict[str, Any]:
+    """
+    Valida permisos específicos de un usuario.
+
+    Args:
+        user_id: UUID del usuario
+        schema_name: Nombre del schema de la base de datos
+        permission_type: Tipo de permiso ('create', 'sign', 'numerate', 'view')
+        resource_id: ID del recurso específico (opcional)
+
+    Returns:
+        Dict con resultado de validación
+    """
+    # Validar user_id
+    user_error = validate_user_id(user_id)
+    if user_error:
+        return {"has_permission": False, "reason": user_error}
+
+    # Verificar que el usuario existe y está activo
+    user_query = "SELECT id, is_active FROM users WHERE id = %s"
+    user_result = execute_query(user_query, [user_id], schema_name=schema_name)
+    
+    if not user_result:
+        return {"has_permission": False, "reason": "Usuario no encontrado"}
+    
+    if not user_result[0]['is_active']:
+        return {"has_permission": False, "reason": "Usuario inactivo"}
+    
+    # Validar permisos específicos
+    if permission_type == "create":
+        # Todos los usuarios activos pueden crear documentos
+        return {"has_permission": True, "reason": "Usuario activo puede crear documentos"}
+    
+    elif permission_type == "sign":
+        if not resource_id:
+            return {"has_permission": False, "reason": "Se requiere ID de documento para validar firma"}
+
+        # Verificar si es firmante del documento
+        signer_query = """
+            SELECT user_id FROM document_signers
+            WHERE document_id = %s AND user_id = %s
+        """
+        signer_result = execute_query(signer_query, [resource_id, user_id], schema_name=schema_name)
+        
+        if signer_result:
+            return {"has_permission": True, "reason": "Usuario es firmante del documento"}
+        else:
+            return {"has_permission": False, "reason": "Usuario no es firmante del documento"}
+    
+    elif permission_type == "numerate":
+        if not resource_id:
+            # Verificar si puede numerar en general
+            numerator_query = """
+                SELECT COUNT(*) as count FROM document_signers
+                WHERE user_id = %s AND is_numerator = true
+            """
+            numerator_result = execute_query(numerator_query, [user_id], schema_name=schema_name)
+            
+            if numerator_result[0]['count'] > 0:
+                return {"has_permission": True, "reason": "Usuario tiene capacidad de numeración"}
+            else:
+                return {"has_permission": False, "reason": "Usuario no tiene capacidad de numeración"}
+        else:
+            # Verificar si es numerador del documento específico
+            doc_numerator_query = """
+                SELECT user_id FROM document_signers
+                WHERE document_id = %s AND user_id = %s AND is_numerator = true
+            """
+            doc_numerator_result = execute_query(doc_numerator_query, [resource_id, user_id], schema_name=schema_name)
+            
+            if doc_numerator_result:
+                return {"has_permission": True, "reason": "Usuario es numerador del documento"}
+            else:
+                return {"has_permission": False, "reason": "Usuario no es numerador del documento"}
+    
+    elif permission_type == "view":
+        if not resource_id:
+            return {"has_permission": True, "reason": "Usuario puede ver documentos generales"}
+
+        # Verificar acceso al documento específico (creador o firmante)
+        access_query = """
+            SELECT
+                (d.creator_id = %s) as is_creator,
+                (ds.user_id IS NOT NULL) as is_signer
+            FROM documents d
+            LEFT JOIN document_signers ds ON d.id = ds.document_id AND ds.user_id = %s
+            WHERE d.id = %s
+        """
+        access_result = execute_query(access_query, [user_id, user_id, resource_id], schema_name=schema_name)
+        
+        if not access_result:
+            return {"has_permission": False, "reason": "Documento no encontrado"}
+        
+        access = access_result[0]
+        if access['is_creator'] or access['is_signer']:
+            return {"has_permission": True, "reason": "Usuario tiene acceso al documento"}
+        else:
+            return {"has_permission": False, "reason": "Usuario no tiene acceso al documento"}
+    
+    else:
+        return {"has_permission": False, "reason": f"Tipo de permiso '{permission_type}' no reconocido"}

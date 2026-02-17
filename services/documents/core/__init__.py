@@ -1,0 +1,166 @@
+"""
+Core: Modulos base compartidos para el dominio de documentos.
+
+Contiene:
+- queries.py: Queries SQL centralizadas
+- repository.py: Patron Repository
+- builder.py: Constructor de respuestas
+- validator.py: Validaciones de negocio
+
+MIGRADO: Fase 2.2 del refactoring
+"""
+
+# === QUERIES ===
+from .queries import (
+    # General
+    get_excluded_types_clause,
+    autocomplete_official_documents_query,
+    get_document_type_query,
+    insert_document_draft_query,
+    insert_document_signer_query,
+    get_document_details_for_editing_query,
+    get_document_signers_query,
+    get_document_rejection_info_query,
+    get_document_status_query,
+    delete_document_signers_query,
+    insert_document_signer_ordered_query,
+    get_official_document_info_query,
+    get_all_display_states_query,
+    get_display_state_by_code_query,
+    get_all_state_mappings_query,
+    get_all_document_types_query,
+    get_preview_document_info_query,
+    # Deletion
+    get_document_for_deletion_query,
+    unlink_document_from_cases_query,
+    soft_delete_document_query,
+    get_user_info_for_deletion_query,
+    # Rejection
+    get_document_info_for_rejection_query,
+    check_document_is_official_query,
+    get_document_generate_id_query,
+    update_document_to_rejected_query,
+    insert_rejection_record_query,
+    update_signers_to_rejected_query,
+    get_rejector_info_query,
+    check_user_is_signer_query,
+    # Save/Editing
+    update_document_reference_query,
+    update_document_content_query,
+    update_document_reference_and_content_query,
+    reset_document_to_draft_query,
+    # Signature Details
+    get_user_by_id_query,
+    get_document_basic_info_for_signature_query,
+    check_document_has_official_number_query,
+    check_user_exists_query,
+    check_user_is_document_signer_query,
+    # Start Signing
+    get_document_for_signing_start_query,
+    get_document_signers_for_pdf_query,
+    get_inactive_signers_query,
+    update_document_to_sent_to_sign_query,
+    # Unified Details
+    get_document_status_query_v2,
+    # Rejection History
+    get_document_rejections_history_query,
+    get_rejected_documents_for_user_query,
+    count_rejected_documents_for_user_query,
+    # Start Signing extras
+    update_document_signers_order_query,
+    get_document_draft_status_query,
+    get_user_full_name_query,
+    update_signer_status_to_signed_query,
+    # Super Sign
+    get_user_info_for_signing_query,
+    get_signer_role_and_document_status_query,
+    # Search Official
+    search_official_document_by_number_query,
+    # Embeddings
+    check_document_has_embeddings_query,
+)
+
+# === REPOSITORY ===
+from .repository import DocumentRepository
+
+# === BUILDER ===
+from .builder import DocumentBuilder
+
+# === VALIDATOR ===
+from .validator import DocumentValidator
+
+
+__all__ = [
+    # Queries - General
+    "get_excluded_types_clause",
+    "autocomplete_official_documents_query",
+    "get_document_type_query",
+    "insert_document_draft_query",
+    "insert_document_signer_query",
+    "get_document_details_for_editing_query",
+    "get_document_signers_query",
+    "get_document_rejection_info_query",
+    "get_document_status_query",
+    "delete_document_signers_query",
+    "insert_document_signer_ordered_query",
+    "get_official_document_info_query",
+    "get_all_display_states_query",
+    "get_display_state_by_code_query",
+    "get_all_state_mappings_query",
+    "get_all_document_types_query",
+    "get_preview_document_info_query",
+    # Queries - Deletion
+    "get_document_for_deletion_query",
+    "unlink_document_from_cases_query",
+    "soft_delete_document_query",
+    "get_user_info_for_deletion_query",
+    # Queries - Rejection
+    "get_document_info_for_rejection_query",
+    "check_document_is_official_query",
+    "get_document_generate_id_query",
+    "update_document_to_rejected_query",
+    "insert_rejection_record_query",
+    "update_signers_to_rejected_query",
+    "get_rejector_info_query",
+    "check_user_is_signer_query",
+    # Queries - Save/Editing
+    "update_document_reference_query",
+    "update_document_content_query",
+    "update_document_reference_and_content_query",
+    "reset_document_to_draft_query",
+    # Queries - Signature Details
+    "get_user_by_id_query",
+    "get_document_basic_info_for_signature_query",
+    "check_document_has_official_number_query",
+    "check_user_exists_query",
+    "check_user_is_document_signer_query",
+    # Queries - Start Signing
+    "get_document_for_signing_start_query",
+    "get_document_signers_for_pdf_query",
+    "get_inactive_signers_query",
+    "update_document_to_sent_to_sign_query",
+    # Queries - Unified Details
+    "get_document_status_query_v2",
+    # Queries - Rejection History
+    "get_document_rejections_history_query",
+    "get_rejected_documents_for_user_query",
+    "count_rejected_documents_for_user_query",
+    # Queries - Start Signing extras
+    "update_document_signers_order_query",
+    "get_document_draft_status_query",
+    "get_user_full_name_query",
+    "update_signer_status_to_signed_query",
+    # Queries - Super Sign
+    "get_user_info_for_signing_query",
+    "get_signer_role_and_document_status_query",
+    # Queries - Search Official
+    "search_official_document_by_number_query",
+    # Queries - Embeddings
+    "check_document_has_embeddings_query",
+    # Repository
+    "DocumentRepository",
+    # Builder
+    "DocumentBuilder",
+    # Validator
+    "DocumentValidator",
+]
