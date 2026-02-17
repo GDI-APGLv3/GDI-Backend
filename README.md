@@ -347,7 +347,7 @@ POST /documents/{doc_id}/start-signing
                 "email": "user@example.com",
                 "name": "Juan Pérez",
                 "document_reference": "MEMO-001",
-                "cta_url": "https://nuevogdi.framer.website/"
+                "cta_url": "https://gdilatam.com/"
               }
               │
               └─→ UPDATE users SET invited_at = NOW()
@@ -356,7 +356,7 @@ POST /documents/{doc_id}/start-signing
 **Características:**
 - ✅ Best-effort: No bloquea proceso de firma si email falla
 - ✅ Plantilla HTML personalizada con branding GDI
-- ✅ CTA link apunta a: https://nuevogdi.framer.website/
+- ✅ CTA link apunta a: https://gdilatam.com/
 - ✅ Tracking de invitaciones en `users.invited_at`
 - ⚠️ Requiere configurar `EMAIL_SERVICE_URL` y `EMAIL_API_KEY`
 

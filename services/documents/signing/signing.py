@@ -450,7 +450,7 @@ async def _send_user_invitations(inactive_signers: List[Dict], document_id: str,
 
                             <!-- Botón de acción principal -->
                             <div style="text-align: center; margin: 35px 0;">
-                                <a href="https://nuevogdi.framer.website/"
+                                <a href="https://gdilatam.com/"
                                    style="display: inline-block; background-color: #16158C;
                                           color: white; text-decoration: none; padding: 16px 32px;
                                           border-radius: 8px; font-weight: 600; font-size: 16px;
