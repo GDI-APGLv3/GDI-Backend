@@ -1,8 +1,8 @@
 """
-MCP Server HTTP - Transport Streamable HTTP para Railway.
+MCP Server HTTP - Transport Streamable HTTP para Fly.io.
 
 Este archivo expone el MCP Server via HTTP en lugar de stdio.
-Usar para deployments remotos (Railway, etc).
+Usar para deployments remotos (Fly.io, etc).
 
 Endpoint: POST/GET /mcp
 Health:   GET /health
@@ -29,22 +29,31 @@ sys.path.insert(0, backend_root)
 from dotenv import load_dotenv
 load_dotenv(os.path.join(backend_root, ".env"))
 
+from contextlib import asynccontextmanager
+import time as _time
+
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
+from api_gateway.rate_limiter import rate_limiter, get_client_ip, RateLimitExceeded
+from api_gateway.gateway_audit import log_mcp_tool_call
+from api_gateway.gateway_middleware import GatewayMiddleware
+
 # Imports MCP
 from api_gateway.auth_mcp import (
     validate_mcp_jwt,
     verify_mcp_token,
     get_email_from_userinfo,
+    extract_email_from_token,
     find_user_all_tenants,
     MultiTenantSelectionRequired
 )
 from api_gateway.context import create_context, MCPContext
-from api_gateway.tools import cases, documents, system, notes
+from api_gateway.tools import cases, documents, system, notes, records, memos, search
+from shared.exceptions import ValidationError, GDIBaseException
 
 # Imports REST API
 from api_gateway.rest_api import (
@@ -80,6 +89,36 @@ from api_gateway.rest_api import (
     api_get_archived_notes,
     api_archive_note,
     api_get_note_detail,
+    # Memos
+    api_get_memos,
+    api_get_sent_memos,
+    api_get_archived_memos,
+    api_get_memo_detail,
+    # Backup Sync
+    api_sync_schema,
+    api_sync_data,
+    # Busqueda semantica
+    api_semantic_search,
+    # Legajos (RLM)
+    api_search_records,
+    api_get_record,
+    api_create_record,
+    api_get_registry_families,
+    # RLM - Endpoints adicionales (Fase 2.6)
+    api_update_record,
+    api_update_record_field,
+    api_verify_record_field,
+    api_get_record_history,
+    api_generate_record_report,
+    api_get_record_relations,
+    api_create_record_relation,
+    api_delete_record_relation,
+    api_get_record_cases,
+    api_link_record_case,
+    api_unlink_record_case,
+    api_get_record_documents,
+    api_link_record_document,
+    api_unlink_record_document,
 )
 
 # Configurar logging (stderr para no interferir con stdout)
@@ -92,6 +131,23 @@ logger = logging.getLogger(__name__)
 
 # Versión del protocolo MCP
 MCP_PROTOCOL_VERSION = "2025-03-26"
+
+# Rate limit tiers
+MCP_IP_LIMIT = 60         # requests/min per IP
+MCP_USER_LIMIT = 30       # tool calls/min per user
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Lifespan: cleanup rate limiter every 5 min."""
+    async def _cleanup_loop():
+        while True:
+            await asyncio.sleep(300)
+            rate_limiter.cleanup()
+
+    task = asyncio.create_task(_cleanup_loop())
+    yield
+    task.cancel()
 
 # Store de sesiones activas (en producción usar Redis)
 sessions: Dict[str, Dict[str, Any]] = {}
@@ -157,7 +213,7 @@ EJEMPLOS:
 - "¿Tengo algo de Panadería Don Luis?" → search="Panadería Don Luis"
 - "Expedientes sobre habilitación comercial" → search="habilitación comercial"
 
-RESPUESTA: Lista con case_number, reference, ai_summary (resumen IA del expediente).
+RESPUESTA: Lista con case_number, reference, ai_summary (resumen IA del expediente), short_ai_summary (resumen corto 1-2 oraciones).
 Para ver historial completo → get_case_history con el case_id.""",
             "inputSchema": {
                 "type": "object",
@@ -167,7 +223,7 @@ Para ver historial completo → get_case_history con el case_id.""",
                     "page_size": {"type": "integer", "description": "Resultados por página (default 20, max 100)", "default": 20},
                     "search": {"type": "string", "description": "Buscar por número de expediente (ej: EE-2026-000017) o por referencia/asunto"},
                     "status": {"type": "string", "description": "Estado: active (en trámite), inactive, archived (cerrado)", "enum": ["active", "inactive", "archived"]},
-                    "date_filter": {"type": "string", "description": "Filtro temporal: today, week, month, year", "enum": ["today", "week", "month", "year"]},
+                    "date_filter": {"type": "string", "description": "Filtro temporal: hoy, ayer, ultimos_7_dias, ultimos_30_dias", "enum": ["hoy", "ayer", "ultimos_7_dias", "ultimos_30_dias"]},
                     "sector_filter": {"type": "string", "description": "Filtrar por sector (usar acronym del sector, ej: HAC, LEGAL)"}
                 },
                 "required": []
@@ -207,6 +263,7 @@ USA ESTA TOOL PARA:
 
 RESPUESTA INCLUYE:
 - ai_summary: RESUMEN INTELIGENTE del expediente
+- short_ai_summary: RESUMEN CORTO del expediente (1-2 oraciones)
 - movements: historial donde cada movimiento tiene:
   - created_at: fecha
   - message: acción realizada
@@ -335,6 +392,7 @@ USA ESTA TOOL PARA:
 
 RESPUESTA INCLUYE:
 - ai_summary: RESUMEN INTELIGENTE del contenido generado por IA
+- short_resume: RESUMEN CORTO del documento (1-2 oraciones)
 - state_category: 'editing' (borrador) o 'signing' (en proceso/firmado)
 - status: estado actual
 - details: firmantes, fechas, etc.
@@ -529,11 +587,17 @@ USA ESTA TOOL PARA:
 - "Crea un informe nuevo"
 - "Necesito hacer un dictamen"
 - "Quiero crear un documento"
+- "Crea una nota para el sector de tesorería" (document_type_acronym="NOTA", recipients con UUIDs de sectores)
+- "Necesito enviar un memo a Juan Pérez" (document_type_acronym="MEMO", recipients con UUIDs de usuarios)
 
 PARÁMETROS:
-- document_type_acronym: Tipo de documento (INF, DICT, etc.) - usa get_document_types para ver opciones
+- document_type_acronym: Tipo de documento (INF, DICT, NOTA, MEMO, etc.) - usa get_document_types para ver opciones
 - reference: Descripción/asunto del documento
 - case_id: Expediente a vincular (opcional)
+- recipients: Destinatarios para NOTA (sector UUIDs) o MEMO (user UUIDs).
+  Formato: {"to": ["uuid1"], "cc": [], "bcc": []}
+  - Para NOTA: los UUIDs son de sectores (usar get_sectors para obtenerlos)
+  - Para MEMO: los UUIDs son de usuarios
 
 RESPUESTA:
 - document_id: UUID del documento creado
@@ -546,9 +610,18 @@ FLUJO TÍPICO:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "document_type_acronym": {"type": "string", "description": "Acrónimo del tipo (INF, DICT, etc.)"},
+                    "document_type_acronym": {"type": "string", "description": "Acrónimo del tipo (INF, DICT, NOTA, MEMO, etc.)"},
                     "reference": {"type": "string", "description": "Descripción/asunto del documento"},
                     "case_id": {"type": "string", "description": "UUID del expediente a vincular (opcional)"},
+                    "recipients": {
+                        "type": "object",
+                        "description": "Destinatarios para NOTA (sector UUIDs) o MEMO (user UUIDs). Para NOTA: to/cc/bcc contienen UUIDs de sectores. Para MEMO: UUIDs de usuarios.",
+                        "properties": {
+                            "to":  {"type": "array", "items": {"type": "string", "format": "uuid"}, "description": "Destinatarios principales (UUIDs de sectores para NOTA, o usuarios para MEMO)"},
+                            "cc":  {"type": "array", "items": {"type": "string", "format": "uuid"}, "description": "Copia (UUIDs de sectores para NOTA, o usuarios para MEMO)"},
+                            "bcc": {"type": "array", "items": {"type": "string", "format": "uuid"}, "description": "Copia oculta (UUIDs de sectores para NOTA, o usuarios para MEMO)"}
+                        }
+                    },
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["document_type_acronym", "reference"]
@@ -593,6 +666,19 @@ RESPUESTA:
                                 "is_numerator": {"type": "boolean"}
                             }
                         }
+                    },
+                    "recipients": {
+                        "type": "object",
+                        "description": "Destinatarios para NOTA (opcional). Objeto con sectors y/o users",
+                        "properties": {
+                            "sectors": {"type": "array", "items": {"type": "object"}, "description": "Sectores destinatarios"},
+                            "users": {"type": "array", "items": {"type": "object"}, "description": "Usuarios destinatarios"}
+                        }
+                    },
+                    "proposed_case_ids": {
+                        "type": "array",
+                        "description": "IDs de expedientes a vincular al documento (opcional)",
+                        "items": {"type": "string"}
                     },
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
@@ -770,24 +856,6 @@ NOTA: A diferencia de link_document_to_case, esto propone un BORRADOR que luego 
             }
         },
         {
-            "name": "prepare_transfer",
-            "description": """Preparar transferencia - Obtiene sectores disponibles para transferir expediente.
-
-USA ESTA TOOL ANTES DE transfer_case para ver que sectores estan disponibles.
-
-RESPUESTA:
-- available_sectors: lista de sectores con sector_id, nombre y departamento
-- total: cantidad de sectores disponibles""",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "case_id": {"type": "string", "description": "UUID del expediente"},
-                    "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
-                },
-                "required": ["case_id"]
-            }
-        },
-        {
             "name": "reject_proposal",
             "description": """Rechazar propuesta - Rechaza un documento propuesto sin vincularlo.
 
@@ -927,6 +995,152 @@ PARAMETROS:
                 "required": ["note_id"]
             }
         },
+        # ===== MEMOS =====
+        {
+            "name": "get_memos",
+            "description": "Memos recibidos - Lista memos oficiales recibidos por el usuario. Similar a notas pero persona-a-persona.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "default": 1, "description": "Pagina"},
+                    "page_size": {"type": "integer", "default": 20, "description": "Resultados por pagina (max 100)"},
+                    "search": {"type": "string", "description": "Buscar en contenido de memos"},
+                    "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
+                }
+            }
+        },
+        {
+            "name": "get_sent_memos",
+            "description": "Obtener memos enviados por el usuario. Incluye destinatarios y estado de lectura.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "default": 1, "description": "Pagina"},
+                    "page_size": {"type": "integer", "default": 20, "description": "Resultados por pagina (max 100)"},
+                    "search": {"type": "string", "description": "Buscar en contenido de memos"},
+                    "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
+                }
+            }
+        },
+        {
+            "name": "get_archived_memos",
+            "description": "Obtener memos archivados por el usuario.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "default": 1, "description": "Pagina"},
+                    "page_size": {"type": "integer", "default": 20, "description": "Resultados por pagina (max 100)"},
+                    "search": {"type": "string", "description": "Buscar en contenido de memos"},
+                    "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
+                }
+            }
+        },
+        {
+            "name": "get_memo_detail",
+            "description": "Obtener detalle completo de un memo especifico. Incluye contenido, remitente, destinatarios y estado.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "memo_id": {"type": "string", "description": "UUID del memo/documento"},
+                    "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
+                },
+                "required": ["memo_id"]
+            }
+        },
+        # ===== LEGAJOS (RLM) =====
+        {
+            "name": "search_records",
+            "description": """📋 BUSCAR LEGAJOS - Busca en el Registro Legajo Multipropósito (RLM).
+
+USA ESTA TOOL PARA:
+- "Buscar legajos de arquitectura"
+- "Listar legajos activos"
+- "Buscar legajo por número"
+
+PARÁMETROS:
+- family_code: Código de familia (ARQ, LUM, ORD, etc.) - opcional
+- search: Texto de búsqueda (número o datos)
+- state: Filtro por estado
+- page/page_size: Paginación
+
+RESPUESTA: Lista de legajos con número, estado, registro, creador, resume (resumen IA).""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "family_code": {"type": "string", "description": "Código de familia de registro (ARQ, LUM, ORD)"},
+                    "search": {"type": "string", "description": "Texto de búsqueda"},
+                    "state": {"type": "string", "description": "Filtro por estado"},
+                    "page": {"type": "integer", "default": 1, "description": "Página"},
+                    "page_size": {"type": "integer", "default": 20, "description": "Resultados por página (max 100)"},
+                    "tenant_id": {"type": "string", "description": "UUID del tenant (opcional si solo tienes uno)"}
+                }
+            }
+        },
+        {
+            "name": "get_record",
+            "description": """📋 DETALLE DE LEGAJO - Obtiene información completa de un legajo.
+
+USA ESTA TOOL PARA:
+- "Dame detalles del legajo RLM-2026-00000001"
+- "Ver campos del legajo X"
+
+RESPUESTA: Detalle con datos enriquecidos, estado, registro, permisos del usuario, resume (resumen IA).""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string", "description": "UUID del legajo"},
+                    "tenant_id": {"type": "string", "description": "UUID del tenant (opcional si solo tienes uno)"}
+                },
+                "required": ["record_id"]
+            }
+        },
+        {
+            "name": "get_registry_families",
+            "description": """📋 FAMILIAS DE REGISTROS - Lista los tipos de registro disponibles en RLM.
+
+USA ESTA TOOL PARA:
+- "Qué tipos de legajos hay?"
+- "Ver registros disponibles"
+
+RESPUESTA: Lista de familias con código, nombre, data_schema y permisos del usuario.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string", "description": "UUID del tenant (opcional si solo tienes uno)"}
+                }
+            }
+        },
+        # ===== BUSQUEDA SEMANTICA =====
+        {
+            "name": "semantic_search",
+            "description": """🔍 BUSQUEDA SEMANTICA - Busca documentos oficiales por significado usando IA.
+
+USA ESTA TOOL PARA:
+- "Busca documentos sobre habilitaciones comerciales"
+- "Encontrar documentos relacionados con pavimentación"
+- "Documentos que hablen de multas o infracciones"
+
+A diferencia de search_documents (busca por número exacto), esta tool busca por SIGNIFICADO:
+- Encuentra documentos aunque no uses las palabras exactas
+- Busca en el contenido completo de cada documento
+- Filtra automáticamente por permisos del usuario
+
+RESPUESTA: Lista de documentos con similarity (0-1), chunk_text (fragmento relevante),
+official_number, reference, y vinculaciones a expedientes y legajos.
+
+PARAMETROS:
+- query: Texto de búsqueda (3-500 caracteres)
+- limit: Cantidad máxima de resultados (default 6, max 50)""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Texto de búsqueda semántica (3-500 caracteres)", "minLength": 3, "maxLength": 500},
+                    "limit": {"type": "integer", "description": "Cantidad máxima de resultados (default 6, max 50)", "default": 6, "minimum": 1, "maximum": 50},
+                    "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
+                },
+                "required": ["query"]
+            }
+        },
     ]
 
     return create_jsonrpc_response(request_id, {"tools": tools})
@@ -943,15 +1157,7 @@ async def handle_list_my_tenants(request_id: Any, authorization_header: str) -> 
         return create_jsonrpc_error(request_id, -32001, "Autenticación requerida. Usa OAuth para conectar.")
 
     token = authorization_header[7:]
-
-    try:
-        payload = verify_mcp_token(token)
-    except ValueError as e:
-        return create_jsonrpc_error(request_id, -32001, f"Token inválido: {str(e)}")
-
-    email = payload.get("email")
-    if not email:
-        email = get_email_from_userinfo(token)
+    email = extract_email_from_token(token)
 
     if not email:
         return create_jsonrpc_error(request_id, -32001, "No se pudo obtener email del token")
@@ -976,7 +1182,7 @@ async def handle_list_my_tenants(request_id: Any, authorization_header: str) -> 
     })
 
 
-async def handle_call_tool(request_id: Any, params: Dict, authorization_header: str = None) -> Dict:
+async def handle_call_tool(request_id: Any, params: Dict, authorization_header: str = None, correlation_id: str = None) -> Dict:
     """
     Maneja tools/call request.
 
@@ -1005,9 +1211,9 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             guide_content = guide_path.read_text(encoding="utf-8")
             result = {
                 "guide": guide_content,
-                "version": "2.2",
-                "tools_count": 32,
-                "last_updated": "2026-02-13"
+                "version": "3.0",
+                "tools_count": 31,
+                "last_updated": "2026-03-03"
             }
         else:
             result = {"error": "Guía no encontrada", "path": str(guide_path)}
@@ -1039,7 +1245,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         if authorization_header and authorization_header.startswith("Bearer "):
             try:
                 ctx, jwt_user_id = validate_mcp_jwt(authorization_header, tenant_id=tenant_id)
-                logger.info(f"[Auth0] Autenticación exitosa: user_id={jwt_user_id}, schema={ctx.schema_name}")
+                logger.info(f"[Auth0] Autenticación exitosa: user_id={jwt_user_id[:8]}..., schema={ctx.schema_name}")
             except MultiTenantSelectionRequired as e:
                 # Usuario tiene múltiples tenants y no especificó tenant_id
                 logger.info(f"[Auth0] Usuario multi-tenant sin selección: {len(e.tenants)} tenants")
@@ -1064,8 +1270,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                     "isError": True
                 })
             except ValueError as e:
-                logger.warning(f"[Auth0] Falló autenticación JWT: {e}")
-                # JWT inválido - ctx queda None y devolverá error de OAuth requerido
+                logger.warning(f"[Auth0] Falló autenticación: {e}")
                 ctx = None
 
         # =====================================================================
@@ -1083,9 +1288,43 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         if jwt_user_id:
             arguments["user_id"] = jwt_user_id
             arguments["municipality_id"] = ctx.municipality_id  # También inyectar municipality
-            logger.info(f"[Auth0] user_id inyectado desde JWT: {jwt_user_id}")
+            ctx.user_id = jwt_user_id  # Inyectar en contexto (usado por tools RLM)
+            logger.info(f"[Auth0] user_id inyectado desde JWT: {jwt_user_id[:8]}...")
+
+            # MIT-1: Validar que el usuario existe y está activo en el tenant
+            try:
+                from shared.utils import get_authenticated_user
+                get_authenticated_user(jwt_user_id, schema_name=ctx.schema_name)
+            except ValidationError as e:
+                logger.warning(f"[Auth0] user_id {jwt_user_id[:8]}... inválido o inactivo: {e}")
+                return create_jsonrpc_error(
+                    request_id,
+                    -32001,
+                    "Usuario inválido o inactivo."
+                )
+            except Exception as e:
+                logger.error(f"[Auth0] Error de infraestructura validando usuario {jwt_user_id[:8]}...: {e}")
+                return create_jsonrpc_error(
+                    request_id,
+                    -32603,
+                    "Error interno validando usuario. Intente nuevamente."
+                )
+        else:
+            logger.warning("[Auth0] JWT valido pero sin user_id extraible")
+            return create_jsonrpc_error(request_id, -32001, "Token sin user_id válido.")
+
+        # Rate limit per-user para MCP tool calls
+        try:
+            rate_limiter.check(f"mcp_user:{jwt_user_id}:{ctx.schema_name}", MCP_USER_LIMIT)
+        except RateLimitExceeded as e:
+            log_mcp_tool_call(
+                cid=correlation_id or "", user_id=jwt_user_id, schema=ctx.schema_name,
+                tool=tool_name, status="rate_limited", duration_ms=0,
+            )
+            return create_jsonrpc_error(request_id, -32029, f"Rate limit exceeded. Retry after {e.retry_after}s")
 
         # 3. EJECUTAR TOOL
+        _tool_start = _time.time()
         result = None
 
         if tool_name == "search_cases":
@@ -1097,28 +1336,29 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                 status=arguments.get("status"),
                 date_filter=arguments.get("date_filter"),
                 sector_filter=arguments.get("sector_filter"),
-                user_id=arguments.get("user_id")
+                user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_case":
             result = cases.get_case(
                 ctx=ctx,
                 case_id=arguments["case_id"],
-                user_id=arguments.get("user_id"),
+                user_id=arguments["user_id"],
                 include_documents=arguments.get("include_documents", False)
             )
 
         elif tool_name == "get_case_history":
             result = cases.get_case_history(
                 ctx=ctx,
-                case_id=arguments["case_id"]
+                case_id=arguments["case_id"],
+                user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_case_documents":
             result = cases.get_case_documents(
                 ctx=ctx,
                 case_id=arguments["case_id"],
-                user_id=arguments.get("user_id")
+                user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_case_permissions":
@@ -1144,7 +1384,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             result = await documents.get_document(
                 ctx=ctx,
                 document_id=arguments["document_id"],
-                user_id=arguments.get("user_id")
+                user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_document_types":
@@ -1167,7 +1407,8 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         elif tool_name == "get_document_content":
             result = documents.get_document_content(
                 ctx=ctx,
-                document_id=arguments["document_id"]
+                document_id=arguments["document_id"],
+                user_id=arguments["user_id"]
             )
 
         # ===== NUEVOS TOOLS DE OPERACIONES =====
@@ -1179,7 +1420,8 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                 document_type_acronym=arguments["document_type_acronym"],
                 reference=arguments["reference"],
                 user_id=arguments["user_id"],
-                case_id=arguments.get("case_id")
+                case_id=arguments.get("case_id"),
+                recipients=arguments.get("recipients")
             )
 
         elif tool_name == "save_document":
@@ -1189,7 +1431,9 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                 user_id=arguments["user_id"],
                 content=arguments.get("content"),
                 reference=arguments.get("reference"),
-                signers=arguments.get("signers")
+                signers=arguments.get("signers"),
+                recipients=arguments.get("recipients"),
+                proposed_case_ids=arguments.get("proposed_case_ids")
             )
 
         elif tool_name == "start_signing":
@@ -1204,7 +1448,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             result = cases.get_case_by_number(
                 ctx=ctx,
                 case_number=arguments["case_number"],
-                user_id=arguments.get("user_id")
+                user_id=arguments["user_id"]
             )
 
 
@@ -1216,7 +1460,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "assign_case":
-            result = cases.assign_case(
+            result = await cases.assign_case(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 target_sector_id=arguments["target_sector_id"],
@@ -1247,13 +1491,6 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 document_draft_id=arguments["document_draft_id"],
-                user_id=arguments["user_id"]
-            )
-
-        elif tool_name == "prepare_transfer":
-            result = cases.prepare_transfer(
-                ctx=ctx,
-                case_id=arguments["case_id"],
                 user_id=arguments["user_id"]
             )
 
@@ -1331,10 +1568,78 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                 user_id=arguments["user_id"]
             )
 
+        # ===== MEMOS =====
+        elif tool_name == "get_memos":
+            result = memos.get_memos(
+                ctx=ctx,
+                user_id=arguments["user_id"],
+                page=int(arguments.get("page", 1)),
+                page_size=int(arguments.get("page_size", 20)),
+                search=arguments.get("search")
+            )
+
+        elif tool_name == "get_sent_memos":
+            result = memos.get_sent_memos_tool(
+                ctx=ctx,
+                user_id=arguments["user_id"],
+                page=int(arguments.get("page", 1)),
+                page_size=int(arguments.get("page_size", 20)),
+                search=arguments.get("search")
+            )
+
+        elif tool_name == "get_archived_memos":
+            result = memos.get_archived_memos_tool(
+                ctx=ctx,
+                user_id=arguments["user_id"],
+                page=int(arguments.get("page", 1)),
+                page_size=int(arguments.get("page_size", 20)),
+                search=arguments.get("search")
+            )
+
+        elif tool_name == "get_memo_detail":
+            result = memos.get_memo_detail(
+                ctx=ctx,
+                memo_id=arguments.get("memo_id", ""),
+                user_id=arguments["user_id"]
+            )
+
+        # ===== LEGAJOS (RLM) =====
+        elif tool_name == "search_records":
+            result = records.search_records(
+                ctx=ctx,
+                family_code=arguments.get("family_code"),
+                search=arguments.get("search"),
+                state=arguments.get("state"),
+                page=int(arguments.get("page", 1)),
+                page_size=int(arguments.get("page_size", 20)),
+            )
+
+        elif tool_name == "get_record":
+            result = records.get_record_detail(
+                ctx=ctx,
+                record_id=arguments.get("record_id", ""),
+            )
+
+        elif tool_name == "get_registry_families":
+            result = records.get_registry_families(ctx=ctx)
+
+        elif tool_name == "semantic_search":
+            result = search.semantic_search_tool(
+                ctx=ctx,
+                query=arguments["query"],
+                limit=int(arguments.get("limit", 6))
+            )
+
         else:
+            _tool_ms = int((_time.time() - _tool_start) * 1000)
+            log_mcp_tool_call(cid=correlation_id or "", user_id=jwt_user_id, schema=ctx.schema_name,
+                              tool=tool_name, status="unknown_tool", duration_ms=_tool_ms)
             return create_jsonrpc_error(request_id, -32601, f"Tool desconocido: {tool_name}")
 
         # 4. RETORNAR RESULTADO
+        _tool_ms = int((_time.time() - _tool_start) * 1000)
+        log_mcp_tool_call(cid=correlation_id or "", user_id=jwt_user_id, schema=ctx.schema_name,
+                          tool=tool_name, status="ok", duration_ms=_tool_ms)
         return create_jsonrpc_response(request_id, {
             "content": [{
                 "type": "text",
@@ -1344,12 +1649,42 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         })
 
     except ValueError as e:
+        _tool_ms = int((_time.time() - _tool_start) * 1000) if '_tool_start' in locals() else 0
+        log_mcp_tool_call(cid=correlation_id or "", user_id=locals().get('jwt_user_id'),
+                          schema=ctx.schema_name if 'ctx' in dir() and ctx else None,
+                          tool=tool_name, status="validation_error", duration_ms=_tool_ms, error=str(e))
         logger.error(f"Error de validación en tool {tool_name}: {e}")
         return create_jsonrpc_response(request_id, {
             "content": [{"type": "text", "text": f"Error de validación: {str(e)}"}],
             "isError": True
         })
+    except GDIBaseException as e:
+        _tool_ms = int((_time.time() - _tool_start) * 1000) if '_tool_start' in locals() else 0
+        log_mcp_tool_call(cid=correlation_id or "", user_id=locals().get('jwt_user_id'),
+                          schema=ctx.schema_name if 'ctx' in dir() and ctx else None,
+                          tool=tool_name, status="business_error", duration_ms=_tool_ms, error=str(e))
+        logger.error(f"Error de negocio en tool {tool_name}: {e}")
+        error_data = {
+            "error_type": type(e).__name__,
+            "message": e.message,
+        }
+        if e.details:
+            error_data["details"] = e.details
+        if hasattr(e, "current_state") and e.current_state:
+            error_data["current_state"] = e.current_state
+        if hasattr(e, "required_state") and e.required_state:
+            error_data["required_state"] = e.required_state
+        if hasattr(e, "document_id"):
+            error_data["document_id"] = e.document_id
+        return create_jsonrpc_response(request_id, {
+            "content": [{"type": "text", "text": json.dumps(error_data, ensure_ascii=False)}],
+            "isError": True
+        })
     except Exception as e:
+        _tool_ms = int((_time.time() - _tool_start) * 1000) if '_tool_start' in locals() else 0
+        log_mcp_tool_call(cid=correlation_id or "", user_id=locals().get('jwt_user_id'),
+                          schema=ctx.schema_name if 'ctx' in dir() and ctx else None,
+                          tool=tool_name, status="error", duration_ms=_tool_ms, error=str(e))
         logger.exception(f"Error ejecutando tool {tool_name}")
         return create_jsonrpc_response(request_id, {
             "content": [{"type": "text", "text": f"Error interno: {str(e)}"}],
@@ -1357,7 +1692,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         })
 
 
-async def process_jsonrpc_request(body: Dict, authorization_header: str = None) -> Dict:
+async def process_jsonrpc_request(body: Dict, authorization_header: str = None, correlation_id: str = None) -> Dict:
     """Procesa una request JSON-RPC y retorna la respuesta."""
     method = body.get("method")
     params = body.get("params", {})
@@ -1377,7 +1712,7 @@ async def process_jsonrpc_request(body: Dict, authorization_header: str = None) 
         return await handle_list_tools(request_id)
 
     elif method == "tools/call":
-        return await handle_call_tool(request_id, params, authorization_header)
+        return await handle_call_tool(request_id, params, authorization_header, correlation_id)
 
     elif method == "ping":
         return create_jsonrpc_response(request_id, {})
@@ -1400,7 +1735,7 @@ async def openapi_spec(request: Request) -> JSONResponse:
     - Configurar OAuth 2.0 automáticamente
     """
     base_url = os.getenv("MCP_RESOURCE_URI", "http://localhost:8005")
-    auth0_domain = os.getenv("AUTH0_DOMAIN", "gdilatam.us.auth0.com")
+    auth0_domain = os.getenv("AUTH0_DOMAIN", "")
 
     spec = {
         "openapi": "3.0.3",
@@ -1420,7 +1755,7 @@ async def openapi_spec(request: Request) -> JSONResponse:
                     "parameters": [
                         {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Texto a buscar (número, referencia, contenido)"},
                         {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["active", "inactive", "archived"]}, "description": "Estado del expediente"},
-                        {"name": "date_filter", "in": "query", "schema": {"type": "string", "enum": ["today", "week", "month", "year"]}, "description": "Filtro temporal"},
+                        {"name": "date_filter", "in": "query", "schema": {"type": "string", "enum": ["hoy", "ayer", "ultimos_7_dias", "ultimos_30_dias"]}, "description": "Filtro temporal"},
                         {"name": "sector_filter", "in": "query", "schema": {"type": "string"}, "description": "Filtrar por sector (acronym)"},
                         {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}, "description": "Página"},
                         {"name": "page_size", "in": "query", "schema": {"type": "integer", "default": 20}, "description": "Resultados por página (max 100)"}
@@ -1710,7 +2045,7 @@ async def openapi_spec(request: Request) -> JSONResponse:
                 "post": {
                     "operationId": "createDocument",
                     "summary": "Crear documento",
-                    "description": "Crea un nuevo documento en estado borrador",
+                    "description": "Crea un nuevo documento en estado borrador. Soporta todos los tipos: INF, DICT, NOTA, MEMO, etc. Para NOTA/MEMO incluir recipients con to/cc/bcc.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1719,9 +2054,51 @@ async def openapi_spec(request: Request) -> JSONResponse:
                                     "type": "object",
                                     "required": ["document_type_acronym", "reference"],
                                     "properties": {
-                                        "document_type_acronym": {"type": "string", "description": "Acrónimo del tipo (INF, DICT, etc.)"},
+                                        "document_type_acronym": {"type": "string", "description": "Acrónimo del tipo (INF, DICT, NOTA, MEMO, etc.)"},
                                         "reference": {"type": "string", "description": "Descripción del documento"},
-                                        "case_id": {"type": "string", "description": "UUID del expediente a vincular (opcional)"}
+                                        "case_id": {"type": "string", "description": "UUID del expediente a vincular (opcional)"},
+                                        "recipients": {
+                                            "type": "object",
+                                            "description": "Destinatarios para NOTA (sector UUIDs) o MEMO (user UUIDs).",
+                                            "properties": {
+                                                "to":  {"type": "array", "items": {"type": "string", "format": "uuid"}, "description": "Destinatarios principales"},
+                                                "cc":  {"type": "array", "items": {"type": "string", "format": "uuid"}, "description": "Copia"},
+                                                "bcc": {"type": "array", "items": {"type": "string", "format": "uuid"}, "description": "Copia oculta"}
+                                            }
+                                        }
+                                    }
+                                },
+                                "examples": {
+                                    "informe": {
+                                        "summary": "Crear informe simple",
+                                        "value": {
+                                            "document_type_acronym": "INF",
+                                            "reference": "Informe de actividades mensuales"
+                                        }
+                                    },
+                                    "nota": {
+                                        "summary": "Crear NOTA entre sectores",
+                                        "value": {
+                                            "document_type_acronym": "NOTA",
+                                            "reference": "Solicitud de insumos de oficina",
+                                            "recipients": {
+                                                "to": ["<sector-uuid>"],
+                                                "cc": [],
+                                                "bcc": []
+                                            }
+                                        }
+                                    },
+                                    "memo": {
+                                        "summary": "Crear MEMO entre personas",
+                                        "value": {
+                                            "document_type_acronym": "MEMO",
+                                            "reference": "Convocatoria reunión de equipo",
+                                            "recipients": {
+                                                "to": ["<user-uuid>"],
+                                                "cc": [],
+                                                "bcc": []
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2240,6 +2617,278 @@ async def openapi_spec(request: Request) -> JSONResponse:
                     },
                     "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
                 }
+            },
+            "/api/v1/sync/schema": {
+                "get": {
+                    "operationId": "syncSchema",
+                    "summary": "Catálogo de tablas sincronizables (Backup)",
+                    "description": "Requiere X-API-Key backup. Sin rate limit. Informativo.",
+                    "parameters": [],
+                    "responses": {
+                        "200": {"description": "Catálogo de tablas con counts"},
+                        "401": {"description": "Acceso denegado"},
+                        "403": {"description": "Origen no autorizado"}
+                    },
+                    "security": [{"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/sync/data": {
+                "get": {
+                    "operationId": "syncData",
+                    "summary": "Datos incrementales de una tabla (Backup)",
+                    "description": "Requiere X-API-Key backup. Rate limit: usa rate_limit_per_minute de la key. since siempre obligatorio.",
+                    "parameters": [
+                        {"name": "table", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "since", "in": "query", "required": True, "schema": {"type": "string", "format": "date-time"}},
+                        {"name": "page", "in": "query", "required": False, "schema": {"type": "integer", "default": 1}},
+                        {"name": "page_size", "in": "query", "required": False, "schema": {"type": "integer", "default": 100, "maximum": 100}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Filas de la tabla"},
+                        "400": {"description": "Tabla no válida o parámetros faltantes"},
+                        "401": {"description": "Acceso denegado"},
+                        "403": {"description": "Origen no autorizado"},
+                        "429": {"description": "Rate limit (Retry-After header)"}
+                    },
+                    "security": [{"ApiKeyAuth": []}]
+                }
+            },
+            # ===== RLM (Registro Legajo Multiproposito) =====
+            "/api/v1/registries": {
+                "get": {
+                    "operationId": "getRegistryFamilies",
+                    "summary": "Listar familias de registro (tipos de legajo)",
+                    "description": "Devuelve las familias de legajo configuradas en el tenant (ARQ, LUM, ORD, etc.) con sus data_schema, estados y permisos.",
+                    "responses": {
+                        "200": {"description": "Lista de familias de registro"},
+                        "401": {"description": "No autorizado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/search": {
+                "get": {
+                    "operationId": "searchRecords",
+                    "summary": "Buscar legajos",
+                    "description": "Busca legajos por numero, display_name, campos data (JSONB), estado, familia. Soporta paginacion.",
+                    "parameters": [
+                        {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Texto a buscar"},
+                        {"name": "registry_family_id", "in": "query", "schema": {"type": "string"}, "description": "UUID de familia de registro"},
+                        {"name": "state", "in": "query", "schema": {"type": "string"}, "description": "Estado del legajo"},
+                        {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}},
+                        {"name": "page_size", "in": "query", "schema": {"type": "integer", "default": 20}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Lista de legajos"},
+                        "401": {"description": "No autorizado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records": {
+                "post": {
+                    "operationId": "createRecord",
+                    "summary": "Crear legajo",
+                    "description": "Crea un nuevo legajo en una familia. Requiere display_name y registry_family_id. Dispara generacion asincrona de resumen IA.",
+                    "responses": {
+                        "201": {"description": "Legajo creado"},
+                        "400": {"description": "Datos invalidos"},
+                        "401": {"description": "No autorizado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}": {
+                "get": {
+                    "operationId": "getRecord",
+                    "summary": "Detalle de legajo",
+                    "description": "Obtiene datos completos del legajo incluyendo data (JSONB), historial basico, resumen IA.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Detalle del legajo"},
+                        "404": {"description": "Legajo no encontrado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                },
+                "patch": {
+                    "operationId": "updateRecord",
+                    "summary": "Actualizar legajo",
+                    "description": "Actualiza display_name, state, next_expiration o data completo del legajo.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Legajo actualizado"},
+                        "404": {"description": "Legajo no encontrado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/fields/{field_name}": {
+                "patch": {
+                    "operationId": "updateRecordField",
+                    "summary": "Actualizar un campo individual del legajo",
+                    "description": "Actualiza un solo campo dentro del data JSONB del legajo.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "field_name", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Campo actualizado"},
+                        "404": {"description": "Legajo o campo no encontrado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/fields/{field_name}/verify": {
+                "post": {
+                    "operationId": "verifyRecordField",
+                    "summary": "Marcar campo como verificado",
+                    "description": "Marca un campo del legajo como verificado con timestamp y usuario.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "field_name", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Campo verificado"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/history": {
+                "get": {
+                    "operationId": "getRecordHistory",
+                    "summary": "Historial del legajo",
+                    "description": "Devuelve el historial de cambios del legajo enriquecido con contexto de documentos y expedientes vinculados.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Historial del legajo"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/report": {
+                "post": {
+                    "operationId": "generateRecordReport",
+                    "summary": "Generar informe IFRLM del legajo",
+                    "description": "Genera on-demand el Informe de Registro Legajo Multiproposito (IFRLM): PDF via PDFComposer, firma con Notary, sube a R2 y lo registra como documento oficial.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "201": {"description": "IFRLM generado y firmado"},
+                        "500": {"description": "Error en pipeline externo (PDFComposer/Notary/R2)"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/relations": {
+                "get": {
+                    "operationId": "getRecordRelations",
+                    "summary": "Relaciones del legajo",
+                    "description": "Lista relaciones del legajo con otros legajos (parent, child, related, replaces, sibling, cousin).",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Lista de relaciones"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                },
+                "post": {
+                    "operationId": "createRecordRelation",
+                    "summary": "Crear relacion entre legajos",
+                    "description": "Vincula dos legajos con un tipo de relacion.",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "201": {"description": "Relacion creada"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/relations/{relation_id}": {
+                "delete": {
+                    "operationId": "deleteRecordRelation",
+                    "summary": "Eliminar relacion entre legajos",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "relation_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "204": {"description": "Relacion eliminada"}
+                    },
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/cases": {
+                "get": {
+                    "operationId": "getRecordCases",
+                    "summary": "Expedientes vinculados al legajo",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "Lista de expedientes vinculados"}},
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                },
+                "post": {
+                    "operationId": "linkRecordCase",
+                    "summary": "Vincular expediente al legajo",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"201": {"description": "Expediente vinculado"}},
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/cases/{link_id}": {
+                "delete": {
+                    "operationId": "unlinkRecordCase",
+                    "summary": "Desvincular expediente del legajo",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "link_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"204": {"description": "Expediente desvinculado"}},
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/documents": {
+                "get": {
+                    "operationId": "getRecordDocuments",
+                    "summary": "Documentos vinculados al legajo",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "Lista de documentos vinculados"}},
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                },
+                "post": {
+                    "operationId": "linkRecordDocument",
+                    "summary": "Vincular documento al legajo",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"201": {"description": "Documento vinculado"}},
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
+            },
+            "/api/v1/records/{record_id}/documents/{link_id}": {
+                "delete": {
+                    "operationId": "unlinkRecordDocument",
+                    "summary": "Desvincular documento del legajo",
+                    "parameters": [
+                        {"name": "record_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "link_id", "in": "path", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"204": {"description": "Documento desvinculado"}},
+                    "security": [{"OAuth2": ["openid", "profile", "email"]}, {"ApiKeyAuth": []}]
+                }
             }
         },
         "components": {
@@ -2303,7 +2952,7 @@ async def mcp_manifest(request: Request) -> JSONResponse:
 
 
 async def root_endpoint(request: Request) -> JSONResponse:
-    """Root endpoint para health checks de Railway y browsers."""
+    """Root endpoint para health checks de Fly.io y browsers."""
     return JSONResponse({
         "service": "gdi-mcp-server",
         "status": "ok",
@@ -2315,7 +2964,7 @@ async def root_endpoint(request: Request) -> JSONResponse:
 
 
 async def health(request: Request) -> JSONResponse:
-    """Health check para Railway."""
+    """Health check para Fly.io."""
     return JSONResponse({
         "status": "ok",
         "service": "gdi-mcp-server",
@@ -2340,7 +2989,7 @@ async def oauth_protected_resource_metadata(request: Request) -> JSONResponse:
     Claude Code usa este endpoint para descubrir el Authorization Server (Auth0).
     Auth0 tiene DCR habilitado, así que apuntamos directo.
     """
-    auth0_domain = os.getenv("AUTH0_DOMAIN", "gdilatam.us.auth0.com")
+    auth0_domain = os.getenv("AUTH0_DOMAIN", "")
     resource_uri = os.getenv("MCP_RESOURCE_URI", "http://localhost:8005")
 
     return JSONResponse({
@@ -2369,7 +3018,7 @@ async def oauth_authorization_server_metadata(request: Request) -> JSONResponse:
     """
     import httpx
 
-    auth0_domain = os.getenv("AUTH0_DOMAIN", "gdilatam.us.auth0.com")
+    auth0_domain = os.getenv("AUTH0_DOMAIN", "")
     auth0_metadata_url = f"https://{auth0_domain}/.well-known/openid-configuration"
 
     try:
@@ -2378,7 +3027,18 @@ async def oauth_authorization_server_metadata(request: Request) -> JSONResponse:
             response.raise_for_status()
             auth0_metadata = response.json()
 
-            logger.info(f"[OAuth] Proxeando metadata de Auth0: {auth0_metadata_url}")
+            # Inyectar PKCE si Auth0 no lo incluye (ChatGPT lo requiere)
+            if "code_challenge_methods_supported" not in auth0_metadata:
+                auth0_metadata["code_challenge_methods_supported"] = ["S256", "plain"]
+
+            # Filtrar scopes a solo los que soportamos (ChatGPT pide todos los listados)
+            auth0_metadata["scopes_supported"] = ["openid", "profile", "email", "offline_access"]
+
+            # Asegurar registration_endpoint para DCR
+            if "registration_endpoint" not in auth0_metadata:
+                auth0_metadata["registration_endpoint"] = f"https://{auth0_domain}/oidc/register"
+
+            logger.info(f"[OAuth] Proxeando metadata de Auth0 (enriched): {auth0_metadata_url}")
             return JSONResponse(auth0_metadata)
 
     except Exception as e:
@@ -2418,6 +3078,17 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
     session_id = request.headers.get("mcp-session-id")
 
     if request.method == "POST":
+        # Rate limit per-IP para MCP
+        client_ip = get_client_ip(request)
+        try:
+            rate_limiter.check(f"mcp_ip:{client_ip}", MCP_IP_LIMIT)
+        except RateLimitExceeded as e:
+            return JSONResponse(
+                create_jsonrpc_error(None, -32029, f"Rate limit exceeded. Retry after {e.retry_after}s"),
+                status_code=429,
+                headers={"Retry-After": str(e.retry_after)}
+            )
+
         try:
             body = await request.json()
         except Exception as e:
@@ -2450,8 +3121,9 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
                 }
             )
 
-        # Procesar request (pasar Authorization para tools/call)
-        response = await process_jsonrpc_request(body, authorization_header)
+        # Procesar request (pasar Authorization y correlation_id para tools/call)
+        cid = getattr(request.state, "correlation_id", None) or str(uuid.uuid4())
+        response = await process_jsonrpc_request(body, authorization_header, correlation_id=cid)
 
         # Si es notification, retornar 202 Accepted
         if response is None:
@@ -2514,6 +3186,7 @@ routes = [
 
     # OAuth 2.0 Protected Resource Metadata (RFC 9728)
     # Apunta directo a Auth0 (tiene DCR nativo habilitado)
+    Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource_metadata, methods=["GET"]),
     Route("/.well-known/oauth-protected-resource", oauth_protected_resource_metadata, methods=["GET"]),
 
     # OAuth 2.0 Authorization Server Metadata (RFC 8414)
@@ -2586,19 +3259,64 @@ routes = [
     Route("/api/v1/notes/archived", api_get_archived_notes, methods=["GET"]),
     Route("/api/v1/notes/{note_id}/archive", api_archive_note, methods=["PATCH"]),
     Route("/api/v1/notes/{note_id}", api_get_note_detail, methods=["GET"]),
+
+    # === Memos ===
+    Route("/api/v1/memos/received", api_get_memos, methods=["GET"]),
+    Route("/api/v1/memos/sent", api_get_sent_memos, methods=["GET"]),
+    Route("/api/v1/memos/archived", api_get_archived_memos, methods=["GET"]),
+    Route("/api/v1/memos/{memo_id}", api_get_memo_detail, methods=["GET"]),
+
+    # === Backup Sync (X-API-Key con key_type='backup', sin X-User-ID) ===
+    Route("/api/v1/sync/schema", api_sync_schema, methods=["GET"]),
+    Route("/api/v1/sync/data", api_sync_data, methods=["GET"]),
+    # Busqueda semantica
+    Route("/api/v1/search/semantic", api_semantic_search, methods=["GET"]),
+    # Legajos (RLM)
+    Route("/api/v1/records/search", api_search_records, methods=["GET"]),
+    Route("/api/v1/records/{record_id}/fields/{field_name}/verify", api_verify_record_field, methods=["POST"]),
+    Route("/api/v1/records/{record_id}/fields/{field_name}", api_update_record_field, methods=["PATCH"]),
+    Route("/api/v1/records/{record_id}/history", api_get_record_history, methods=["GET"]),
+    Route("/api/v1/records/{record_id}/report", api_generate_record_report, methods=["POST"]),
+    Route("/api/v1/records/{record_id}/relations/{relation_id}", api_delete_record_relation, methods=["DELETE"]),
+    Route("/api/v1/records/{record_id}/relations", api_get_record_relations, methods=["GET"]),
+    Route("/api/v1/records/{record_id}/relations", api_create_record_relation, methods=["POST"]),
+    Route("/api/v1/records/{record_id}/cases/{link_id}", api_unlink_record_case, methods=["DELETE"]),
+    Route("/api/v1/records/{record_id}/cases", api_get_record_cases, methods=["GET"]),
+    Route("/api/v1/records/{record_id}/cases", api_link_record_case, methods=["POST"]),
+    Route("/api/v1/records/{record_id}/documents/{link_id}", api_unlink_record_document, methods=["DELETE"]),
+    Route("/api/v1/records/{record_id}/documents", api_get_record_documents, methods=["GET"]),
+    Route("/api/v1/records/{record_id}/documents", api_link_record_document, methods=["POST"]),
+    Route("/api/v1/records/{record_id}", api_get_record, methods=["GET"]),
+    Route("/api/v1/records/{record_id}", api_update_record, methods=["PATCH"]),
+    Route("/api/v1/records", api_create_record, methods=["POST"]),
+    Route("/api/v1/registries", api_get_registry_families, methods=["GET"]),
 ]
 
-# Crear aplicación Starlette
-app = Starlette(routes=routes)
+# Construir lista de origenes CORS permitidos
+_allowed_origins = (
+    [f"http://localhost:{port}" for port in range(3000, 3051)] +
+    [f"http://127.0.0.1:{port}" for port in range(3000, 3051)] +
+    [f"http://localhost:{port}" for port in range(8000, 8051)] +
+    [f"http://127.0.0.1:{port}" for port in range(8000, 8051)]
+)
+_frontend_urls = os.getenv("FRONTEND_URL", "")
+for _url in _frontend_urls.split(","):
+    _url = _url.strip()
+    if _url:
+        _allowed_origins.append(_url)
 
-# Agregar CORS para clientes browser
+# Crear aplicación Starlette con lifespan
+app = Starlette(routes=routes, lifespan=lifespan)
+
+# Agregar middlewares (orden: CORS primero, luego Gateway)
+app.add_middleware(GatewayMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, restringir
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["Mcp-Session-Id", "MCP-Protocol-Version"]
+    expose_headers=["Mcp-Session-Id", "MCP-Protocol-Version", "X-Correlation-ID"]
 )
 
 
@@ -2650,6 +3368,10 @@ if __name__ == "__main__":
     logger.info(f"  - GET /api/v1/system/sectors")
     logger.info(f"  - GET /api/v1/system/users/{{user_id}}")
     logger.info(f"  - GET /api/v1/system/case-templates")
+    logger.info(f"")
+    logger.info(f"Backup Sync API (X-API-Key backup, sin X-User-ID):")
+    logger.info(f"  - GET /api/v1/sync/schema")
+    logger.info(f"  - GET /api/v1/sync/data")
     logger.info("=" * 60)
 
     uvicorn.run(app, host="0.0.0.0", port=port)

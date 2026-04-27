@@ -23,6 +23,12 @@ from services.notes.validation import (
     validate_recipients_input
 )
 from services.notes.save_recipients import save_recipients
+from services.memos.validation import (
+    is_memo_document_type_by_acronym,
+    validate_memo_recipients_exist,
+    validate_memo_recipients_input
+)
+from services.memos.save_recipients import save_memo_recipients
 
 logger = get_logger(__name__)
 
@@ -108,8 +114,9 @@ def create_document(
 
     _validate_creation_inputs(document_type_acronym, reference, creator_id)
 
-    # Detectar si es NOTA
+    # Detectar si es NOTA o MEMO
     is_nota = is_nota_document_type_by_acronym(document_type_acronym, schema_name=schema_name)
+    is_memo = is_memo_document_type_by_acronym(document_type_acronym, schema_name=schema_name)
     normalized_recipients = None
 
     # Validar recipients si es NOTA y se proporcionan
@@ -122,9 +129,15 @@ def create_document(
     elif is_nota:
         # NOTA sin recipients es válido - se pueden agregar después
         logger.info(f"Creando NOTA sin recipients iniciales (se pueden agregar al guardar)")
+    elif is_memo and recipients:
+        # MEMO: validar recipients (user_ids en vez de sector_ids)
+        normalized_recipients = validate_memo_recipients_input(recipients)
+    elif is_memo:
+        # MEMO sin recipients es válido - se pueden agregar después
+        logger.info(f"Creando MEMO sin recipients iniciales (se pueden agregar al guardar)")
     elif recipients:
-        # Si no es NOTA pero se enviaron recipients, ignorar con warning
-        logger.warning(f"Se enviaron recipients para documento tipo '{document_type_acronym}' que no es NOTA - ignorados")
+        # Si no es NOTA ni MEMO pero se enviaron recipients, ignorar con warning
+        logger.warning(f"Se enviaron recipients para documento tipo '{document_type_acronym}' que no es NOTA ni MEMO - ignorados")
 
     with get_db_connection(schema_name) as conn:
         with conn.cursor() as cursor:
@@ -157,9 +170,22 @@ def create_document(
                         schema_name=schema_name
                     )
 
+                # Si es MEMO con recipients, guardarlos en la misma transacción
+                if is_memo and normalized_recipients:
+                    # Validar que los users existan (usa el mismo cursor)
+                    validate_memo_recipients_exist(
+                        cursor, normalized_recipients, creator_id,
+                        schema_name=schema_name
+                    )
+                    # Guardar recipients (sender_user_id = creator_id)
+                    recipients_count = save_memo_recipients(
+                        cursor, document_id, creator_id, normalized_recipients,
+                        schema_name=schema_name
+                    )
+
                 conn.commit()
 
-                logger.info(f"Documento {document_id} creado exitosamente" + (f" con {recipients_count} recipients" if is_nota else ""))
+                logger.info(f"Documento {document_id} creado exitosamente" + (f" con {recipients_count} recipients" if (is_nota or is_memo) else ""))
 
                 response = {
                     "success": True,
@@ -178,6 +204,11 @@ def create_document(
                 # Agregar info de recipients si es NOTA
                 if is_nota:
                     response["is_nota"] = True
+                    response["recipients_count"] = recipients_count
+
+                # Agregar info de recipients si es MEMO
+                if is_memo:
+                    response["is_memo"] = True
                     response["recipients_count"] = recipients_count
 
                 return response

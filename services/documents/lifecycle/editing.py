@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from shared.logging import get_logger
 from database import get_db_connection, get_db_cursor, execute_transaction
 from shared.exceptions import DocumentNotFoundError, ValidationError, DocumentStateError
-from shared.validation import validate_document_id, validate_required_string, validate_document_signers
+from shared.validation import validate_document_id, validate_required_string, validate_document_signers, sanitize_html
 from config.constants import EDITABLE_DOCUMENT_STATES, SAVE_SUCCESS_MESSAGE, SAVE_NO_CHANGES_ERROR
 from ..core.queries import (
     get_document_details_for_editing_query,
@@ -140,38 +140,73 @@ def _extract_html_content_from_document_json(content_json: Optional[Dict]) -> st
     return content_json.get('html') or content_json.get('detalle', '')
 
 
-def _fetch_document_recipients(document_id: str, *, schema_name: str) -> Optional[Dict[str, List]]:
-    """Obtiene los recipients de un documento NOTA para edición.
+def _fetch_document_recipients(document_id: str, document_type_source: str = None, *, schema_name: str) -> Optional[Dict[str, List]]:
+    """Obtiene los recipients de un documento NOTA o MEMO para edición.
 
     El creador siempre ve todos los recipients (TO, CC, BCC) en modo edición.
+
+    Args:
+        document_id: UUID del documento
+        document_type_source: Tipo de documento ('NOTA', 'MEMO', etc.)
+        schema_name: Schema del tenant
     """
-    from services.notes.queries import get_recipients_by_document_query
+    if document_type_source == 'MEMO':
+        from services.memos.queries import get_recipients_by_document_query as get_memo_recipients_query
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_recipients_by_document_query(), (document_id,))
-            all_recipients = cursor.fetchall()
+        with get_db_connection(schema_name) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(get_memo_recipients_query(), (document_id,))
+                all_recipients = cursor.fetchall()
 
-            if not all_recipients:
-                return None
+                if not all_recipients:
+                    return None
 
-            result = {'to': [], 'cc': [], 'bcc': []}
+                result = {'to': [], 'cc': [], 'bcc': []}
 
-            for r in all_recipients:
-                recipient_data = {
-                    'sector_id': str(r['sector_id']),
-                    'acronym': r['sector_acronym'],
-                    'department_name': r['department_name']
-                }
+                for r in all_recipients:
+                    recipient_data = {
+                        'user_id': str(r['recipient_user_id']),
+                        'name': r['recipient_name'],
+                        'sector_acronym': r['recipient_sector_acronym'] or ''
+                    }
 
-                if r['recipient_type'] == 'TO':
-                    result['to'].append(recipient_data)
-                elif r['recipient_type'] == 'CC':
-                    result['cc'].append(recipient_data)
-                elif r['recipient_type'] == 'BCC':
-                    result['bcc'].append(recipient_data)
+                    if r['recipient_type'] == 'TO':
+                        result['to'].append(recipient_data)
+                    elif r['recipient_type'] == 'CC':
+                        result['cc'].append(recipient_data)
+                    elif r['recipient_type'] == 'BCC':
+                        result['bcc'].append(recipient_data)
 
-            return result
+                return result
+    else:
+        # Default: NOTA recipients (sector-based)
+        from services.notes.queries import get_recipients_by_document_query
+
+        with get_db_connection(schema_name) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(get_recipients_by_document_query(), (document_id,))
+                all_recipients = cursor.fetchall()
+
+                if not all_recipients:
+                    return None
+
+                result = {'to': [], 'cc': [], 'bcc': []}
+
+                for r in all_recipients:
+                    recipient_data = {
+                        'sector_id': str(r['sector_id']),
+                        'acronym': r['sector_acronym'],
+                        'department_name': r['department_name']
+                    }
+
+                    if r['recipient_type'] == 'TO':
+                        result['to'].append(recipient_data)
+                    elif r['recipient_type'] == 'CC':
+                        result['cc'].append(recipient_data)
+                    elif r['recipient_type'] == 'BCC':
+                        result['bcc'].append(recipient_data)
+
+                return result
 
 
 def _fetch_proposed_cases(document_id: str, *, schema_name: str) -> List[Dict]:
@@ -270,7 +305,7 @@ def _build_proposed_cases_update_operations(
 def _build_document_type_info(document: Dict[str, Any]) -> Dict[str, str]:
     """Construye la informacion del tipo de documento."""
     doc_type_source = document.get('document_type_source')
-    logger.debug(f"document_type_source from DB: {doc_type_source}")
+    logger.info(f"[DEBUG] document_type_source from DB: {doc_type_source}")
     return {
         "name": document['document_type_name'] or "Sin tipo",
         "acronym": document['document_type_acronym'] or "",
@@ -317,12 +352,16 @@ def _build_complete_document_response(
         "updated_at": document['last_modified_at'].isoformat() if document['last_modified_at'] else None,
         "is_imported": is_imported,
         "pdf_url": pdf_url,
-        "resume": document.get('resume')
+        "resume": document.get('resume'),
+        "short_resume": document.get('short_resume')
     }
 
-    # Incluir recipients solo si es tipo NOTA
+    # Incluir recipients si es tipo NOTA o MEMO
     if recipients is not None:
-        response["recipients"] = recipients
+        if document.get('document_type_source') == 'MEMO':
+            response["memo_recipients"] = recipients
+        else:
+            response["recipients"] = recipients
 
     # Incluir proposed_cases si existen
     if proposed_cases is not None:
@@ -381,18 +420,20 @@ def _process_recipients_update(
     recipients: Dict,
     sender_sector_id: Optional[str],
     *,
+    sender_user_id: Optional[str] = None,
     schema_name: str
 ) -> None:
     """
-    Procesa la actualización de recipients para documentos NOTA.
+    Procesa la actualización de recipients para documentos NOTA o MEMO.
 
-    Solo procesa si el documento es tipo NOTA. Para otros tipos, ignora silenciosamente.
+    Solo procesa si el documento es tipo NOTA o MEMO. Para otros tipos, ignora silenciosamente.
 
     Args:
         cursor: Cursor de la transacción padre
         document_id: UUID del documento
         recipients: Dict con {to: [], cc: [], bcc: []}
-        sender_sector_id: UUID del sector emisor
+        sender_sector_id: UUID del sector emisor (para NOTA)
+        sender_user_id: UUID del usuario emisor (para MEMO)
         schema_name: Schema del tenant
     """
     from services.notes.validation import (
@@ -401,29 +442,56 @@ def _process_recipients_update(
         validate_recipients_exist
     )
     from services.notes.save_recipients import save_recipients, delete_recipients
+    from services.memos.validation import (
+        is_memo_document_type_by_id,
+        validate_memo_recipients_input,
+        validate_memo_recipients_exist
+    )
+    from services.memos.save_recipients import save_memo_recipients, delete_memo_recipients
 
-    # Verificar que es NOTA
-    if not is_nota_document_type_by_id(document_id, cursor, schema_name=schema_name):
-        logger.debug(f"Documento {document_id} no es NOTA, ignorando recipients")
+    # Verificar si es NOTA
+    if is_nota_document_type_by_id(document_id, cursor, schema_name=schema_name):
+        # Validar y normalizar formato (incluye deduplicación)
+        normalized = validate_recipients_input(recipients)
+
+        # Validar que sectores existan (si hay recipients)
+        has_recipients = normalized.get('to') or normalized.get('cc') or normalized.get('bcc')
+        if has_recipients:
+            if not sender_sector_id:
+                raise ValidationError("Se requiere sender_sector_id para guardar recipients en NOTA")
+            validate_recipients_exist(cursor, normalized, sender_sector_id, schema_name=schema_name)
+
+        # Borrar existentes y guardar nuevos
+        deleted_count = delete_recipients(cursor, document_id)
+        if has_recipients:
+            saved_count = save_recipients(cursor, document_id, sender_sector_id, normalized, schema_name=schema_name)
+            logger.info(f"NOTA recipients actualizados: {deleted_count} eliminados, {saved_count} guardados")
+        else:
+            logger.info(f"NOTA recipients eliminados: {deleted_count} (lista vacía)")
         return
 
-    # Validar y normalizar formato (incluye deduplicación)
-    normalized = validate_recipients_input(recipients)
+    # Verificar si es MEMO
+    if is_memo_document_type_by_id(document_id, cursor, schema_name=schema_name):
+        # Validar y normalizar formato (incluye deduplicación)
+        normalized = validate_memo_recipients_input(recipients)
 
-    # Validar que sectores existan (si hay recipients)
-    has_recipients = normalized.get('to') or normalized.get('cc') or normalized.get('bcc')
-    if has_recipients:
-        if not sender_sector_id:
-            raise ValidationError("Se requiere sender_sector_id para guardar recipients en NOTA")
-        validate_recipients_exist(cursor, normalized, sender_sector_id, schema_name=schema_name)
+        # Validar que usuarios existan (si hay recipients)
+        has_recipients = normalized.get('to') or normalized.get('cc') or normalized.get('bcc')
+        if has_recipients:
+            if not sender_user_id:
+                raise ValidationError("Se requiere sender_user_id para guardar recipients en MEMO")
+            validate_memo_recipients_exist(cursor, normalized, sender_user_id, schema_name=schema_name)
 
-    # Borrar existentes y guardar nuevos
-    deleted_count = delete_recipients(cursor, document_id)
-    if has_recipients:
-        saved_count = save_recipients(cursor, document_id, sender_sector_id, normalized, schema_name=schema_name)
-        logger.info(f"Recipients actualizados: {deleted_count} eliminados, {saved_count} guardados")
-    else:
-        logger.info(f"Recipients eliminados: {deleted_count} (lista vacía)")
+        # Borrar existentes y guardar nuevos
+        deleted_count = delete_memo_recipients(cursor, document_id, schema_name=schema_name)
+        if has_recipients:
+            saved_count = save_memo_recipients(cursor, document_id, sender_user_id, normalized, schema_name=schema_name)
+            logger.info(f"MEMO recipients actualizados: {deleted_count} eliminados, {saved_count} guardados")
+        else:
+            logger.info(f"MEMO recipients eliminados: {deleted_count} (lista vacía)")
+        return
+
+    logger.debug(f"Documento {document_id} no es NOTA ni MEMO, ignorando recipients")
 
 
 def get_document_details_for_editing(document_id: str, *, schema_name: str) -> Dict[str, Any]:
@@ -456,11 +524,12 @@ def get_document_details_for_editing(document_id: str, *, schema_name: str) -> D
         except Exception as e:
             logger.warning(f"No se pudo obtener PDF URL para documento {document_id}: {e}")
 
-    # Obtener recipients si es tipo NOTA
+    # Obtener recipients si es tipo NOTA o MEMO
     recipients = None
-    if document.get('document_type_source') == 'NOTA':
-        logger.info(f"Documento {document_id} es NOTA, obteniendo recipients...")
-        recipients = _fetch_document_recipients(document_id, schema_name=schema_name)
+    document_type_source = document.get('document_type_source')
+    if document_type_source in ('NOTA', 'MEMO'):
+        logger.info(f"Documento {document_id} es {document_type_source}, obteniendo recipients...")
+        recipients = _fetch_document_recipients(document_id, document_type_source=document_type_source, schema_name=schema_name)
         if recipients:
             logger.info(f"Recipients cargados: TO={len(recipients.get('to', []))}, CC={len(recipients.get('cc', []))}, BCC={len(recipients.get('bcc', []))}")
         else:
@@ -509,6 +578,10 @@ def save_document_changes(
     _validate_document_can_be_edited(document_id, schema_name=schema_name)
     _validate_document_update_data(reference, content, signers, schema_name=schema_name)
 
+    # Sanitizar HTML para prevenir XSS stored
+    if content:
+        content = sanitize_html(content)
+
     # Tratar string vacio como None para la validacion de cambios
     effective_content = content if content else None
     if reference is None and effective_content is None and signers is None and recipients is None and proposed_case_ids is None:
@@ -545,10 +618,11 @@ def save_document_changes(
         for query, params in operations:
             cursor.execute(query, params)
 
-        # Procesar recipients si se enviaron (solo para NOTA)
+        # Procesar recipients si se enviaron (para NOTA o MEMO)
         if recipients is not None:
             _process_recipients_update(
                 cursor, document_id, recipients, sender_sector_id,
+                sender_user_id=user_id,
                 schema_name=schema_name
             )
 

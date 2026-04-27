@@ -13,10 +13,39 @@ from services.documents.signing import start_document_signing_process
 from services.documents.signing.unified_signing import super_sign_document
 from services.documents.lifecycle.rejection import reject_document as reject_doc_service
 from services.documents.lifecycle.deletion import delete_document as delete_doc_service
-from shared.exceptions import ValidationError, NotFoundError, DocumentNotFoundError, DocumentStateError, AuthorizationError
+from shared.exceptions import ValidationError, NotFoundError, DocumentNotFoundError, DocumentStateError, AuthorizationError, GDIBaseException
+from services.documents.permissions import can_user_view_document
 from database import execute_query
+from api_gateway.tools._sanitize import strip_storage_urls
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_sender_sector_id(user_id: str, *, schema_name: str):
+    """Resuelve el sector_id del usuario para crear/editar documentos.
+    Priority 1: sector principal del usuario (users.sector_id)
+    Priority 2: primer sector con permiso can_edit (user_sector_permissions)
+    """
+    return execute_query(
+        """
+        SELECT sector_id FROM (
+            SELECT s.id as sector_id, 1 as priority
+            FROM users u
+            JOIN sectors s ON u.sector_id = s.id
+            WHERE u.id = %s AND s.is_active = true
+
+            UNION ALL
+
+            SELECT s.id as sector_id, 2 as priority
+            FROM user_sector_permissions usp
+            JOIN sectors s ON usp.sector_id = s.id
+            WHERE usp.user_id = %s AND usp.can_edit = true AND s.is_active = true
+        ) sub
+        ORDER BY priority
+        LIMIT 1
+        """,
+        (user_id, user_id), schema_name=schema_name
+    )
 
 
 def _get_linked_case(document_id: str, schema_name: str) -> Optional[Dict[str, Any]]:
@@ -150,7 +179,7 @@ def search_documents(
 async def get_document(
     ctx: MCPContext,
     document_id: str,
-    user_id: Optional[str] = None
+    user_id: str
 ) -> Dict[str, Any]:
     """
     Obtener detalle completo de un documento en cualquier estado.
@@ -159,7 +188,7 @@ async def get_document(
     Args:
         ctx: Contexto MCP con schema_name
         document_id: UUID del documento
-        user_id: UUID del usuario (opcional, requerido para docs en proceso de firma)
+        user_id: UUID del usuario (requerido para verificacion de permisos)
 
     Returns:
         Dict con detalles del documento según su estado:
@@ -168,11 +197,33 @@ async def get_document(
         - linked_case: expediente vinculado (si existe)
 
     Raises:
+        ValueError: Si user_id no proporcionado o sin permisos
         DocumentNotFoundError: Si el documento no existe
         ValidationError: Si el documento no puede ser accedido
         RuntimeError: Si hay error de BD
     """
     logger.info(f"[MCP] get_document - document_id={document_id}, schema={ctx.schema_name}, user_id={user_id}")
+
+    if not user_id:
+        raise ValueError("user_id es requerido")
+
+    # Verificar existencia antes de permisos para retornar 404 en vez de 403
+    exists = execute_query(
+        """
+        SELECT 1 FROM document_draft WHERE id = %s AND is_deleted = false
+        UNION ALL
+        SELECT 1 FROM official_documents WHERE id = %s AND signed_at IS NOT NULL
+        LIMIT 1
+        """,
+        (document_id, document_id),
+        fetch=True,
+        schema_name=ctx.schema_name
+    )
+    if not exists:
+        raise DocumentNotFoundError(f"Documento {document_id} no encontrado")
+
+    if not can_user_view_document(document_id, user_id, schema_name=ctx.schema_name):
+        raise ValueError("Usuario no tiene permisos para ver este documento")
 
     try:
         # Usar servicio unificado que funciona con cualquier estado
@@ -192,7 +243,7 @@ async def get_document(
             logger.info(f"[MCP] get_document - sin expediente vinculado")
 
         logger.info(f"[MCP] get_document - documento encontrado, estado: {result.get('status')}")
-        return result
+        return strip_storage_urls(result)
 
     except DocumentNotFoundError as e:
         logger.error(f"[MCP] get_document - documento no encontrado: {e}")
@@ -324,7 +375,8 @@ def get_pending_signatures(
 
 def get_document_content(
     ctx: MCPContext,
-    document_id: str
+    document_id: str,
+    user_id: str
 ) -> Dict[str, Any]:
     """
     Obtener contenido HTML de un documento oficial.
@@ -332,16 +384,24 @@ def get_document_content(
     Args:
         ctx: Contexto MCP con schema_name
         document_id: UUID del documento oficial
+        user_id: UUID del usuario (requerido para verificacion de permisos)
 
     Returns:
         Dict con document_id, official_number, reference, content (html),
         document_type, signed_at
 
     Raises:
+        ValueError: Si user_id no proporcionado o sin permisos
         DocumentNotFoundError: Si el documento no existe
         RuntimeError: Si hay error de BD
     """
-    logger.info(f"[MCP] get_document_content - document_id={document_id}, schema={ctx.schema_name}")
+    logger.info(f"[MCP] get_document_content - document_id={document_id}, schema={ctx.schema_name}, user_id={user_id}")
+
+    if not user_id:
+        raise ValueError("user_id es requerido")
+
+    if not can_user_view_document(document_id, user_id, schema_name=ctx.schema_name):
+        raise ValueError("Usuario no tiene permisos para ver este documento")
 
     try:
         from services.documents.content import get_official_document_content
@@ -365,7 +425,8 @@ def create_document(
     document_type_acronym: str,
     reference: str,
     user_id: str,
-    case_id: Optional[str] = None
+    case_id: Optional[str] = None,
+    recipients: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Crear un nuevo documento en estado borrador (draft).
@@ -376,6 +437,7 @@ def create_document(
         reference: Descripción/referencia del documento
         user_id: UUID del usuario creador
         case_id: UUID del expediente a vincular (opcional)
+        recipients: Destinatarios para NOTA (opcional, dict con sectors/users)
 
     Returns:
         Dict con:
@@ -399,11 +461,21 @@ def create_document(
         raise ValueError("user_id es requerido")
 
     try:
+        # Resolver sender_sector_id del usuario
+        sender_sector_id = None
+        if recipients:
+            user_sector = _resolve_sender_sector_id(user_id, schema_name=ctx.schema_name)
+            if user_sector:
+                sender_sector_id = str(user_sector[0]['sector_id'])
+
         result = create_doc_service(
             document_type_acronym=document_type_acronym,
             reference=reference,
             creator_id=user_id,
-            schema_name=ctx.schema_name
+            schema_name=ctx.schema_name,
+            auth_source="mcp_gateway",
+            recipients=recipients,
+            sender_sector_id=sender_sector_id
         )
 
         logger.info(f"[MCP] create_document - documento creado: {result.get('document_id')}")
@@ -448,7 +520,9 @@ def save_document(
     user_id: str,
     content: Optional[str] = None,
     reference: Optional[str] = None,
-    signers: Optional[List[Dict[str, Any]]] = None
+    signers: Optional[List[Dict[str, Any]]] = None,
+    recipients: Optional[Dict[str, Any]] = None,
+    proposed_case_ids: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Guardar cambios en un documento borrador.
@@ -460,6 +534,8 @@ def save_document(
         content: Contenido HTML del documento (opcional)
         reference: Nueva referencia/descripción (opcional)
         signers: Lista de firmantes [{user_id, email, is_numerator}] (opcional)
+        recipients: Destinatarios para NOTA (opcional, dict con sectors/users)
+        proposed_case_ids: IDs de expedientes a vincular (opcional)
 
     Returns:
         Dict con:
@@ -482,8 +558,15 @@ def save_document(
         raise ValueError("user_id es requerido")
 
     # Verificar que hay al menos un cambio
-    if content is None and reference is None and signers is None:
-        raise ValueError("Debe proporcionar al menos un campo a actualizar (content, reference o signers)")
+    if all(x is None for x in [content, reference, signers, recipients, proposed_case_ids]):
+        raise ValueError("Debe proporcionar al menos un campo a actualizar (content, reference, signers, recipients o proposed_case_ids)")
+
+    # Resolver sender_sector_id si hay recipients
+    sender_sector_id = None
+    if recipients is not None:
+        user_sector = _resolve_sender_sector_id(user_id, schema_name=ctx.schema_name)
+        if user_sector:
+            sender_sector_id = str(user_sector[0]['sector_id'])
 
     try:
         result = save_document_changes(
@@ -491,6 +574,10 @@ def save_document(
             reference=reference,
             content=content,
             signers=signers,
+            recipients=recipients,
+            sender_sector_id=sender_sector_id,
+            proposed_case_ids=proposed_case_ids,
+            user_id=user_id,
             schema_name=ctx.schema_name
         )
 
@@ -505,9 +592,11 @@ def save_document(
 
     except (DocumentNotFoundError, DocumentStateError, ValidationError):
         raise
+    except GDIBaseException:
+        raise  # AuthorizationError, BusinessLogicError, etc.
     except Exception as e:
-        logger.error(f"[MCP] save_document - error: {e}")
-        raise RuntimeError(f"Error guardando documento: {str(e)}")
+        logger.error(f"[MCP] save_document - error inesperado: {e}")
+        raise  # re-raise sin wrappear, mantiene tipo original
 
 
 async def start_signing(
@@ -604,7 +693,7 @@ async def sign_document(
 
         logger.info(f"[MCP] sign_document - documento {document_id} firmado por {user_id}")
 
-        return result
+        return strip_storage_urls(result)
 
     except (DocumentNotFoundError, DocumentStateError, AuthorizationError, ValidationError):
         raise
@@ -746,9 +835,16 @@ def search_document_by_number(
 
         result = search_official_document_by_number(
             doc_number,
-            user_id=None,
+            user_id=user_id,
             schema_name=ctx.schema_name
         )
+
+        # Guard post-busqueda: verificar permisos sobre el documento encontrado
+        if result.get("found") and result.get("document"):
+            doc_id = result["document"].get("id") or result["document"].get("document_id")
+            if doc_id and not can_user_view_document(doc_id, user_id, schema_name=ctx.schema_name):
+                logger.info(f"[MCP] search_document_by_number - usuario sin permisos, ocultando resultado")
+                return {"found": False, "document": None, "search_term": doc_number}
 
         found = result.get("found", False)
         logger.info(f"[MCP] search_document_by_number - encontrado: {found}")
@@ -802,7 +898,7 @@ async def get_signature_details(
 
         logger.info(f"[MCP] get_signature_details - detalles obtenidos para documento {document_id}")
 
-        return result
+        return strip_storage_urls(result)
 
     except DocumentNotFoundError as e:
         logger.error(f"[MCP] get_signature_details - documento no encontrado: {e}")

@@ -99,32 +99,64 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
         user_editable_sectors = get_user_editable_sector_ids(user_id, schema_name=schema_name)
         logger.debug(f"User {user_id} editable sectors: {user_editable_sectors}")
 
-        # 2. Obtener admin_sector del expediente
-        admin_sector_query = """
-            SELECT s.id as admin_sector_id
-            FROM case_movements cm
-            JOIN sectors s ON cm.admin_sector_id = s.id
-            WHERE cm.case_id = %s
-              AND cm.is_active = false
-              AND cm.type IN ('creation', 'transfer')
-            ORDER BY cm.closed_at DESC
-            LIMIT 1
-        """
-        admin_result = execute_query(admin_sector_query, (case_id,), schema_name=schema_name)
-        admin_sector_id = str(admin_result[0]['admin_sector_id']) if admin_result else None
+        # 2. Verificar is_admin e is_assigned con patron robusto de 3 condiciones
+        if not user_editable_sectors:
+            is_admin = False
+            is_assigned = False
+        else:
+            sector_placeholders = ",".join(["%s"] * len(user_editable_sectors))
 
-        # 3. Obtener sectores asignados activos del expediente
-        assigned_sectors_query = """
-            SELECT DISTINCT cm.assigned_sector_id
-            FROM case_movements cm
-            WHERE cm.case_id = %s
-              AND cm.is_active = true
-              AND cm.assigned_sector_id IS NOT NULL
-        """
-        assigned_result = execute_query(assigned_sectors_query, (case_id,), schema_name=schema_name)
-        assigned_sector_ids = [str(row['assigned_sector_id']) for row in assigned_result]
+            permission_check = f"""
+                SELECT
+                    EXISTS (
+                        SELECT 1 FROM case_movements cm
+                        WHERE cm.case_id = %s
+                        AND cm.assigned_sector_id IN ({sector_placeholders})
+                        AND cm.is_active = true
+                    ) as is_assigned,
+                    EXISTS (
+                        SELECT 1 FROM case_movements cm
+                        WHERE cm.case_id = %s
+                        AND cm.type = 'transfer'
+                        AND cm.is_active = false
+                        AND cm.admin_sector_id IN ({sector_placeholders})
+                        AND cm.closed_at = (
+                            SELECT MAX(cm2.closed_at)
+                            FROM case_movements cm2
+                            WHERE cm2.case_id = %s
+                            AND cm2.type = 'transfer'
+                            AND cm2.is_active = false
+                        )
+                    ) as is_admin_by_transfer,
+                    (
+                        EXISTS (
+                            SELECT 1 FROM case_movements cm
+                            WHERE cm.case_id = %s
+                            AND cm.type = 'creation'
+                            AND cm.admin_sector_id IN ({sector_placeholders})
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM case_movements cm
+                            WHERE cm.case_id = %s
+                            AND cm.type = 'transfer'
+                        )
+                    ) as is_admin_by_creation
+            """
+            params = (
+                case_id, *user_editable_sectors,
+                case_id, *user_editable_sectors, case_id,
+                case_id, *user_editable_sectors, case_id,
+            )
+            perm_result = execute_query(permission_check, params, schema_name=schema_name)
 
-        # 4. Obtener información del caso
+            if perm_result:
+                is_assigned = perm_result[0]['is_assigned']
+                is_admin = perm_result[0]['is_admin_by_transfer'] or perm_result[0]['is_admin_by_creation']
+            else:
+                is_admin = False
+                is_assigned = False
+
+        # 3. Obtener información del caso
         case_result = execute_query(get_case_permissions_data_query(), (case_id,), schema_name=schema_name)
         if not case_result:
             logger.error(f"Case not found: {case_id}")
@@ -132,10 +164,6 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
 
         case_data = case_result[0]
         is_active = case_data['status'] == CASE_STATUS_ACTIVE
-
-        # 5. Calcular flags de relación con el caso
-        is_admin = admin_sector_id in user_editable_sectors if admin_sector_id else False
-        is_assigned = any(sector_id in user_editable_sectors for sector_id in assigned_sector_ids)
         is_creator = str(case_data['created_by_user_id']) == str(user_id)
 
         # 6. Determinar nivel de ownership
@@ -177,7 +205,12 @@ def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
     """
     Verificar si un usuario puede ver un expediente.
 
-    MODO TESTING: Todos los usuarios autenticados pueden VER cualquier expediente.
+    Condiciones (al menos una debe cumplirse):
+    1. Usuario tiene flag can_global_search_cases=True
+    2. Usuario es creador del expediente
+    3. Sector del usuario es admin o esta asignado al expediente
+
+    Optimizado: una sola query a la BD en vez de 3-4 separadas.
 
     Args:
         case_id: ID del expediente
@@ -188,18 +221,83 @@ def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
         bool: True si el usuario puede ver el expediente
     """
     try:
-        permission_query = """
-            SELECT 1
-            FROM cases c
-            WHERE c.id = %s
-            LIMIT 1
-        """
+        # Reusar la query existente de case_queries.py:249-273
+        from services.case_queries import get_user_sectors_for_case_query
+        USER_SECTORS_SUBQUERY = get_user_sectors_for_case_query()
 
-        result = execute_query(permission_query, (case_id,), schema_name=schema_name)
-        return len(result) > 0
+        query = f"""
+            SELECT EXISTS(
+                -- Caso 1: Flag global + expediente existe
+                SELECT 1 FROM cases c
+                JOIN users u ON u.id = %s
+                WHERE c.id = %s
+                AND u.can_global_search_cases = true
+
+                UNION ALL
+
+                -- Caso 2: Es el creador
+                SELECT 1 FROM cases c
+                WHERE c.id = %s AND c.created_by_user_id = %s
+
+                UNION ALL
+
+                -- Caso 3a: Sector asignado activo
+                SELECT 1 FROM case_movements cm
+                JOIN ({USER_SECTORS_SUBQUERY}) user_sectors
+                    ON cm.assigned_sector_id = user_sectors.sector_id
+                WHERE cm.case_id = %s AND cm.is_active = true
+
+                UNION ALL
+
+                -- Caso 3b: Admin por ultima transferencia cerrada
+                SELECT 1 FROM case_movements cm
+                JOIN ({USER_SECTORS_SUBQUERY}) user_sectors
+                    ON cm.admin_sector_id = user_sectors.sector_id
+                WHERE cm.case_id = %s
+                AND cm.type = 'transfer'
+                AND cm.is_active = false
+                AND cm.closed_at = (
+                    SELECT MAX(cm2.closed_at)
+                    FROM case_movements cm2
+                    WHERE cm2.case_id = %s
+                    AND cm2.type = 'transfer'
+                    AND cm2.is_active = false
+                )
+
+                UNION ALL
+
+                -- Caso 3c: Admin por creacion (solo si no hay transfers)
+                SELECT 1 FROM case_movements cm
+                JOIN ({USER_SECTORS_SUBQUERY}) user_sectors
+                    ON cm.admin_sector_id = user_sectors.sector_id
+                WHERE cm.case_id = %s
+                AND cm.type = 'creation'
+                AND NOT EXISTS (
+                    SELECT 1 FROM case_movements cm2
+                    WHERE cm2.case_id = %s
+                    AND cm2.type = 'transfer'
+                )
+            ) as has_access
+        """
+        # Parametros: 15 placeholders
+        # Caso 1: user_id, case_id (2)
+        # Caso 2: case_id, user_id (2)
+        # Caso 3a: user_id, user_id (subquery sectores), case_id (3)
+        # Caso 3b: user_id, user_id (subquery sectores), case_id, case_id (4)
+        # Caso 3c: user_id, user_id (subquery sectores), case_id, case_id (4)
+        # Total: 2 + 2 + 3 + 4 + 4 = 15
+        params = (
+            user_id, case_id,                       # Caso 1: flag global
+            case_id, user_id,                       # Caso 2: creador
+            user_id, user_id, case_id,              # Caso 3a: sector asignado
+            user_id, user_id, case_id, case_id,     # Caso 3b: admin transfer
+            user_id, user_id, case_id, case_id,     # Caso 3c: admin creation
+        )
+        result = execute_query(query, params, schema_name=schema_name)
+        return result and result[0].get('has_access', False)
 
     except Exception as e:
-        logger.error(f"Error checking case permissions: {str(e)}")
+        logger.error(f"Error checking case view permissions for user {user_id[:8]} on case {case_id[:8]}: {str(e)}")
         return False
 
 

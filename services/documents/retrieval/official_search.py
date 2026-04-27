@@ -53,30 +53,52 @@ def search_official_document_by_number(doc_number: str, *, user_id: str = None, 
                         "search_term": doc_number
                     }
 
-                # Si user_id proporcionado, verificar que el documento tenga relacion con sectores del usuario
+                # Si user_id proporcionado, verificar que el documento tenga relacion con el usuario
                 if user_id:
-                    from services.cases.permissions import get_user_viewable_sector_ids
-                    user_sector_ids = get_user_viewable_sector_ids(user_id, schema_name=schema_name)
+                    # Si es tipo MEMO, verificar acceso por memo_recipients
+                    doc_type_acronym = result.get('document_type_acronym', '')
+                    if doc_type_acronym == 'MEMO':
+                        cursor.execute(
+                            """
+                            SELECT EXISTS(
+                                SELECT 1 FROM memo_recipients mr
+                                WHERE mr.document_id = %s
+                                  AND (mr.sender_user_id = %s OR mr.recipient_user_id = %s)
+                            ) as has_access
+                            """,
+                            (result['document_id'], user_id, user_id)
+                        )
+                        access_check = cursor.fetchone()
+                        if not access_check or not access_check['has_access']:
+                            logger.info(f"Usuario {user_id[:8]} sin acceso a MEMO {doc_number[:15]}")
+                            return {
+                                "found": False,
+                                "document": None,
+                                "search_term": doc_number
+                            }
+                    else:
+                        from services.cases.permissions import get_user_viewable_sector_ids
+                        user_sector_ids = get_user_viewable_sector_ids(user_id, schema_name=schema_name)
 
-                    # Verificar si signer_sector_ids tiene interseccion con sectores del usuario
-                    cursor.execute(
-                        """
-                        SELECT EXISTS(
-                            SELECT 1 FROM official_documents
-                            WHERE id = %s
-                              AND signer_sector_ids && %s::uuid[]
-                        ) as has_access
-                        """,
-                        (result['document_id'], user_sector_ids)
-                    )
-                    access_check = cursor.fetchone()
-                    if not access_check or not access_check['has_access']:
-                        logger.info(f"Usuario {user_id[:8]} sin acceso a documento {doc_number[:15]}")
-                        return {
-                            "found": False,
-                            "document": None,
-                            "search_term": doc_number
-                        }
+                        # Verificar si signer_sector_ids tiene interseccion con sectores del usuario
+                        cursor.execute(
+                            """
+                            SELECT EXISTS(
+                                SELECT 1 FROM official_documents
+                                WHERE id = %s
+                                  AND signer_sector_ids && %s::uuid[]
+                            ) as has_access
+                            """,
+                            (result['document_id'], user_sector_ids)
+                        )
+                        access_check = cursor.fetchone()
+                        if not access_check or not access_check['has_access']:
+                            logger.info(f"Usuario {user_id[:8]} sin acceso a documento {doc_number[:15]}")
+                            return {
+                                "found": False,
+                                "document": None,
+                                "search_term": doc_number
+                            }
 
                 logger.info(f"Documento oficial encontrado: {result['document_id'][:8]}...")
 

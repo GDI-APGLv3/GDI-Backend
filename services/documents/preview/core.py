@@ -102,11 +102,25 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
                 pdf_bytes = await call_pdfcomposer_note_preview(
                     raw_document_data,
                     para=recipients['para'],
-                    cc=recipients.get('cc')
+                    cc=recipients.get('cc'),
+                    schema_name=schema_name
+                )
+            elif type_acronym == 'MEMO':
+                # MEMO usa /note-preview/ con header de recipients (formato usuario)
+                logger.info(f"Documento {document_id} es MEMO, usando /note-preview/")
+
+                from services.memos.recipients import format_memo_recipients_for_pdf
+                recipients = format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
+
+                pdf_bytes = await call_pdfcomposer_note_preview(
+                    raw_document_data,
+                    para=recipients['para'],
+                    cc=recipients.get('cc'),
+                    schema_name=schema_name
                 )
             else:
                 # Otros tipos usan /preview-pdf/ genérico
-                pdf_bytes = await call_pdfcomposer_preview_pdf(raw_document_data)
+                pdf_bytes = await call_pdfcomposer_preview_pdf(raw_document_data, schema_name=schema_name)
 
             if not pdf_bytes:
                 raise DocumentStateError("No se pudo generar el PDF de previsualización", "preview_error")

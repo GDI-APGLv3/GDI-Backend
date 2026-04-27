@@ -85,14 +85,17 @@ def get_feed_movements_query(sector_placeholders: str) -> str:
             c.case_number,
             c.reference as case_reference,
             NULL as case_ai_summary,
+            c.short_ai_summary as case_short_ai_summary,
             ct.acronym as case_type,
             ct.type_name as case_type_name,
             u.full_name as user_name,
             u.profile_picture_url as user_photo,
             COALESCE(d.acronym || '#' || s.acronym, '') as user_sector,
+            s.primary_color as user_sector_color,
             sd.official_number as doc_number,
             sd.reference as doc_reference,
             sd.resume as doc_ai_summary,
+            sd.short_resume as doc_short_resume,
             COUNT(*) OVER() as total_count
         FROM case_movements cm
         JOIN cases c ON cm.case_id = c.id
@@ -100,7 +103,7 @@ def get_feed_movements_query(sector_placeholders: str) -> str:
         LEFT JOIN users u ON cm.user_id = u.id
         LEFT JOIN sectors s ON cm.creator_sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
-        LEFT JOIN official_documents sd ON cm.supporting_document_id = sd.id
+        LEFT JOIN official_documents sd ON cm.supporting_document_id = sd.id AND sd.signed_at IS NOT NULL
         WHERE cm.case_id IN (SELECT id FROM viewable_cases)
         ORDER BY cm.created_at DESC
         LIMIT %s OFFSET %s

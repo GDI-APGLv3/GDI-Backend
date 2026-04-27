@@ -11,19 +11,21 @@ from shared.exceptions import ValidationError, NotFoundError, AuthorizationError
 from services.cases.documents import link_official_document, accept_proposed_document, reject_proposed_document
 from services.cases.creation import create_case_with_cover_service
 from services.cases.transfer import get_available_sectors_for_transfer
+from services.case_queries import check_duplicate_assignment_query
+from api_gateway.tools._sanitize import strip_storage_urls
 
 logger = logging.getLogger(__name__)
 
 
 def search_cases(
     ctx: MCPContext,
+    user_id: str,
     page: int = 1,
     page_size: int = 20,
     search: Optional[str] = None,
     status: Optional[str] = None,
     date_filter: Optional[str] = None,
     sector_filter: Optional[str] = None,
-    user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Buscar expedientes con filtros.
@@ -34,7 +36,7 @@ def search_cases(
         page_size: Tamaño de página (default 20, max 100)
         search: Texto de búsqueda (case number o referencia)
         status: Filtro de estado (active, inactive, archived)
-        date_filter: Filtro de fecha (today, week, month, year)
+        date_filter: Filtro de fecha (hoy, ayer, ultimos_7_dias, ultimos_30_dias)
         sector_filter: Filtro por sector (acronym)
         user_id: ID de usuario para permisos (REQUERIDO para filtrado correcto)
 
@@ -82,7 +84,7 @@ def search_cases(
 def get_case(
     ctx: MCPContext,
     case_id: str,
-    user_id: Optional[str] = None,
+    user_id: str,
     include_documents: bool = False
 ) -> Optional[Dict[str, Any]]:
     """
@@ -91,7 +93,7 @@ def get_case(
     Args:
         ctx: Contexto MCP con schema_name
         case_id: UUID del expediente
-        user_id: ID de usuario (opcional, si se omite se salta validación de permisos)
+        user_id: ID de usuario (REQUERIDO para validación de permisos)
         include_documents: Si True, incluye documentos vinculados (default False)
 
     Returns:
@@ -100,19 +102,12 @@ def get_case(
     Raises:
         RuntimeError: Si hay error de BD
     """
-    logger.info(f"[MCP] get_case - case_id={case_id}, schema={ctx.schema_name}, include_documents={include_documents}")
+    logger.info(f"[MCP] get_case - case_id={case_id}, user_id={user_id}, schema={ctx.schema_name}")
 
     try:
-        # Si no hay user_id, omitir validación de permisos
-        skip_permissions = user_id is None
-
-        if skip_permissions:
-            logger.warning(f"[MCP] get_case - sin user_id, omitiendo validación de permisos")
-
         result = CaseService.get_case_detail(
             case_id=case_id,
-            user_id=user_id or "00000000-0000-0000-0000-000000000000",  # Dummy si skip
-            skip_permission_check=skip_permissions,
+            user_id=user_id,
             schema_name=ctx.schema_name
         )
 
@@ -126,7 +121,7 @@ def get_case(
             logger.info(f"[MCP] get_case - documentos incluidos: {result['documents']['total_official']} oficiales, {result['documents']['total_proposed']} propuestos")
 
         logger.info(f"[MCP] get_case - expediente encontrado: {result.get('case_number')}")
-        return result
+        return strip_storage_urls(result)
 
     except Exception as e:
         logger.error(f"[MCP] get_case - error: {e}")
@@ -135,7 +130,8 @@ def get_case(
 
 def get_case_history(
     ctx: MCPContext,
-    case_id: str
+    case_id: str,
+    user_id: str
 ) -> Dict[str, Any]:
     """
     Obtener historial completo de movimientos de un expediente.
@@ -143,17 +139,24 @@ def get_case_history(
     Args:
         ctx: Contexto MCP con schema_name
         case_id: UUID del expediente
+        user_id: UUID del usuario (REQUERIDO para validación de permisos)
 
     Returns:
         Dict con case_number y movements (lista de movimientos con mensajes formateados)
 
     Raises:
         NotFoundError: Si el expediente no existe
+        ValueError: Si el usuario no tiene permisos
         RuntimeError: Si hay error de BD
     """
-    logger.info(f"[MCP] get_case_history - case_id={case_id}, schema={ctx.schema_name}")
+    logger.info(f"[MCP] get_case_history - case_id={case_id}, user_id={user_id}, schema={ctx.schema_name}")
 
     try:
+        # Validar permisos antes de retornar historial
+        if not CaseService.can_user_view_case(case_id, user_id, schema_name=ctx.schema_name):
+            logger.warning(f"[MCP] get_case_history - usuario {user_id} sin permisos para expediente {case_id}")
+            raise ValueError("Usuario no tiene permisos para ver el historial de este expediente")
+
         result = CaseService.get_case_history(
             case_id=case_id,
             schema_name=ctx.schema_name
@@ -175,7 +178,7 @@ def get_case_history(
 def get_case_documents(
     ctx: MCPContext,
     case_id: str,
-    user_id: Optional[str] = None
+    user_id: str
 ) -> Dict[str, Any]:
     """
     Obtener documentos vinculados a un expediente (oficiales y propuestos).
@@ -183,7 +186,7 @@ def get_case_documents(
     Args:
         ctx: Contexto MCP con schema_name
         case_id: UUID del expediente
-        user_id: ID de usuario (opcional, para validar permisos de vista)
+        user_id: ID de usuario (REQUERIDO para validación de permisos)
 
     Returns:
         Dict con:
@@ -196,21 +199,20 @@ def get_case_documents(
         ValueError: Si el usuario no tiene permisos para ver el expediente
         RuntimeError: Si hay error de BD
     """
-    logger.info(f"[MCP] get_case_documents - case_id={case_id}, schema={ctx.schema_name}")
+    logger.info(f"[MCP] get_case_documents - case_id={case_id}, user_id={user_id}, schema={ctx.schema_name}")
 
     try:
-        # Validar permisos si se proporciona user_id
-        if user_id:
-            can_view = CaseService.can_user_view_case(case_id, user_id, schema_name=ctx.schema_name)
-            if not can_view:
-                logger.warning(f"[MCP] get_case_documents - usuario {user_id} sin permisos para expediente {case_id}")
-                raise ValueError("Usuario no tiene permisos para ver este expediente")
+        # SIEMPRE validar permisos (ya no es condicional)
+        can_view = CaseService.can_user_view_case(case_id, user_id, schema_name=ctx.schema_name)
+        if not can_view:
+            logger.warning(f"[MCP] get_case_documents - usuario {user_id} sin permisos para expediente {case_id}")
+            raise ValueError("Usuario no tiene permisos para ver este expediente")
 
         # Obtener documentos usando servicio existente
         result = CaseService.get_case_documents(case_id, schema_name=ctx.schema_name)
 
         logger.info(f"[MCP] get_case_documents - encontrados {result['total_official']} oficiales, {result['total_proposed']} propuestos")
-        return result
+        return strip_storage_urls(result)
 
     except ValueError:
         raise
@@ -253,6 +255,10 @@ def get_case_permissions(
     if not user_id:
         raise ValueError("user_id es requerido para get_case_permissions")
 
+    if not CaseService.can_user_view_case(case_id, user_id, schema_name=ctx.schema_name):
+        logger.warning(f"[MCP] get_case_permissions - usuario {user_id} sin permisos para expediente {case_id}")
+        raise ValueError("Usuario no tiene permisos para ver este expediente")
+
     try:
         result = CaseService.get_user_case_permissions(
             case_id=case_id,
@@ -274,15 +280,17 @@ def get_case_permissions(
 def get_case_by_number(
     ctx: MCPContext,
     case_number: str,
-    user_id: Optional[str] = None
+    user_id: str
 ) -> Optional[Dict[str, Any]]:
     """
     Obtener un expediente por su número exacto.
+    Respeta permisos: si usuario tiene flag global, busca sin restriccion.
+    Si no, filtra por sectores del usuario.
 
     Args:
         ctx: Contexto MCP con schema_name
         case_number: Número exacto del expediente (ej: "EE-2026-00001234")
-        user_id: ID de usuario (opcional, no se usa para filtrar - solo para auditoría)
+        user_id: ID de usuario (REQUERIDO para validación de permisos)
 
     Returns:
         Dict con datos del expediente o None si no existe
@@ -291,22 +299,21 @@ def get_case_by_number(
         ValueError: Si case_number está vacío
         RuntimeError: Si hay error de BD
     """
-    logger.info(f"[MCP] get_case_by_number - case_number={case_number}, schema={ctx.schema_name}")
+    logger.info(f"[MCP] get_case_by_number - case_number={case_number}, user_id={user_id}, schema={ctx.schema_name}")
 
     if not case_number:
         raise ValueError("case_number es requerido")
 
     try:
         case_service = CaseService()
-
-        # Buscar el expediente por número exacto SIN restricciones de usuario
         result = case_service.get_case_by_exact_number_unrestricted(
             case_number=case_number,
+            user_id=user_id,
             schema_name=ctx.schema_name
         )
 
         if not result:
-            logger.warning(f"[MCP] get_case_by_number - expediente no encontrado: {case_number}")
+            logger.warning(f"[MCP] get_case_by_number - expediente no encontrado o sin permisos: {case_number}")
             return None
 
         logger.info(f"[MCP] get_case_by_number - expediente encontrado: {case_number}")
@@ -510,7 +517,7 @@ def prepare_assignment(
         raise RuntimeError(f"Error preparando asignación: {str(e)}")
 
 
-def assign_case(
+async def assign_case(
     ctx: MCPContext,
     case_id: str,
     target_sector_id: str,
@@ -565,6 +572,58 @@ def assign_case(
         if not prep.get("success"):
             raise AuthorizationError(prep.get("message", "Sin permisos para asignar"))
 
+        # Validar que no exista asignacion duplicada al mismo sector
+        duplicate_check = execute_query(
+            check_duplicate_assignment_query(),
+            (case_id, target_sector_id),
+            schema_name=ctx.schema_name
+        )
+        if duplicate_check:
+            raise ValueError(
+                "Ya existe una asignación activa a este sector. "
+                "Cierre la asignación existente antes de crear una nueva."
+            )
+
+        # Crear PV si se solicita documento oficial
+        supporting_document_id = None
+        official_document_info = None
+        if create_official_doc:
+            from services.cases.transfer_document_creator import create_transfer_document
+
+            case_info = execute_query(
+                "SELECT case_number FROM cases WHERE id = %s",
+                (case_id,), schema_name=ctx.schema_name
+            )
+            user_info = execute_query(
+                "SELECT sector_id FROM users WHERE id = %s",
+                (user_id,), schema_name=ctx.schema_name
+            )
+
+            if case_info and user_info:
+                doc_result = await create_transfer_document(
+                    case_id=case_id,
+                    case_number=case_info[0]['case_number'],
+                    movement_type="Asignación",
+                    movement_reason=reason.strip(),
+                    requesting_sector_id=str(user_info[0]['sector_id']),
+                    receiving_sector_id=target_sector_id,
+                    user_id=user_id,
+                    schema_name=ctx.schema_name
+                )
+
+                # Vincular documento al expediente
+                link_official_document(
+                    case_id=case_id,
+                    official_document_id=doc_result['document_id'],
+                    linking_user_id=user_id,
+                    user_sector_id=str(user_info[0]['sector_id']),
+                    schema_name=ctx.schema_name
+                )
+
+                supporting_document_id = doc_result['document_id']
+                official_document_info = doc_result
+                logger.info(f"[MCP] assign_case - PV creado: {doc_result['official_number']}")
+
         # Ejecutar asignación usando CaseService
         result = CaseService.transfer_case(
             case_id=case_id,
@@ -573,13 +632,13 @@ def assign_case(
             user_id=user_id,
             transfer_ownership=False,  # Asignación NO transfiere propiedad
             assigned_user_id=assigned_user_id,
-            create_official_doc=create_official_doc,
+            supporting_document_id=supporting_document_id,
             schema_name=ctx.schema_name
         )
 
         logger.info(f"[MCP] assign_case - asignación exitosa: movement_id={result.get('movement_id')}")
 
-        return {
+        response = {
             "success": True,
             "movement_id": result.get("movement_id"),
             "case_number": result.get("case_number"),
@@ -588,8 +647,15 @@ def assign_case(
             "target_department": result.get("target_department"),
             "transferred_by": result.get("transferred_by"),
             "assigned_user": result.get("assigned_user"),
-            "official_document": result.get("official_document")
         }
+
+        if official_document_info:
+            response["official_document"] = {
+                "document_id": official_document_info['document_id'],
+                "official_number": official_document_info['official_number'],
+            }
+
+        return response
 
     except (ValueError, AuthorizationError):
         raise
@@ -598,7 +664,7 @@ def assign_case(
         raise RuntimeError(f"Error asignando expediente: {str(e)}")
 
 
-def close_assignment(
+async def close_assignment(
     ctx: MCPContext,
     case_id: str,
     movement_id: str,
@@ -607,6 +673,7 @@ def close_assignment(
 ) -> Dict[str, Any]:
     """
     Cerrar una asignación de expediente.
+    Si el movimiento tiene supporting_document_id, genera PV de cierre.
 
     Args:
         ctx: Contexto MCP con schema_name
@@ -622,6 +689,7 @@ def close_assignment(
         - case_id: ID del expediente
         - movement_type: tipo de movimiento
         - closing_reason: razón del cierre
+        - official_document: info del PV de cierre (si se generó)
 
     Raises:
         ValueError: Si faltan parámetros o reason fuera de rango
@@ -643,6 +711,52 @@ def close_assignment(
         raise ValueError("user_id es requerido")
 
     try:
+        # Verificar si el movimiento tiene supporting_document_id para crear PV de cierre
+        document_result = None
+        mov_query = "SELECT supporting_document_id, assigned_sector_id FROM case_movements WHERE id = %s AND case_id = %s"
+        mov_check = execute_query(mov_query, (movement_id, case_id), schema_name=ctx.schema_name)
+        has_supporting_doc = mov_check and mov_check[0].get('supporting_document_id') is not None
+
+        if has_supporting_doc:
+            try:
+                from services.cases.transfer_document_creator import create_transfer_document
+
+                case_info = execute_query(
+                    "SELECT case_number FROM cases WHERE id = %s",
+                    (case_id,), schema_name=ctx.schema_name
+                )
+                user_info = execute_query(
+                    "SELECT sector_id FROM users WHERE id = %s",
+                    (user_id,), schema_name=ctx.schema_name
+                )
+
+                if case_info and user_info:
+                    assigned_sector = str(mov_check[0]['assigned_sector_id']) if mov_check[0]['assigned_sector_id'] else str(user_info[0]['sector_id'])
+
+                    document_result = await create_transfer_document(
+                        case_id=case_id,
+                        case_number=case_info[0]['case_number'],
+                        movement_type="Cierre de Asignación",
+                        movement_reason=reason.strip(),
+                        requesting_sector_id=assigned_sector,
+                        receiving_sector_id=assigned_sector,
+                        user_id=user_id,
+                        schema_name=ctx.schema_name
+                    )
+
+                    # Vincular PV de cierre al expediente
+                    link_official_document(
+                        case_id=case_id,
+                        official_document_id=document_result['document_id'],
+                        linking_user_id=user_id,
+                        user_sector_id=str(user_info[0]['sector_id']),
+                        schema_name=ctx.schema_name
+                    )
+
+                    logger.info(f"[MCP] close_assignment - PV de cierre creado: {document_result['official_number']}")
+            except Exception as doc_error:
+                logger.warning(f"[MCP] close_assignment - error creando PV de cierre: {doc_error}")
+
         result = CaseService.close_assignment(
             case_id=case_id,
             movement_id=movement_id,
@@ -653,13 +767,21 @@ def close_assignment(
 
         logger.info(f"[MCP] close_assignment - asignación cerrada: movement_id={movement_id}")
 
-        return {
+        response = {
             "success": True,
             "movement_id": str(result.get("movement_id")),
             "case_id": str(result.get("case_id")),
             "movement_type": result.get("movement_type"),
             "closing_reason": result.get("closing_reason")
         }
+
+        if document_result:
+            response["official_document"] = {
+                "document_id": document_result['document_id'],
+                "official_number": document_result['official_number'],
+            }
+
+        return response
 
     except (ValueError, AuthorizationError, NotFoundError):
         raise
@@ -737,12 +859,13 @@ async def create_case(
             schema_name=ctx.schema_name
         )
 
-        logger.info(f"[MCP] create_case - expediente creado: {result.get('case_id')}")
+        case_data = result["case"]
+        logger.info(f"[MCP] create_case - expediente creado: {case_data.get('case_id')}")
 
         return {
             "success": True,
-            "case_id": str(result.get("case_id")),
-            "case_number": result.get("case_number"),
+            "case_id": str(case_data["case_id"]),
+            "case_number": case_data.get("case_number"),
             "message": "Expediente creado exitosamente"
         }
 
@@ -753,7 +876,7 @@ async def create_case(
         raise RuntimeError(f"Error creando expediente: {str(e)}")
 
 
-def transfer_case(
+async def transfer_case(
     ctx: MCPContext,
     case_id: str,
     target_sector_id: str,
@@ -808,6 +931,46 @@ def transfer_case(
         if not prep.get("success"):
             raise AuthorizationError(prep.get("message", "Sin permisos para transferir"))
 
+        # Crear PV si se solicita documento oficial
+        supporting_document_id = None
+        official_document_info = None
+        if create_official_doc:
+            from services.cases.transfer_document_creator import create_transfer_document
+
+            case_info = execute_query(
+                "SELECT case_number FROM cases WHERE id = %s",
+                (case_id,), schema_name=ctx.schema_name
+            )
+            user_info = execute_query(
+                "SELECT sector_id FROM users WHERE id = %s",
+                (user_id,), schema_name=ctx.schema_name
+            )
+
+            if case_info and user_info:
+                doc_result = await create_transfer_document(
+                    case_id=case_id,
+                    case_number=case_info[0]['case_number'],
+                    movement_type="Transferencia",
+                    movement_reason=reason.strip(),
+                    requesting_sector_id=str(user_info[0]['sector_id']),
+                    receiving_sector_id=target_sector_id,
+                    user_id=user_id,
+                    schema_name=ctx.schema_name
+                )
+
+                # Vincular documento al expediente
+                link_official_document(
+                    case_id=case_id,
+                    official_document_id=doc_result['document_id'],
+                    linking_user_id=user_id,
+                    user_sector_id=str(user_info[0]['sector_id']),
+                    schema_name=ctx.schema_name
+                )
+
+                supporting_document_id = doc_result['document_id']
+                official_document_info = doc_result
+                logger.info(f"[MCP] transfer_case - PV creado: {doc_result['official_number']}")
+
         # Ejecutar transferencia usando CaseService
         result = CaseService.transfer_case(
             case_id=case_id,
@@ -816,13 +979,13 @@ def transfer_case(
             user_id=user_id,
             transfer_ownership=True,  # Transferencia SÍ transfiere propiedad
             assigned_user_id=assigned_user_id,
-            create_official_doc=create_official_doc,
+            supporting_document_id=supporting_document_id,
             schema_name=ctx.schema_name
         )
 
         logger.info(f"[MCP] transfer_case - transferencia exitosa: movement_id={result.get('movement_id')}")
 
-        return {
+        response = {
             "success": True,
             "movement_id": result.get("movement_id"),
             "case_number": result.get("case_number"),
@@ -831,8 +994,15 @@ def transfer_case(
             "target_department": result.get("target_department"),
             "transferred_by": result.get("transferred_by"),
             "assigned_user": result.get("assigned_user"),
-            "official_document": result.get("official_document")
         }
+
+        if official_document_info:
+            response["official_document"] = {
+                "document_id": official_document_info['document_id'],
+                "official_number": official_document_info['official_number'],
+            }
+
+        return response
 
     except (ValueError, AuthorizationError):
         raise
@@ -940,12 +1110,13 @@ def propose_document(
 
     try:
         link_query = """
-            INSERT INTO case_proposed_documents (case_id, document_draft_id, proposing_date, is_active)
-            VALUES (%s, %s, NOW(), true)
+            INSERT INTO case_proposed_documents (case_id, document_draft_id, proposing_user_id, proposing_date, is_active)
+            VALUES (%s, %s, %s, NOW(), true)
         """
         execute_query(
             link_query,
-            (case_id, document_draft_id),
+            (case_id, document_draft_id, user_id),
+            fetch=False,
             schema_name=ctx.schema_name
         )
 

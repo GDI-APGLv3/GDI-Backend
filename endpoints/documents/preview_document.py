@@ -66,6 +66,11 @@ async def preview_document_info(
         HTTPException: Para errores de documento no encontrado o estado inválido
     """
     try:
+        from services.documents.permissions import can_user_view_document
+        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+            from shared.exceptions import AuthorizationError
+            raise AuthorizationError("No tiene permisos para ver este documento")
+
         logger.info(f"Usuario {request.state.tenant_user_id[:8]}... solicitando info de preview para documento {document_id[:8]}...")
 
         data_fetcher = PreviewDataFetcher(schema_name=schema_name)
@@ -148,6 +153,11 @@ async def preview_document_download(
         HTTPException: Para errores de generación o validación
     """
     try:
+        from services.documents.permissions import can_user_view_document
+        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+            from shared.exceptions import AuthorizationError
+            raise AuthorizationError("No tiene permisos para ver este documento")
+
         logger.info(f"Usuario {request.state.tenant_user_id[:8]}... solicitando descarga de preview para documento {document_id[:8]}...")
 
         result = await generate_document_preview(document_id, schema_name=schema_name)

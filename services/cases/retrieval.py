@@ -134,7 +134,8 @@ def _build_where_conditions(
     resolved_tratas: List[str],
     date_filter: Optional[str],
     date_from: Optional[str],
-    date_to: Optional[str]
+    date_to: Optional[str],
+    is_global_search: bool = False
 ) -> str:
     """Construye las condiciones WHERE para la query.
 
@@ -146,53 +147,56 @@ def _build_where_conditions(
         date_filter: Filtro de fecha predefinido (hoy, ayer, etc)
         date_from: Fecha desde (formato ISO)
         date_to: Fecha hasta (formato ISO)
+        is_global_search: Si True, omite filtro de sectores (usuario ve todo el tenant)
 
     Returns:
         String con las condiciones WHERE completas
     """
     where_conditions = []
 
-    # Condición de sectores del usuario (obligatoria)
-    sector_conditions = f"""
-        (
-            EXISTS (
-                SELECT 1 FROM case_movements cm
-                WHERE cm.case_id = c.id
-                AND cm.assigned_sector_id IN ({sector_placeholders})
-                AND cm.is_active = true
-            )
-            OR
-            EXISTS (
-                SELECT 1 FROM case_movements cm
-                WHERE cm.case_id = c.id
-                AND cm.type = 'transfer'
-                AND cm.is_active = false
-                AND cm.admin_sector_id IN ({sector_placeholders})
-                AND cm.closed_at = (
-                    SELECT MAX(cm2.closed_at)
-                    FROM case_movements cm2
-                    WHERE cm2.case_id = c.id
-                    AND cm2.type = 'transfer'
-                    AND cm2.is_active = false
-                )
-            )
-            OR
+    # Condición de sectores del usuario (omitida si global search)
+    if not is_global_search:
+        sector_conditions = f"""
             (
                 EXISTS (
                     SELECT 1 FROM case_movements cm
                     WHERE cm.case_id = c.id
-                    AND cm.type = 'creation'
-                    AND cm.admin_sector_id IN ({sector_placeholders})
+                    AND cm.assigned_sector_id IN ({sector_placeholders})
+                    AND cm.is_active = true
                 )
-                AND NOT EXISTS (
+                OR
+                EXISTS (
                     SELECT 1 FROM case_movements cm
                     WHERE cm.case_id = c.id
                     AND cm.type = 'transfer'
+                    AND cm.is_active = false
+                    AND cm.admin_sector_id IN ({sector_placeholders})
+                    AND cm.closed_at = (
+                        SELECT MAX(cm2.closed_at)
+                        FROM case_movements cm2
+                        WHERE cm2.case_id = c.id
+                        AND cm2.type = 'transfer'
+                        AND cm2.is_active = false
+                    )
+                )
+                OR
+                (
+                    EXISTS (
+                        SELECT 1 FROM case_movements cm
+                        WHERE cm.case_id = c.id
+                        AND cm.type = 'creation'
+                        AND cm.admin_sector_id IN ({sector_placeholders})
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM case_movements cm
+                        WHERE cm.case_id = c.id
+                        AND cm.type = 'transfer'
+                    )
                 )
             )
-        )
-    """
-    where_conditions.append(sector_conditions)
+        """
+        where_conditions.append(sector_conditions)
+
     where_conditions.append("c.status = 'active'")
 
     if search_filter:
@@ -205,6 +209,7 @@ def _build_where_conditions(
                 JOIN official_documents od ON cod.official_document_id = od.id
                 WHERE cod.case_id = c.id
                 AND cod.is_active = true
+                AND od.signed_at IS NOT NULL
                 AND (
                     unaccent(LOWER(COALESCE(od.official_number, ''))) LIKE unaccent(%s)
                     OR unaccent(LOWER(COALESCE(od.reference, ''))) LIKE unaccent(%s)
@@ -302,6 +307,7 @@ def _build_where_params(
     resolved_tratas: List[str],
     date_from: Optional[str],
     date_to: Optional[str],
+    is_global_search: bool = False,
 ) -> list:
     """Construye los parámetros de la cláusula WHERE (sin paginación ni SELECT).
     Reutilizable para count query y list query.
@@ -313,14 +319,16 @@ def _build_where_params(
         resolved_tratas: Lista de UUIDs de templates ya resueltos
         date_from: Fecha desde
         date_to: Fecha hasta
+        is_global_search: Si True, omite sector_ids del WHERE
 
     Returns:
         Lista con parámetros del WHERE
     """
     params = []
 
-    # UUIDs para WHERE (3 veces los sector_ids)
-    params.extend(user_sector_ids * 3)
+    # UUIDs para WHERE (3 veces los sector_ids) — omitido en global search
+    if not is_global_search:
+        params.extend(user_sector_ids * 3)
 
     # Filtros adicionales
     if search_filter:
@@ -353,7 +361,8 @@ def _build_query_params(
     date_from: Optional[str],
     date_to: Optional[str],
     page_size: int,
-    offset: int
+    offset: int,
+    is_global_search: bool = False
 ) -> tuple:
     """Construye la tupla de parámetros para la query de listado en el orden correcto.
 
@@ -366,14 +375,16 @@ def _build_query_params(
         date_to: Fecha hasta
         page_size: Tamaño de página
         offset: Offset para paginación
+        is_global_search: Si True, omite sector_ids del WHERE
 
     Returns:
         Tupla con todos los parámetros en el orden correcto para la query
     """
     params = []
 
-    # 1. UUIDs para WHERE (3 veces los sector_ids)
-    params.extend(user_sector_ids * 3)
+    # 1. UUIDs para WHERE (3 veces los sector_ids) — omitido en global search
+    if not is_global_search:
+        params.extend(user_sector_ids * 3)
 
     # 2. UUIDs para SELECT (2 veces los sector_ids para is_admin_by_transfer y is_admin_by_creation)
     params.extend(user_sector_ids * 2)
@@ -529,18 +540,27 @@ def get_cases_by_user(
                 CASE_INVALID_DATE_FILTER_ERROR.format(options=", ".join(DATE_FILTER_OPTIONS))
             )
 
+        # Verificar flag de búsqueda global de expedientes
+        from shared.utils import get_user_global_search_flags
+        flags = get_user_global_search_flags(user_id, schema_name=schema_name)
+        is_global_search = flags.get('can_global_search_cases', False)
+
         # Obtener sectores del usuario
         user_sector_ids = _get_user_sector_ids(user_id, schema_name=schema_name)
 
-        if not user_sector_ids:
+        if not user_sector_ids and not is_global_search:
             logger.warning(f"Usuario {user_id} sin sectores - retornando lista vacía")
             return {"cases": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
+
+        # Global search sin sectores: usar UUID dummy para placeholders del SELECT
+        if not user_sector_ids:
+            user_sector_ids = ['00000000-0000-0000-0000-000000000000']
 
         # Resolver filtros de acronym a UUID
         resolved_tratas = _resolve_trata_filter(trata_filter, schema_name=schema_name) if trata_filter else []
         resolved_sector = _resolve_sector_filter(sector_filter, schema_name=schema_name) if sector_filter else None
 
-        logger.debug(f"Filtros resueltos - trata: {trata_filter} -> {resolved_tratas}, sector: {sector_filter} -> {resolved_sector}")
+        logger.debug(f"Filtros resueltos - trata: {trata_filter} -> {resolved_tratas}, sector: {sector_filter} -> {resolved_sector}, global_search: {is_global_search}")
 
         # Construir query
         sector_placeholders = ",".join(["%s"] * len(user_sector_ids))
@@ -551,7 +571,8 @@ def get_cases_by_user(
             resolved_tratas,
             date_filter,
             date_from,
-            date_to
+            date_to,
+            is_global_search=is_global_search
         )
 
         cases_query = get_cases_list_query(sector_placeholders, where_clause)
@@ -563,7 +584,8 @@ def get_cases_by_user(
         # Params para WHERE (reutilizados en count y list)
         where_params = _build_where_params(
             user_sector_ids, search_filter, resolved_sector,
-            resolved_tratas, date_from, date_to
+            resolved_tratas, date_from, date_to,
+            is_global_search=is_global_search
         )
 
         # Params para listado (WHERE + SELECT extras + paginación)
@@ -575,7 +597,8 @@ def get_cases_by_user(
             date_from,
             date_to,
             page_size,
-            offset
+            offset,
+            is_global_search=is_global_search
         )
 
         # Ejecutar count separado (cacheado 30s)

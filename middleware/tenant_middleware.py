@@ -106,6 +106,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
     # Rutas que NO requieren validación de tenant
     EXCLUDED_PATHS = {
         "/health",
+        "/livez",
         "/api/v1/system/health",
         "/favicon.ico",
         "/docs",
@@ -161,6 +162,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
             request.state.schema_name = schema_name
 
             # GET /users es público en TESTING_MODE (para página de login)
+            logger.debug(f"MIDDLEWARE path='{path}', method='{request.method}'")
             if request.method == "GET" and (path == "/users" or path == "/users/"):
                 logger.info(f"[{correlation_id}] TESTING_MODE: GET /users público (login page)")
                 return await call_next(request)
@@ -247,11 +249,10 @@ class TenantMiddleware(BaseHTTPMiddleware):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-            # Email con fallback chain: JWT claim > namespace claim > header legacy
+            # Email con fallback chain: JWT claim > namespace claim
             email = (
                 jwt_payload.get("email")
                 or jwt_payload.get("https://gdilatam.com/email")
-                or request.headers.get("X-User-Email")
             )
             if email:
                 logger.info(f"[{correlation_id}] Request de {email} (auth_id={auth_id}) a {path}")

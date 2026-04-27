@@ -66,7 +66,7 @@ def get_max_case_movement_date_query() -> str:
 # FUNCIONES DE CONSULTA INDIVIDUAL
 # =============================================================================
 
-def get_case_detail(case_id: str, user_id: str, skip_permission_check: bool = False, *, schema_name: str):
+def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
     """Obtener detalles completos de un expediente."""
     from services.case_queries import (
         get_case_basic_info_query,
@@ -80,12 +80,11 @@ def get_case_detail(case_id: str, user_id: str, skip_permission_check: bool = Fa
     try:
         logger.info(f"Fetching case detail - Case: {case_id[:8]}, User: {user_id[:8]}")
 
-        # Verificar permisos (solo si no se omite la validación)
-        if not skip_permission_check:
-            from services.case_service import CaseService
-            if not CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name):
-                logger.warning(f"User {user_id[:8]} denied access to case {case_id[:8]}")
-                return None
+        # SIEMPRE verificar permisos (skip_permission_check eliminado)
+        from services.case_service import CaseService
+        if not CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name):
+            logger.warning(f"User {user_id[:8]} denied access to case {case_id[:8]}")
+            return None
 
         # Obtener información básica del expediente
         case_result = execute_query(get_case_basic_info_query(), (case_id,), schema_name=schema_name)
@@ -445,7 +444,7 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
     from typing import Optional, Dict, Any
 
     try:
-        # Query base sin restricciones de usuario
+        # Query caso + flag global en 1 sola query con LEFT JOIN users
         case_query = """
             SELECT
                 c.id,
@@ -453,23 +452,26 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
                 c.reference,
                 c.created_at as last_modified_at,
                 ct.type_name,
-                ct.acronym as case_type
+                ct.acronym as case_type,
+                u.can_global_search_cases
             FROM cases c
             JOIN case_templates ct ON c.case_template_id = ct.id
+            LEFT JOIN users u ON u.id = %s
             WHERE c.case_number = %s
             LIMIT 1
         """
 
-        results = execute_query(case_query, (case_number,), schema_name=schema_name)
+        results = execute_query(case_query, (user_id, case_number), schema_name=schema_name)
 
         if not results:
             return None
 
         row = results[0]
         case_id = row['id']
+        has_global = row.get('can_global_search_cases', False) if user_id else True
 
-        # Si user_id proporcionado, verificar que el caso tenga relacion con sectores del usuario
-        if user_id:
+        # Si user_id proporcionado y sin flag global, verificar sectores
+        if user_id and not has_global:
             from services.cases.permissions import get_user_viewable_sector_ids
             user_sector_ids = get_user_viewable_sector_ids(user_id, schema_name=schema_name)
 
@@ -500,6 +502,7 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
         admin_sector_query = """
             SELECT
                 d.acronym as department_acronym,
+                d.name as department_name,
                 s.acronym as sector_acronym,
                 s.primary_color as sector_color
             FROM case_movements cm
@@ -516,8 +519,8 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
         if admin_result:
             admin_data = admin_result[0]
             admin_sector = {
-                "acronym": admin_data['sector_acronym'],
-                "department": admin_data['department_acronym'],
+                "acronym": admin_data['department_acronym'] + '#' + admin_data['sector_acronym'],
+                "department": admin_data['department_name'],
                 "sector_color": admin_data.get('sector_color'),
             }
 

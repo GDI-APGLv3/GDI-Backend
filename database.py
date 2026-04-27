@@ -8,9 +8,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+import logging
 
 # Cargar variables de entorno desde .env
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # MULTI-TENANT: Schema se pasa explícitamente via request.state.schema_name
@@ -34,7 +37,7 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_NAME", "GDI-MVP")
+DB_NAME = os.getenv("DB_NAME", "railway")
 
 # Detectar si estamos usando PgBouncer (puerto 6432) o PostgreSQL directo (puerto 5432)
 # PgBouncer no soporta parámetros "options" en la URL, usa SERVER_RESET_QUERY en su lugar
@@ -46,17 +49,17 @@ USE_PGBOUNCER = DB_PORT == "6432"
 PGBOUNCER_TRANSACTION_MODE = os.getenv("PGBOUNCER_TRANSACTION_MODE", "false").lower() == "true"
 
 if USE_PGBOUNCER:
-    # PgBouncer: Sin options (usa PGBOUNCER_SERVER_RESET_QUERY en Railway)
+    # PgBouncer: Sin options (usa PGBOUNCER_SERVER_RESET_QUERY a nivel de PgBouncer)
     DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    print("[INFO] Usando PgBouncer - search_path configurado via SERVER_RESET_QUERY", file=sys.stderr)
+    logger.info("Usando PgBouncer - search_path configurado via SERVER_RESET_QUERY")
 else:
     # PostgreSQL directo: Con search_path en URL para desarrollo local
     DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?options=-c%20search_path%3Dpublic"
-    print("[INFO] Usando PostgreSQL directo - search_path en URL", file=sys.stderr)
+    logger.info("Usando PostgreSQL directo - search_path en URL")
 
 # Configuración de Auth0 (desde variables de entorno)
-AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "gdilatam.us.auth0.com")
-AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "https://gdilatam.us.auth0.com/api/v2/")
+AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")
+AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "")
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "")
 AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")  # REQUERIDO en producción
 AUTH0_ALGORITHMS = ["RS256"]
@@ -67,13 +70,25 @@ AUTH0_ALGORITHMS = ["RS256"]
 TESTING_MODE = os.getenv("TESTING_MODE", "false").lower() == "true"
 
 if TESTING_MODE:
-    # Bloquear TESTING_MODE en ambientes de producción de Railway
+    # Bloquear TESTING_MODE en ambientes de producción
     railway_env = os.getenv("RAILWAY_ENVIRONMENT_NAME", "").lower()
     if "production" in railway_env or "prod" in railway_env:
-        print("[SECURITY] TESTING_MODE=true detectado en producción - DESACTIVANDO", file=sys.stderr)
+        logger.warning("TESTING_MODE=true detectado en producción Railway - DESACTIVANDO")
         TESTING_MODE = False
+    elif os.getenv("FLY_APP_NAME"):
+        fly_app = os.getenv("FLY_APP_NAME", "")
+        # Apps donde TESTING_MODE esta permitido: dev y demo (playground)
+        allowed = "-dev" in fly_app or fly_app.startswith("demo-")
+        if not allowed:
+            TESTING_MODE = False
+            logger.warning(f"TESTING_MODE desactivado: Fly.io producción ({fly_app})")
+        else:
+            logger.warning(f"TESTING_MODE habilitado en Fly.io ({fly_app})")
     else:
-        print("[WARNING] TESTING_MODE está habilitado - Auth0 bypass activo. NO usar en producción.", file=sys.stderr)
+        logger.warning("TESTING_MODE está habilitado - Auth0 bypass activo. NO usar en producción.")
+
+# Modo demo: permite auto-crear usuarios en onboarding
+DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
 # Configuración del sistema de expedientes
 MUNICIPIO_PRINCIPAL_ID = "550e8400-e29b-41d4-a716-446655440000"  # San Miguel
@@ -81,19 +96,6 @@ MUNICIPIO_ACRONYM = "SMG"
 
 # Configuración de numeración de expedientes
 EXPEDIENTE_PREFIX = "EE"  # Prefijo para expedientes
-
-# Configuración de estados
-CASE_STATUS_ACTIVE = "active"
-CASE_STATUS_INACTIVE = "inactive" 
-CASE_STATUS_ARCHIVED = "archived"
-
-# Tipos de movimientos
-MOVEMENT_TYPES = {
-    "CREATION": "creation",
-    "TRANSFER": "transfer", 
-    "ASSIGNMENT": "assignment",
-    "STATUS_CHANGE": "status_change"
-}
 
 # Configuración de paginación
 DEFAULT_PAGE_SIZE = 20
@@ -108,14 +110,14 @@ def init_db_pool():
     try:
         connection_pool = SimpleConnectionPool(
             minconn=5,   # Aumentado de 2 a 5 para mejor rendimiento
-            maxconn=50,  # Aumentado de 20 a 50 (seguro para Railway Pro con 100 max)
+            maxconn=50,  # Aumentado de 20 a 50 (seguro para Fly.io Postgres con 100 max)
             dsn=DATABASE_URL,
             cursor_factory=RealDictCursor
         )
-        print("[OK] Pool de conexiones PostgreSQL inicializado correctamente")
+        logger.info("Pool de conexiones PostgreSQL inicializado correctamente")
         return True
     except Exception as e:
-        print(f"[ERROR] Error inicializando pool de conexiones: {e}")
+        logger.error(f"Error inicializando pool de conexiones: {e}")
         return False
 
 
@@ -187,13 +189,13 @@ def get_db_connection(schema_name: str):
     # Si ya hay una conexión activa en este contexto (llamadas anidadas), reutilizarla
     existing_conn = _current_connection.get()
     if existing_conn is not None:
-        print(f"[DB_CONNECTION] Reutilizando conexión existente (llamada anidada)")
+        logger.debug("Reutilizando conexión existente (llamada anidada)")
         # IMPORTANTE: NO hacer yield directamente, necesitamos configurar search_path
         # porque podría ser un schema diferente al de la llamada padre
         set_command = "SET LOCAL" if PGBOUNCER_TRANSACTION_MODE else "SET"
         with existing_conn.cursor() as setup_cursor:
             setup_cursor.execute(f'{set_command} search_path TO "{validated_schema}", public')
-        print(f"[DB_CONNECTION] {set_command} search_path TO \"{validated_schema}\", public (nested)")
+        logger.debug(f"{set_command} search_path TO \"{validated_schema}\", public (nested)")
         yield existing_conn
         return
 
@@ -226,7 +228,7 @@ def get_db_connection(schema_name: str):
         set_command = "SET LOCAL" if PGBOUNCER_TRANSACTION_MODE else "SET"
         with connection.cursor() as setup_cursor:
             setup_cursor.execute(f'{set_command} search_path TO "{validated_schema}", public')
-        print(f"[DB_CONNECTION] {set_command} search_path TO \"{validated_schema}\", public")
+        logger.debug(f"{set_command} search_path TO \"{validated_schema}\", public")
 
         # Registrar conexión en ContextVar para reutilización en llamadas anidadas
         token = _current_connection.set(connection)
@@ -261,7 +263,7 @@ def get_db_connection(schema_name: str):
             try:
                 with connection.cursor() as reset_cursor:
                     reset_cursor.execute("RESET search_path")
-                print(f"[DB_CONNECTION] RESET search_path (antes de putconn)")
+                logger.debug("RESET search_path (antes de putconn)")
             except (psycopg2.OperationalError, psycopg2.InterfaceError):
                 # Conexión cerrada, marcar como mala
                 connection_is_bad = True
@@ -357,8 +359,18 @@ def execute_query(query: str, params: tuple = None, fetch: bool = True, fetch_on
                 cursor.execute(query, params)
 
                 if fetch_one:
-                    return cursor.fetchone()
+                    # INSERT ... RETURNING sin match (ej. WHERE NOT EXISTS falso)
+                    # deja al cursor sin resultset: cursor.fetchone() lanza
+                    # ProgrammingError "no results to fetch". Devolver None.
+                    if cursor.description is None:
+                        return None
+                    try:
+                        return cursor.fetchone()
+                    except psycopg2.ProgrammingError:
+                        return None
                 elif fetch:
+                    if cursor.description is None:
+                        return []
                     return cursor.fetchall()
                 else:
                     return None
@@ -367,7 +379,7 @@ def execute_query(query: str, params: tuple = None, fetch: bool = True, fetch_on
             error_msg = str(e).lower()
             # Retry solo si es un error de conexión cerrada o perdida
             if "closed" in error_msg or "lost" in error_msg or "terminated" in error_msg:
-                print(f"[WARN] Intento {attempt + 1}/{retry_count} falló (conexión cerrada), reintentando...")
+                logger.warning(f"Intento {attempt + 1}/{retry_count} falló (conexión cerrada), reintentando...")
                 # NOTA: No cerrar todo el pool (closeall) porque afectaría otros requests en curso.
                 # La conexión fallida ya fue cerrada con putconn(close=True) en get_db_connection.
                 # El pool creará una nueva conexión automáticamente en el siguiente getconn().
@@ -376,11 +388,11 @@ def execute_query(query: str, params: tuple = None, fetch: bool = True, fetch_on
                 # Si no es error de conexión, no reintentar
                 raise
         except Exception as e:
-            print(f"[ERROR] Error ejecutando consulta: {e}")
+            logger.error(f"Error ejecutando consulta: {e}")
             raise
 
     # Si llegamos aquí, todos los intentos fallaron
-    print(f"[ERROR] Error ejecutando consulta después de {retry_count} intentos: {last_error}")
+    logger.error(f"Error ejecutando consulta después de {retry_count} intentos: {last_error}")
     raise last_error
 
 def execute_update(
@@ -410,7 +422,7 @@ def execute_update(
             cursor.execute(query, params)
             return True
     except Exception as e:
-        print(f"[ERROR] Error ejecutando actualización: {e}")
+        logger.error(f"Error ejecutando actualización: {e}")
         raise
 
 @contextmanager
@@ -511,7 +523,7 @@ def execute_single_update(
                 "rows_affected": rows_affected
             }
     except Exception as e:
-        print(f"[ERROR] Error en execute_single_update: {e}")
+        logger.error(f"Error en execute_single_update: {e}")
         raise
 
 def test_connection() -> bool:
@@ -520,7 +532,7 @@ def test_connection() -> bool:
         result = execute_query("SELECT 1 as test", schema_name="public")
         return result is not None and len(result) > 0
     except Exception as e:
-        print(f"[ERROR] Error probando conexion: {e}")
+        logger.error(f"Error probando conexion: {e}")
         return False
 
 # Funciones específicas para expedientes
@@ -540,55 +552,6 @@ def get_case_number_format(department_acronym: str, municipality_acronym: str, y
     if year is None:
         year = datetime.now().year
     return f"{EXPEDIENTE_PREFIX}-{year}-{{sequence:06d}}-{municipality_acronym}-{department_acronym}"
-
-def get_next_case_sequence(year: int = None, *, schema_name: str) -> int:
-    """
-    Obtener siguiente número secuencial GLOBAL para expedientes del año.
-    Usa Advisory Lock para prevenir race conditions.
-
-    Args:
-        year: Año para buscar secuencia (opcional, usa año actual por defecto)
-        schema_name: Schema del tenant (multi-tenant, compatible con PgBouncer transaction mode)
-
-    Returns:
-        Siguiente número secuencial (entero)
-
-    Note:
-        - La secuencia es GLOBAL por año (no por departamento)
-        - Thread-safe usando pg_advisory_xact_lock
-        - El lock se libera automáticamente al finalizar la transacción
-    """
-    from datetime import datetime
-    if year is None:
-        year = datetime.now().year
-
-    # Usar Advisory Lock para serializar el acceso
-    # El ID 999999 es arbitrario, solo para identificar este lock
-    # Se libera automáticamente al commit/rollback de la transacción
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            try:
-                # Adquirir lock exclusivo para numeración de expedientes
-                cursor.execute("SELECT pg_advisory_xact_lock(999999)")
-
-                # Ahora buscar el máximo de forma segura (nadie más puede ejecutar esto simultáneamente)
-                query = """
-                    SELECT COALESCE(MAX(
-                        CAST(SUBSTRING(case_number FROM '\\d{4}-(\\d+)-') AS INTEGER)
-                    ), 0) + 1 as next_sequence
-                    FROM cases
-                    WHERE EXTRACT(YEAR FROM created_at) = %s
-                """
-                cursor.execute(query, (year,))
-                result = cursor.fetchone()
-
-                conn.commit()  # Commit libera el advisory lock automáticamente
-
-                return result['next_sequence'] if result else 1
-            except Exception as e:
-                conn.rollback()
-                print(f"[ERROR] Error obteniendo secuencia de expediente: {e}")
-                raise
 
 # Funciones de validación
 def check_user_exists(user_id: str, *, schema_name: str) -> bool:
@@ -624,6 +587,25 @@ def check_document_exists(document_id: str, *, schema_name: str) -> bool:
     result = execute_query(
         "SELECT id FROM document_draft WHERE id = %s LIMIT 1",
         (document_id,),
+        fetch=True,
+        schema_name=schema_name
+    )
+    return result is not None and len(result) > 0
+
+def check_case_exists(case_id: str, *, schema_name: str) -> bool:
+    """
+    Verifica si un expediente existe en la base de datos.
+
+    Args:
+        case_id: UUID del expediente
+        schema_name: Schema del tenant (multi-tenant)
+
+    Returns:
+        True si existe, False en caso contrario
+    """
+    result = execute_query(
+        "SELECT id FROM cases WHERE id = %s LIMIT 1",
+        (case_id,),
         fetch=True,
         schema_name=schema_name
     )

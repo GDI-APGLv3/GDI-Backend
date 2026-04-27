@@ -12,14 +12,19 @@ ARQUITECTURA:
 - Evita duplicación de código
 - Facilita mantenimiento y testing
 
-FLUJO GENERAL (7 pasos):
-1. Crear documento draft
-2. Guardar contenido HTML y firmante
-3. Generar número oficial (shared/numbering.py con advisory lock)
-4. Construir payload para Legal Orchestrator
-5. INSERT en official_documents (reservar número)
-6. Llamar Legal Orchestrator
-7. Actualizar a 'signed'
+FLUJO GENERAL:
+MOMENTO 1 (lock corto ~5ms):
+  1. Crear documento draft
+  2. Guardar contenido HTML
+  3. Recolectar datos (document_type_id, reference, signers, sector_ids)
+  4. Construir payload (sin official_document_number) y llamar generate_official_number()
+     → INSERT en official_documents con signed_at=NULL
+
+MOMENTO 2 (sin lock):
+  5. Generar PDF + Firmar (PDFComposer + Notary) + Subir a R2
+  6. Si OK: UPDATE official_documents SET signed_at, signers
+  7. Si falla: re-raise (la fila queda con signed_at=NULL como hueco aceptable)
+  8. Actualizar a 'signed'
 
 IMPORTANTE: Este helper NO vincula el documento al case.
 El llamador debe usar CaseService.link_official_document() después
@@ -28,8 +33,6 @@ para que el order_number se calcule correctamente con SELECT FOR UPDATE.
 
 from typing import Dict, Any, Callable
 from datetime import datetime
-import os
-import httpx
 import json
 from fastapi.concurrency import run_in_threadpool
 
@@ -38,9 +41,8 @@ from shared.exceptions import (
     ValidationError, ExternalServiceError, DocumentNotFoundError
 )
 from shared.logging import get_logger
-from shared.config import get_external_api_config
-from services.documents.lifecycle.creation import create_document
 from shared.numbering import generate_official_number
+from services.documents.lifecycle.creation import create_document
 
 logger = get_logger(__name__)
 
@@ -60,23 +62,24 @@ async def create_and_sign_case_document(
     """
     Función base genérica para crear documentos oficiales de expedientes.
 
-    Esta función ejecuta el flujo completo de creación de un documento:
-    - Crear draft
-    - Numerar con advisory lock
-    - Firmar vía Legal Orchestrator
-    - Vincular al case
+    Flujo:
+    MOMENTO 1: Crear draft → recolectar datos → construir payload → generate_official_number
+               (la función abre su propia conexión, lock ultra corto ~5ms)
+    MOMENTO 2: PDFComposer + Notary + R2 → UPDATE oficial si OK
+               Si falla: re-raise, signed_at=NULL queda como hueco aceptable.
 
     Args:
         document_type_acronym: Acrónimo del tipo (ej: "CAEX", "PV")
         reference: Referencia del documento
         html_builder: Función que retorna el HTML del documento
-        payload_builder: Función que construye payload para Legal Orchestrator
+        payload_builder: Función que construye payload para PDFComposer
             Recibe: (document_id, document_type_name, official_number, user_id)
             Retorna: Dict con payload completo
-        orchestrator_endpoint: Endpoint de Legal Orchestrator (ej: "/create-case-cover")
+        orchestrator_endpoint: Endpoint del flujo directo (ej: "/create-case-cover")
         case_id: UUID del expediente
         user_id: UUID del usuario creador (será numerador)
-        connection: Conexión de transacción externa (opcional)
+        connection: Ignorado (se mantiene por compatibilidad de firma).
+                    La función usa siempre su propia conexión.
 
     Returns:
         Dict con:
@@ -87,7 +90,7 @@ async def create_and_sign_case_document(
 
     Raises:
         ValidationError: Si faltan datos o validaciones fallan
-        ExternalServiceError: Si falla Legal Orchestrator
+        ExternalServiceError: Si falla PDFComposer/Notary/R2
     """
     logger.info(f"Iniciando creación de documento {document_type_acronym}")
     logger.info(f"Case ID: {case_id[:8]}...")
@@ -114,14 +117,12 @@ async def create_and_sign_case_document(
         # ================================================================
         logger.info("PASO 2: Construyendo HTML...")
 
-        # Llamar al builder para obtener HTML específico del tipo de documento
         html_content = html_builder()
 
-        logger.info("Guardando contenido y firmante...")
+        logger.info("Guardando contenido...")
 
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
-                # Actualizar document_draft con content
                 content_structure = {
                     "html": html_content,
                     "format_version": "2.0",
@@ -138,74 +139,42 @@ async def create_and_sign_case_document(
                     json.dumps(content_structure),
                     document_id
                 ))
-
-                # NOTA: NO insertar firmante aquí - create_document() ya lo asignó automáticamente
-                # como firmante numerador (ver services/documents/creation.py líneas 76-84)
-
                 conn.commit()
 
         logger.info("Contenido guardado")
 
         # ================================================================
-        # PASO 3: Generar número oficial con función centralizada
+        # PASO 3: Recolectar datos para generate_official_number
+        #         (document_type_id, reference, signers, signer_sector_ids)
         # ================================================================
-        logger.info("PASO 3: Generando número oficial...")
+        logger.info("PASO 3: Recolectando datos para generate_official_number...")
         current_year = datetime.now().year
-
-        official_number, department_id, global_sequence = await generate_official_number(
-            document_type_acronym=document_type_acronym,
-            user_id=user_id,
-            year=current_year,
-            connection=connection,  # Usar conexión de transacción si existe
-            schema_name=schema_name  # Multi-tenant
-        )
-
-        logger.info(f"Número oficial: {official_number}")
-        logger.info(f"Global sequence: {global_sequence}")
-
-        # ================================================================
-        # PASO 4: Construir payload para Legal Orchestrator
-        # ================================================================
-        logger.info("PASO 4: Construyendo payload...")
-
-        # Llamar al builder específico del tipo de documento
-        payload = payload_builder(document_id, document_type_name, official_number, user_id)
-
-        logger.info(f"Payload construido con {len(payload)} campos")
-
-        # ================================================================
-        # PASO 5: INSERT en official_documents (RESERVAR NÚMERO)
-        # ================================================================
-        logger.info("PASO 5: Reservando número en official_documents...")
 
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
                 # Obtener document_type_id
-                cursor.execute("""
-                    SELECT id as document_type_id
-                    FROM document_types
-                    WHERE acronym = %s
-                """, (document_type_acronym,))
+                cursor.execute(
+                    "SELECT id as document_type_id FROM document_types WHERE acronym = %s",
+                    (document_type_acronym,)
+                )
                 type_result = cursor.fetchone()
-
                 if not type_result:
                     raise ValidationError(f"Tipo de documento {document_type_acronym} no encontrado")
-
                 document_type_id = type_result['document_type_id']
 
                 # Obtener reference del documento
-                cursor.execute("""
-                    SELECT reference
-                    FROM document_draft
-                    WHERE id = %s
-                """, (document_id,))
+                cursor.execute(
+                    "SELECT reference FROM document_draft WHERE id = %s",
+                    (document_id,)
+                )
                 doc_data = cursor.fetchone()
-
                 if not doc_data:
                     raise DocumentNotFoundError(document_id)
+                reference_text = doc_data['reference']
 
                 # Obtener firmantes
-                signers_query = """
+                cursor.execute(
+                    """
                     SELECT json_agg(
                         json_build_object(
                             'user_id', ds.user_id,
@@ -219,93 +188,145 @@ async def create_and_sign_case_document(
                     FROM document_signers ds
                     JOIN users u ON ds.user_id = u.id
                     WHERE ds.document_id = %s
-                """
-                cursor.execute(signers_query, (document_id,))
+                    """,
+                    (document_id,)
+                )
                 signers_result = cursor.fetchone()
                 signers_data = signers_result['signers'] if signers_result else []
 
-                # Obtener sector_ids de los firmantes (para filtro por sector)
-                signer_sectors_query = """
+                # Obtener sector_ids de los firmantes
+                cursor.execute(
+                    """
                     SELECT ARRAY_AGG(DISTINCT u.sector_id) FILTER (WHERE u.sector_id IS NOT NULL) as sector_ids
                     FROM document_signers ds
                     JOIN users u ON ds.user_id = u.id
                     WHERE ds.document_id = %s
-                """
-                cursor.execute(signer_sectors_query, (document_id,))
+                    """,
+                    (document_id,)
+                )
                 signer_sectors_result = cursor.fetchone()
                 signer_sector_ids = signer_sectors_result['sector_ids'] if signer_sectors_result else None
 
-                # INSERT en official_documents
-                insert_official = """
-                    INSERT INTO official_documents (
-                        id, reference, content, official_number, year,
-                        department_id, numerator_id, signed_at, document_type_id,
-                        global_sequence, signers, signer_sector_ids
-                    ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s::jsonb, %s)
-                """
-                cursor.execute(insert_official, (
-                    document_id,
-                    doc_data['reference'],
-                    json.dumps(payload),  # Guardar payload completo
-                    official_number,
-                    current_year,
-                    department_id,
-                    user_id,
-                    document_type_id,
-                    global_sequence,
-                    json.dumps(signers_data) if signers_data else None,
-                    signer_sector_ids
-                ))
-                conn.commit()
-
-        logger.info("Número reservado en BD")
+        logger.info("Datos recolectados")
 
         # ================================================================
-        # PASO 6: Llamar a Legal Orchestrator
+        # PASO 4: Construir payload para PDFComposer y reservar numero oficial
+        #         generate_official_number abre su propia conexión,
+        #         lock ultra corto ~5ms, INSERT con signed_at=NULL.
         # ================================================================
-        logger.info(f"PASO 6: Llamando Legal Orchestrator {orchestrator_endpoint}...")
+        logger.info("PASO 4: Construyendo payload y generando número oficial (lock ultra corto ~5ms)...")
+
+        # Construir payload sin official_document_number: ese campo
+        # no es usado por PDFComposer (no está en sus modelos Pydantic
+        # ni en los templates). El INSERT en official_documents guarda
+        # este payload limpio como content.
+        payload = payload_builder(document_id, document_type_name, None, user_id)
+        # Quitar official_document_number si el builder lo incluyó
+        payload.pop("official_document_number", None)
+        logger.info(f"Payload construido con {len(payload)} campos")
+
+        official_number, department_id, global_sequence = await generate_official_number(
+            document_type_acronym=document_type_acronym,
+            user_id=user_id,
+            year=current_year,
+            schema_name=schema_name,
+            document_id=document_id,
+            reference=reference_text,
+            document_type_id=document_type_id,
+            content=payload,
+            signers=signers_data,
+            signer_sector_ids=signer_sector_ids,
+        )
+
+        logger.info(f"Número oficial: {official_number}")
+        logger.info(f"Global sequence: {global_sequence}")
+
+        # Inyectar official_number en payload para uso de Notary y R2
+        # (no se persiste en official_documents.content, solo se usa en memoria)
+        payload["official_document_number"] = official_number
+
+        # ================================================================
+        # PASO 6: Generar PDF, firmar y subir a R2 (MOMENTO 2)
+        # ================================================================
+        logger.info(f"PASO 6: Ejecutando flujo directo {orchestrator_endpoint}...")
 
         try:
-            api_result = await _call_legal_orchestrator(orchestrator_endpoint, payload, schema_name=schema_name)
-            logger.info("Legal Orchestrator exitoso")
+            api_result = await _route_document_creation(orchestrator_endpoint, payload, schema_name=schema_name)
+            logger.info("Flujo directo exitoso")
 
         except Exception as e:
-            # Si falla Legal Orchestrator, hacer rollback de official_documents
-            logger.error(f"Legal Orchestrator falló - {str(e)}")
-            logger.error("Ejecutando ROLLBACK...")
-
-            with get_db_connection(schema_name) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        DELETE FROM official_documents
-                        WHERE id = %s
-                    """, (document_id,))
-                    conn.commit()
-
-            logger.error("Rollback completado")
-            raise ExternalServiceError(f"Error en Legal Orchestrator: {str(e)}")
+            # PDFComposer/Notary/R2 falló.
+            # NO hacemos DELETE de official_documents.
+            # La fila queda con signed_at=NULL (hueco aceptable por diseño).
+            logger.error(f"Flujo directo falló: {str(e)}")
+            logger.error(
+                f"official_documents queda con signed_at=NULL para doc={document_id}. "
+                f"Número {official_number} reservado como hueco aceptable."
+            )
+            raise ExternalServiceError(f"Error en flujo directo: {str(e)}")
 
         # ================================================================
-        # PASO 7: Actualizar a 'signed'
+        # PASO 7: UPDATE official_documents (signed_at + signers)
+        #         NO INSERT - generate_official_number ya insertó con signed_at=NULL
         # ================================================================
-        logger.info("PASO 7: Actualizando estados a 'signed'...")
+        logger.info("PASO 7: Confirmando firma en official_documents (UPDATE)...")
 
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
-                # Actualizar document_draft
-                cursor.execute("""
-                    UPDATE document_draft
-                    SET status = 'signed'
-                    WHERE id = %s
-                """, (document_id,))
+                # Marcar como firmado
+                cursor.execute(
+                    """
+                    UPDATE official_documents
+                    SET signed_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND signed_at IS NULL
+                    """,
+                    (document_id,)
+                )
 
-                # Actualizar document_signers
-                cursor.execute("""
+                # Actualizar el firmante en el array signers con jsonb_set
+                # Formato ISO con T y Z para consistencia con numerator.py (commit 490cd24)
+                cursor.execute(
+                    """
+                    UPDATE official_documents
+                    SET signers = (
+                        SELECT jsonb_agg(
+                            CASE WHEN s->>'user_id' = %s
+                                THEN jsonb_set(
+                                    jsonb_set(s, '{status}', '"signed"'),
+                                    '{signed_at}', to_jsonb(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                                )
+                                ELSE s
+                            END
+                        )
+                        FROM jsonb_array_elements(signers) s
+                    )
+                    WHERE id = %s
+                    """,
+                    (user_id, document_id)
+                )
+                conn.commit()
+
+        logger.info("official_documents actualizado con signed_at y signers")
+
+        # ================================================================
+        # PASO 8: Actualizar a 'signed'
+        # ================================================================
+        logger.info("PASO 8: Actualizando estados a 'signed'...")
+
+        with get_db_connection(schema_name) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE document_draft SET status = 'signed' WHERE id = %s",
+                    (document_id,)
+                )
+                cursor.execute(
+                    """
                     UPDATE document_signers
                     SET status = 'signed', signed_at = CURRENT_TIMESTAMP
                     WHERE document_id = %s AND user_id = %s
-                """, (document_id, user_id))
-
+                    """,
+                    (document_id, user_id)
+                )
                 conn.commit()
 
         logger.info("Estados actualizados")
@@ -321,30 +342,35 @@ async def create_and_sign_case_document(
         }
 
     except Exception as e:
-        # Si hay error después de crear el documento, limpiarlo
-        logger.error(f"ERROR GENERAL: {str(e)}")
-        logger.error("Limpiando documento...")
-
-        try:
-            with get_db_connection(schema_name) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("DELETE FROM document_signers WHERE document_id = %s", (document_id,))
-                    cursor.execute("DELETE FROM document_draft WHERE id = %s", (document_id,))
-                    conn.commit()
-            logger.error("Documento limpiado")
-        except Exception as cleanup_error:
-            logger.error(f"ERROR en limpieza: {cleanup_error}")
-
+        # Error general: NO limpiar document_draft ni document_signers.
+        #
+        # Si el error ocurrió ANTES de generate_official_number:
+        #   - document_draft queda en estado 'draft' (sin número oficial)
+        #   - document_signers queda intacto
+        #   - No hay fila en official_documents → estado consistente
+        #
+        # Si el error ocurrió DESPUÉS de generate_official_number (PDFComposer/Notary/R2):
+        #   - official_documents queda con signed_at=NULL (hueco aceptable por diseño)
+        #   - document_draft queda en estado 'draft' → consistente con el hueco
+        #   - document_signers queda intacto → consistente
+        #
+        # El llamador maneja el error. El usuario reintenta manualmente.
+        logger.error(
+            f"ERROR GENERAL en create_and_sign_case_document ({document_type_acronym}): {str(e)} | "
+            f"doc={document_id} queda como draft con signed_at=NULL en official_documents "
+            f"(si generate_official_number ya ejecutó). Hueco aceptable por diseño."
+        )
         raise
 
 
-async def _call_legal_orchestrator(endpoint: str, payload: Dict[str, Any], *, schema_name: str) -> Dict[str, Any]:
+async def _route_document_creation(endpoint: str, payload: Dict[str, Any], *, schema_name: str) -> Dict[str, Any]:
     """
-    Phase 6: Enrutador de flujos directos (sin Legal Orchestrator).
+    Enrutador de flujos directos PDFComposer + Notary + R2.
 
     Detecta el endpoint y ejecuta flujo directo correspondiente:
     - /create-case-cover → PDFComposer /create-case/ + Notary + R2 oficial
     - /create-transfer-document → PDFComposer /move/ + Notary + R2 oficial
+    - /create-ifrlm → PDFComposer /ifrlm/ + Notary + R2 oficial
 
     Args:
         endpoint: Ruta del endpoint (ej: "/create-case-cover")
@@ -361,57 +387,73 @@ async def _call_legal_orchestrator(endpoint: str, payload: Dict[str, Any], *, sc
     logger.info(f"Detectando endpoint: {endpoint}")
 
     if endpoint == "/create-case-cover":
-        # Phase 5: CAEX - Flujo directo
         logger.info("Ejecutando flujo directo para CAEX...")
-        return await _direct_pdf_flow_case_cover(payload, schema_name=schema_name)
+        from services.shared.pdfcomposer_api import call_pdfcomposer_create_case
+        return await _direct_pdf_flow(
+            call_pdfcomposer_create_case, payload,
+            schema_name=schema_name, label="caratula"
+        )
 
     elif endpoint == "/create-transfer-document":
-        # Phase 6: PV - Flujo directo
         logger.info("Ejecutando flujo directo para PV...")
-        return await _direct_pdf_flow_transfer(payload, schema_name=schema_name)
+        from services.shared.pdfcomposer_api import call_pdfcomposer_create_transfer
+        return await _direct_pdf_flow(
+            call_pdfcomposer_create_transfer, payload,
+            schema_name=schema_name, label="pase"
+        )
+
+    elif endpoint == "/create-ifrlm":
+        logger.info("Ejecutando flujo directo para IFRLM...")
+        from services.shared.pdfcomposer_api import call_pdfcomposer_create_ifrlm
+        return await _direct_pdf_flow(
+            call_pdfcomposer_create_ifrlm, payload,
+            schema_name=schema_name, label="informe de legajo"
+        )
 
     else:
-        # Endpoint no soportado
         raise NotImplementedError(
             f"Endpoint {endpoint} no soportado. "
-            f"Legal Orchestrator ha sido eliminado en Phase 6. "
-            f"Endpoints soportados: /create-case-cover, /create-transfer-document"
+            f"Endpoints soportados: /create-case-cover, /create-transfer-document, /create-ifrlm"
         )
 
 
-async def _direct_pdf_flow_case_cover(payload: Dict[str, Any], *, schema_name: str) -> Dict[str, Any]:
+async def _direct_pdf_flow(
+    pdfcomposer_call,
+    payload: Dict[str, Any],
+    *,
+    schema_name: str,
+    label: str = "documento"
+) -> Dict[str, Any]:
     """
-    Phase 5: Flujo directo para generar carátulas CAEX.
+    Flujo generico: PDFComposer -> Notary -> R2.
 
     Ejecuta:
-    1. PDFComposer /create-case/ → Generar PDF
-    2. Notary /sign-pdf → Firmar PDF (CON official_number + city)
+    1. PDFComposer (via pdfcomposer_call) -> Generar PDF
+    2. Notary /sign-pdf -> Firmar PDF (CON official_number + city)
     3. Upload a R2 oficial
 
     Args:
-        payload: Dict con datos del documento (mismo formato que Legal Orchestrator)
+        pdfcomposer_call: Funcion async que llama a PDFComposer
+        payload: Dict con datos del documento
         schema_name: Schema del tenant para R2
+        label: Etiqueta para logs (ej: "caratula", "pase", "informe de legajo")
 
     Returns:
-        Dict con status=success (compatible con respuesta anterior)
+        Dict con status=success
 
     Raises:
-        ExternalServiceError: Si falla algún paso
+        ExternalServiceError: Si falla algun paso
     """
-    logger.info("Iniciando flujo directo para carátula...")
+    logger.info(f"Iniciando flujo directo para {label}...")
 
     try:
-        # Paso 1: Generar PDF con PDFComposer /create-case/
-        logger.info("1/3: Generando PDF con PDFComposer /create-case/...")
-
-        from services.shared.pdfcomposer_api import call_pdfcomposer_create_case
-
-        pdf_bytes = await call_pdfcomposer_create_case(payload)
+        # Paso 1: Generar PDF con PDFComposer
+        logger.info(f"1/3: Generando PDF para {label}...")
+        pdf_bytes = await pdfcomposer_call(payload, schema_name=schema_name)
         logger.info(f"PDF generado: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
 
-        # Paso 2: Firmar PDF con Notary (CON official_number y city)
+        # Paso 2: Firmar PDF con Notary
         logger.info("2/3: Firmando PDF con Notary...")
-
         from services.shared.notary_api import call_notary_sign_pdf
 
         signed_pdf_bytes = await call_notary_sign_pdf(
@@ -422,13 +464,13 @@ async def _direct_pdf_flow_case_cover(payload: Dict[str, Any], *, schema_name: s
             signer_municipality=payload["signer_municipality"],
             official_number=payload["official_document_number"],
             city=payload["city_name"],
-            tenant_id=schema_name  # Para firma PAdES
+            tenant_id=schema_name,
+            schema_name=schema_name
         )
         logger.info(f"PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
 
         # Paso 3: Subir a R2 oficial
         logger.info("3/3: Subiendo a R2 oficial...")
-
         from services.storage.cloudflare import get_tenant_r2_client
         r2_client = get_tenant_r2_client(schema_name=schema_name)
 
@@ -436,12 +478,11 @@ async def _direct_pdf_flow_case_cover(payload: Dict[str, Any], *, schema_name: s
         await run_in_threadpool(r2_client.upload_oficial, signed_pdf_bytes, filename_oficial)
         logger.info(f"Subido a R2 oficial: {filename_oficial}")
 
-        logger.info("Flujo completado exitosamente")
+        logger.info(f"Flujo completado exitosamente para {label}")
 
-        # Retornar respuesta compatible con formato anterior
         return {
             "status": "success",
-            "message": f"Carátula creada exitosamente: {payload['official_document_number']}",
+            "message": f"{label.capitalize()} creado exitosamente: {payload['official_document_number']}",
             "data": {
                 "official_document_number": payload['official_document_number'],
                 "signed_url": f"https://cloudflare.r2/oficial/{filename_oficial}"
@@ -450,78 +491,4 @@ async def _direct_pdf_flow_case_cover(payload: Dict[str, Any], *, schema_name: s
 
     except Exception as e:
         logger.error(f"Error en flujo directo: {str(e)}")
-        raise ExternalServiceError(f"Error creando carátula: {str(e)}")
-
-
-async def _direct_pdf_flow_transfer(payload: Dict[str, Any], *, schema_name: str) -> Dict[str, Any]:
-    """
-    Phase 6: Flujo directo para generar pases PV.
-
-    Ejecuta:
-    1. PDFComposer /move/ → Generar PDF
-    2. Notary /sign-pdf → Firmar PDF (CON official_number + city)
-    3. Upload a R2 oficial
-
-    Args:
-        payload: Dict con datos del documento (mismo formato que Legal Orchestrator)
-        schema_name: Schema del tenant para R2
-
-    Returns:
-        Dict con status=success (compatible con respuesta anterior)
-
-    Raises:
-        ExternalServiceError: Si falla algún paso
-    """
-    logger.info("Iniciando flujo directo para pase...")
-
-    try:
-        # Paso 1: Generar PDF con PDFComposer /move/
-        logger.info("1/3: Generando PDF con PDFComposer /move/...")
-
-        from services.shared.pdfcomposer_api import call_pdfcomposer_create_transfer
-
-        pdf_bytes = await call_pdfcomposer_create_transfer(payload)
-        logger.info(f"PDF generado: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
-
-        # Paso 2: Firmar PDF con Notary (CON official_number y city)
-        logger.info("2/3: Firmando PDF con Notary...")
-
-        from services.shared.notary_api import call_notary_sign_pdf
-
-        signed_pdf_bytes = await call_notary_sign_pdf(
-            pdf_bytes=pdf_bytes,
-            signer_name=payload["signer_full_name"],
-            signer_seal=payload["signer_seal"],
-            signer_department=payload["signer_department"],
-            signer_municipality=payload["signer_municipality"],
-            official_number=payload["official_document_number"],
-            city=payload["city_name"],
-            tenant_id=schema_name  # Para firma PAdES
-        )
-        logger.info(f"PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
-
-        # Paso 3: Subir a R2 oficial
-        logger.info("3/3: Subiendo a R2 oficial...")
-
-        from services.storage.cloudflare import get_tenant_r2_client
-        r2_client = get_tenant_r2_client(schema_name=schema_name)
-
-        filename_oficial = f"{payload['official_document_number']}.pdf"
-        await run_in_threadpool(r2_client.upload_oficial, signed_pdf_bytes, filename_oficial)
-        logger.info(f"Subido a R2 oficial: {filename_oficial}")
-
-        logger.info("Flujo completado exitosamente")
-
-        # Retornar respuesta compatible con formato anterior
-        return {
-            "status": "success",
-            "message": f"Pase creado exitosamente: {payload['official_document_number']}",
-            "data": {
-                "official_document_number": payload['official_document_number'],
-                "signed_url": f"https://cloudflare.r2/oficial/{filename_oficial}"
-            }
-        }
-
-    except Exception as e:
-        logger.error(f"Error en flujo directo: {str(e)}")
-        raise ExternalServiceError(f"Error creando pase: {str(e)}")
+        raise ExternalServiceError(f"Error creando {label}: {str(e)}")

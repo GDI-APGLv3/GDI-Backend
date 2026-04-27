@@ -54,7 +54,7 @@ class OnboardingUser(BaseModel):
     email: EmailStr = Field(
         ...,
         description="Email del usuario autenticado",
-        example="juan.perez@gdilatam.com"
+        example="juan.perez@example.com"
     )
 
     full_name: str = Field(
@@ -83,7 +83,7 @@ class UserProfile(BaseModel):
     email: str = Field(
         ...,
         description="Email del usuario",
-        example="juan.perez@gdilatam.com"
+        example="juan.perez@example.com"
     )
 
     sector_id: Optional[str] = Field(

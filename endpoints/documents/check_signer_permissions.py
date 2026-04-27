@@ -109,16 +109,16 @@ def _build_response(row: dict) -> dict:
     }
 
 
-def _build_fail_open_response() -> dict:
-    """Respuesta fail-open cuando no se encuentran datos (tipo o usuario inexistente)."""
+def _build_fail_closed_response(user_id: str, document_type_acronym: str) -> dict:
+    """Respuesta fail-closed cuando no se encuentran datos (tipo o usuario inexistente)."""
     return {
-        "can_sign": True,
-        "has_rank_permission": True,
-        "has_sector_permission": True,
+        "can_sign": False,
+        "has_rank_permission": False,
+        "has_sector_permission": False,
         "user_rank": None,
         "required_rank": None,
         "document_type": None,
-        "message": "OK",
+        "message": f"No se encontraron datos para el usuario o tipo de documento '{document_type_acronym}'. Verificar que ambos existan.",
     }
 
 
@@ -135,7 +135,7 @@ def _build_fail_open_response() -> dict:
     **Logica:**
     - Verifica rango del usuario vs rango requerido por el tipo de documento
     - Verifica que el sector del usuario tenga habilitado ese tipo de documento
-    - Fail-open: si no se encuentra el tipo o usuario, retorna can_sign=true
+    - Fail-closed: si no se encuentra el tipo o usuario, retorna can_sign=false
 
     **Diferencia con la firma real:**
     - Este endpoint NO necesita un document_draft existente
@@ -173,13 +173,13 @@ async def check_signer_permissions(
             schema_name=schema_name,
         )
 
-        # Fail-open: si no hay resultado, permitir (tipo o usuario no existe)
+        # Fail-closed: si no hay resultado, denegar (tipo o usuario no existe)
         if not result:
             logger.warning(
                 f"No se encontraron datos para user={user_id}, "
-                f"doc_type={document_type_acronym}. Fail-open: can_sign=true"
+                f"doc_type={document_type_acronym}. Fail-closed: can_sign=false"
             )
-            return _build_fail_open_response()
+            return _build_fail_closed_response(user_id, document_type_acronym)
 
         response = _build_response(result)
 

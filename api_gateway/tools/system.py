@@ -293,6 +293,22 @@ def search_users(ctx: MCPContext, search: str, limit: int = 10) -> Dict[str, Any
             schema_name=ctx.schema_name
         )
 
+        # Filter response to only full_name and sector for MCP privacy
+        if result and "users" in result:
+            filtered_users = []
+            for user in result["users"]:
+                dept = user.get("department_acronym") or ""
+                sector = user.get("sector_acronym") or ""
+                sector_display = f"{dept}#{sector}" if (dept and sector) else (dept or sector or None)
+                filtered_users.append({
+                    "full_name": user.get("full_name"),
+                    "sector": sector_display,
+                })
+            result = {
+                "users": filtered_users,
+                "total_found": result.get("total_found", len(filtered_users)),
+            }
+
         logger.info(f"[MCP] search_users - búsqueda completada")
 
         return result
@@ -499,17 +515,17 @@ def check_signer_permissions(
             schema_name=ctx.schema_name
         )
 
-        # Fail-open: si no hay resultado, permitir (tipo o usuario no existe)
+        # Fail-closed: si no hay resultado, denegar (tipo o usuario no existe)
         if not result:
-            logger.warning(f"[MCP] check_signer_permissions - no se encontraron datos, fail-open: can_sign=true")
+            logger.warning(f"[MCP] check_signer_permissions - no se encontraron datos para user={user_id_to_check}, doc_type={document_type_acronym}")
             return {
-                "can_sign": True,
-                "has_rank_permission": True,
-                "has_sector_permission": True,
+                "can_sign": False,
+                "has_rank_permission": False,
+                "has_sector_permission": False,
                 "user_rank": None,
                 "required_rank": None,
                 "document_type": None,
-                "message": "OK"
+                "message": f"No se encontraron datos para el usuario o tipo de documento '{document_type_acronym}'. Verificar que ambos existan."
             }
 
         has_rank = result["has_rank_permission"]

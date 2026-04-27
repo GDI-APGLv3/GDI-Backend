@@ -15,7 +15,7 @@ from datetime import datetime
 # Configuración de la BD de pruebas (caboose)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:password@localhost:5432/railway"
+    "postgresql://postgres:password@localhost:5433/railway"
 )
 
 TEST_SCHEMA = "100_test"

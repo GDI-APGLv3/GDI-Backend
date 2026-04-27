@@ -47,10 +47,16 @@ def get_user_profile(user_id: str, *, schema_name: str) -> Dict[str, Any]:
         UserNotFoundError: Si el usuario no existe o está inactivo
         DatabaseError: Si hay un error de base de datos
     """
+    # DEBUG: Logging para diagnosticar 404
     logger.info(f"[PROFILE] Buscando user_id={user_id}, schema_name={schema_name}")
 
     try:
         with get_db_cursor(schema_name=schema_name) as cursor:
+            # DEBUG: Verificar search_path actual
+            cursor.execute("SHOW search_path")
+            current_path = cursor.fetchone()
+            logger.info(f"[PROFILE] search_path actual: {current_path}")
+
             # Ejecutar query
             query = get_user_by_id_query()
             logger.info(f"[PROFILE] Ejecutando query con user_id={user_id}")

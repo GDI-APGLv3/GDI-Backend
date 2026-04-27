@@ -19,6 +19,7 @@ class FeedCase(BaseModel):
     case_type: str = Field(..., example="HABI")
     case_type_name: str = Field(..., example="Habilitación Comercial")
     ai_summary: Optional[str] = Field(None, example="Expediente de habilitación comercial...")
+    short_ai_summary: Optional[str] = Field(None, example="Habilitación comercial para Panadería Don Luis")
 
 
 class FeedUser(BaseModel):
@@ -26,6 +27,7 @@ class FeedUser(BaseModel):
     name: str = Field(..., example="Juan Pérez")
     photo_url: Optional[str] = Field(None, example="https://example.com/photo.jpg")
     sector: str = Field(..., example="ADGEN#LEGAL")
+    sector_color: Optional[str] = Field(None, example="#3B82F6")
 
 
 class FeedDocument(BaseModel):
@@ -33,6 +35,7 @@ class FeedDocument(BaseModel):
     official_number: str = Field(..., example="INF-2026-00001234")
     reference: str = Field(..., example="Informe de factibilidad")
     ai_summary: Optional[str] = Field(None, example="El informe indica que...")
+    short_resume: Optional[str] = Field(None, example="Informe favorable de factibilidad")
 
 
 class FeedMovement(BaseModel):

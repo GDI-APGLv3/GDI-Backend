@@ -98,7 +98,8 @@ def create_movement(
     assigned_user_id: Optional[str] = None,
     supporting_document_id: Optional[str] = None,
     *,
-    schema_name: str
+    schema_name: str,
+    auth_source: str = "jwt"
 ) -> str:
     """
     Crear nuevo movimiento en el expediente.
@@ -139,7 +140,7 @@ def create_movement(
             assigned_user_id or None,
             reason, True,
             supporting_document_id or None
-        ), schema_name=schema_name)
+        ), schema_name=schema_name, user_id=user_id, auth_source=auth_source)
 
         logger.info(f"Movement created successfully: {movement_id}")
         return movement_id
@@ -184,13 +185,31 @@ def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
         case_number = case_result[0]['case_number']
         ai_summary = case_result[0].get('ai_summary')
         ai_summary_updated_at = case_result[0].get('ai_summary_updated_at')
+        short_ai_summary = case_result[0].get('short_ai_summary')
 
         # Obtener movimientos estructurados
         movements = get_case_movements(case_id, schema_name=schema_name)
 
+        # Calcular qué propuestas ya fueron resueltas (aceptadas → document_link,
+        # o rechazadas → document_proposal_reject). Si una propuesta sobre un
+        # supporting_document_id ya tiene resolución, la ocultamos del timeline.
+        resolved_proposal_doc_ids = {
+            m.get('supporting_document_id')
+            for m in movements
+            if m.get('type') in (MOVEMENT_TYPE_DOCUMENT_LINK, MOVEMENT_TYPE_DOCUMENT_PROPOSAL_REJECT)
+            and m.get('supporting_document_id')
+        }
+
         # Formatear cada movimiento con mensaje legible
         formatted_movements = []
         for mov in movements:
+            # Saltar propuestas ya resueltas
+            if (
+                mov.get('type') == MOVEMENT_TYPE_DOCUMENT_PROPOSAL
+                and mov.get('supporting_document_id') in resolved_proposal_doc_ids
+            ):
+                continue
+
             # Extraer datos del usuario
             user_data = mov.get('user')
             if user_data and isinstance(user_data, dict):
@@ -271,6 +290,7 @@ def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
             "case_number": case_number,
             "ai_summary": ai_summary,
             "ai_summary_updated_at": ai_summary_updated_at.isoformat() if ai_summary_updated_at else None,
+            "short_ai_summary": short_ai_summary,
             "movements": formatted_movements
         }
 

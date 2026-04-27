@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entorno virtual
+env/
+venv/
+.venv/
+
+# Archivos de configuración locales
+.env
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log

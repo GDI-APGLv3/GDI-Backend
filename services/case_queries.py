@@ -226,16 +226,6 @@ def get_assigned_sectors_query() -> str:
     """
 
 
-def get_user_validation_query() -> str:
-    """
-    Query para validar que un usuario existe.
-    
-    Returns:
-        str: Query SQL que retorna user_id y full_name
-    """
-    return "SELECT id as user_id, full_name FROM users WHERE id = %s"
-
-
 def get_case_basic_info_query() -> str:
     """
     Query para obtener información básica de un caso.
@@ -438,7 +428,7 @@ def get_user_validation_query() -> str:
             s.department_id
         FROM users u
         LEFT JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s
+        WHERE u.id = %s AND u.estado = 1
     """
 
 
@@ -517,7 +507,7 @@ def get_case_movements_query() -> str:
         LEFT JOIN departments d2 ON adm.department_id = d2.id
         LEFT JOIN sectors asn ON cm.assigned_sector_id = asn.id
         LEFT JOIN departments d3 ON asn.department_id = d3.id
-        LEFT JOIN official_documents sd ON cm.supporting_document_id = sd.id
+        LEFT JOIN official_documents sd ON cm.supporting_document_id = sd.id AND sd.signed_at IS NOT NULL
         WHERE cm.case_id = %s
         ORDER BY cm.created_at DESC
     """
@@ -534,9 +524,15 @@ def get_official_documents_query() -> str:
             cod.is_active,
             od.id as document_id,
             od.official_number,
-            od.reference
+            od.reference,
+            od.short_resume,
+            u.full_name as linked_by,
+            COALESCE(d.acronym || '#' || s.acronym, '') as linked_sector
         FROM case_official_documents cod
-        JOIN official_documents od ON cod.official_document_id = od.id
+        JOIN official_documents od ON cod.official_document_id = od.id AND od.signed_at IS NOT NULL
+        LEFT JOIN users u ON cod.linking_user_id = u.id
+        LEFT JOIN sectors s ON u.sector_id = s.id
+        LEFT JOIN departments d ON s.department_id = d.id
         WHERE cod.case_id = %s
         ORDER BY cod.order_number ASC
     """
@@ -551,6 +547,7 @@ def get_proposed_documents_query() -> str:
             cpd.document_draft_id,
             cpd.proposing_date,
             dd.reference,
+            dd.short_resume,
             dd.status,
             dd.document_number,
             dt.name as document_type_name,
@@ -620,7 +617,7 @@ def get_case_number_query() -> str:
     Query para obtener el número de un expediente.
     """
     return """
-        SELECT case_number, ai_summary, ai_summary_updated_at
+        SELECT case_number, ai_summary, ai_summary_updated_at, short_ai_summary
         FROM cases
         WHERE id = %s
     """
@@ -677,14 +674,9 @@ def update_document_content_query() -> str:
     """
 
 
-def insert_official_document_query() -> str:
-    """Query para insertar en official_documents"""
-    return """
-        INSERT INTO official_documents (
-            id, reference, content, official_number, year,
-            department_id, numerator_id, signed_at, document_type_id, global_sequence, signers, signer_sector_ids
-        ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s::jsonb, %s)
-    """
+def delete_document_chunks_by_official_query() -> str:
+    """Query para eliminar chunks de un documento oficial (antes del rollback de official_documents por FK)"""
+    return "DELETE FROM document_chunks WHERE official_document_id = %s"
 
 
 def delete_official_document_query() -> str:

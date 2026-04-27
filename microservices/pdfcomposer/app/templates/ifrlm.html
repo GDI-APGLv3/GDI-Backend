@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>IFRLM - GDILatam.com</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% include 'fonts.html' %}
+  <style>
+    /* Design System GDI - Tokens alineados con frontend shadcn/ui Neutral */
+    :root {
+      --foreground: rgba(10, 10, 10, 1.00);
+      --foreground-muted: rgba(115, 115, 115, 1.00);
+      --card: rgba(255, 255, 255, 1.00);
+      --card-foreground: rgba(10, 10, 10, 1.00);
+      --background-muted: rgba(245, 245, 245, 1.00);
+      --border: rgba(229, 229, 229, 1.00);
+      --border-strong: rgba(163, 163, 163, 1.00);
+      --divider: rgba(212, 212, 212, 1.00);
+      --primary: rgba(23, 23, 23, 1.00);
+      --primary-foreground: rgba(250, 250, 250, 1.00);
+      --radius-sm: 4px;
+      --radius-md: 6px;
+      --radius-lg: 8px;
+      --radius-card: 10px;
+      --elevation-sm: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.06);
+    }
+
+    .corner-img {
+      position: absolute;
+      top: 25.5pt;
+      right: 0;
+      width: 50%;
+      height: 85px;
+      object-fit: cover;
+      border-radius: 0 0px 0 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+    .header {
+      position: relative;
+      z-index: 1;
+    }
+    @page { size: A4; margin: 7mm 10mm 10mm 10mm; }
+    body {
+      margin: 0;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      color: var(--foreground);
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      line-height: 1.35;
+      font-size: 10pt;
+    }
+    .page { }
+    /* Cabecera */
+    .doc-type {
+      font-size: 13pt;
+      font-weight: 700;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      color: var(--foreground);
+      letter-spacing: 0.02em;
+      margin: 0;
+    }
+    .citydate, .docnum {
+      font-size: 11pt;
+      font-weight: 500;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      margin: 0;
+    }
+    .docnum {
+      margin-bottom: 24pt;
+    }
+    .ref {
+      font-size: 11pt;
+      font-weight: 400;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      margin-top: 12pt;
+      margin-bottom: 0.3em;
+    }
+    .frase-anual {
+      text-align: center;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      font-weight: 300;
+      font-size: 8pt;
+      color: var(--foreground-muted);
+      margin: 0;
+      padding: 0;
+      height: 12pt;
+      line-height: 12pt;
+      overflow: hidden;
+    }
+    .divider {
+      border-top: 1.5px solid var(--divider);
+      margin: 0;
+      margin-bottom: 0.3em;
+    }
+
+    /* Contenedor principal de informe */
+    .ifrlm-container {
+      background-color: var(--card);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-card);
+      padding: 24px;
+      margin-top: 0.3em;
+    }
+
+    /* Grid de campos */
+    .fields-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Fila de 2 columnas */
+    .row-2-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    /* Campo individual */
+    .field-box {
+      border-radius: var(--radius-md);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    /* Estilos para numero de legajo (prominente) */
+    .field-numero {
+      background-color: var(--background-muted);
+      border-left: 3px solid var(--primary);
+    }
+
+    /* Estilos para familia del registro */
+    .field-registry {
+      background-color: var(--background-muted);
+      border: 1px solid var(--border);
+    }
+
+    /* Estilos para estado y fecha */
+    .field-state, .field-fecha {
+      background-color: var(--card);
+      border: 1px solid var(--border);
+    }
+
+    /* Label de campo */
+    .field-label {
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--foreground-muted);
+      margin: 0;
+    }
+
+    .field-label-primary {
+      color: var(--primary);
+    }
+
+    /* Valor de campo */
+    .field-value {
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      color: var(--foreground);
+      margin: 0;
+      line-height: 1.4;
+    }
+
+    .field-value-numero {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .field-value-registry {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .field-value-standard {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* Snapshot content */
+    .snapshot-section {
+      margin-top: 1em;
+    }
+
+    .snapshot-content {
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      font-size: 10pt;
+      font-weight: 300;
+      line-height: 1.5;
+      color: var(--foreground);
+    }
+
+    .snapshot-content p {
+      margin: 0.4em 0;
+    }
+
+    .snapshot-content table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.5em 0;
+    }
+
+    .snapshot-content th,
+    .snapshot-content td {
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      font-size: 9pt;
+      text-align: left;
+    }
+
+    .snapshot-content th {
+      background-color: var(--background-muted);
+      font-weight: 600;
+    }
+
+    /* Contenido adicional */
+    .content {
+      margin-top: 0.3em;
+      text-align: justify;
+      font-size: 10pt;
+      font-weight: 300;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div class="page" style="position: relative;">
+    {% if logo_data %}
+    <img class="corner-img" src="{{logo_data}}" alt="Imagen esquina superior derecha">
+    {% endif %}
+    <section class="header">
+      <p class="frase-anual">{% if frase_anual %}{{ frase_anual }}{% else %}&nbsp;{% endif %}</p>
+      <br>
+      <p class="doc-type">{{name_acrony_type}} - {{document_type}}</p>
+      <p class="citydate" style="color: white;"> [ciudad y fecha a asignar]</p>
+      <p class="docnum" style="color: white;"> [numero a asignar]</p>
+      <br>
+      <p class="ref">{{reference}}</p>
+      <div class="divider"></div>
+    </section>
+
+    <main class="content">
+      <!-- Campos del informe de legajo -->
+      <div class="ifrlm-container">
+        <div class="fields-grid">
+          <!-- Primera fila: Numero de Legajo | Familia del Registro -->
+          <div class="row-2-cols">
+            <!-- Numero de legajo -->
+            <div class="field-box field-numero">
+              <span class="field-label field-label-primary">N° de Legajo</span>
+              <span class="field-value field-value-numero">{{record_number}}</span>
+            </div>
+
+            <!-- Familia del registro -->
+            <div class="field-box field-registry">
+              <span class="field-label">Familia del Registro</span>
+              <span class="field-value field-value-registry">{{registry_name}}</span>
+            </div>
+          </div>
+
+          <!-- Segunda fila: Estado | Fecha de Generacion -->
+          <div class="row-2-cols">
+            <!-- Estado -->
+            <div class="field-box field-state">
+              <span class="field-label">Estado</span>
+              <span class="field-value field-value-standard">{{state}}</span>
+            </div>
+
+            <!-- Fecha de generacion -->
+            <div class="field-box field-fecha">
+              <span class="field-label">Fecha de Generacion</span>
+              <span class="field-value field-value-standard">{{generated_at}}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Snapshot del legajo -->
+      <div class="snapshot-section">
+        <div class="snapshot-content">
+          {{ snapshot_html|safe }}
+        </div>
+      </div>
+
+      <div id="end-text" style="color: white;">end-text</div>
+
+    </main>
+  </div>
+</body>
+</html>

@@ -47,6 +47,7 @@ def get_user_global_search_flags(user_id: str, *, schema_name: str) -> dict:
 
     Returns:
         dict con 'can_global_search_documents' y 'can_global_search_cases' (bool)
+        Defaults a False si el usuario no existe o los campos son NULL.
     """
     from database import execute_query
 
@@ -57,11 +58,11 @@ def get_user_global_search_flags(user_id: str, *, schema_name: str) -> dict:
     )
 
     if not result:
-        return {"can_global_search_documents": True, "can_global_search_cases": True}
+        return {"can_global_search_documents": False, "can_global_search_cases": False}
 
     return {
-        "can_global_search_documents": result[0].get("can_global_search_documents", True),
-        "can_global_search_cases": result[0].get("can_global_search_cases", True),
+        "can_global_search_documents": result[0].get("can_global_search_documents", False),
+        "can_global_search_cases": result[0].get("can_global_search_cases", False),
     }
 
 

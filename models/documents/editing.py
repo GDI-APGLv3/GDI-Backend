@@ -102,7 +102,11 @@ class SaveDocumentRequest(BaseModel):
     signers: Optional[List[DocumentSigner]] = Field(None, description="Lista de firmantes del documento")
     recipients: Optional[NoteRecipientsInput] = Field(
         None,
-        description="Destinatarios para NOTA (TO, CC, BCC). Solo aplica a documentos tipo NOTA. Se ignora para otros tipos."
+        description="Destinatarios para NOTA (TO, CC, BCC con sector_ids). Solo aplica a documentos tipo NOTA."
+    )
+    memo_recipients: Optional[NoteRecipientsInput] = Field(
+        None,
+        description="Destinatarios para MEMO (TO, CC, BCC con user_ids). Solo aplica a documentos tipo MEMO."
     )
     proposed_case_ids: Optional[List[str]] = Field(
         None,
@@ -211,6 +215,7 @@ class DocumentDetailResponse(BaseModel):
     pdf_url: Optional[str] = Field(None, description="URL del PDF para documentos importados")
     # Campo para resumen generado por IA
     resume: Optional[str] = Field(None, description="Resumen del documento generado por IA")
+    short_resume: Optional[str] = Field(None, description="Resumen corto del documento generado por IA (1-2 oraciones)")
     # Campo para destinatarios de NOTA
     recipients: Optional[Dict[str, List]] = Field(
         None,

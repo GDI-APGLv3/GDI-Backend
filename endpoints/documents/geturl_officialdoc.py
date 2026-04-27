@@ -2,7 +2,7 @@
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
 from shared.exceptions import (
-    DocumentNotFoundError, ValidationError, DocumentStateError,
+    AuthorizationError, DocumentNotFoundError, ValidationError, DocumentStateError,
     exception_to_http_exception
 )
 from services.documents.retrieval.official_url import get_official_document_url
@@ -53,6 +53,10 @@ async def get_url_official_doc(
     )
 
     try:
+        from services.documents.permissions import can_user_view_document
+        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+            from shared.exceptions import AuthorizationError
+            raise AuthorizationError("No tiene permisos para ver este documento")
         result = await get_official_document_url(document_id, schema_name=schema_name)
 
         logger.info(
@@ -72,7 +76,7 @@ async def get_url_official_doc(
             "message": "URL de descarga obtenida exitosamente"
         }
 
-    except (DocumentNotFoundError, ValidationError, DocumentStateError) as e:
+    except (DocumentNotFoundError, ValidationError, DocumentStateError, AuthorizationError) as e:
         logger.error(
             "Error obteniendo URL de documento oficial",
             extra={

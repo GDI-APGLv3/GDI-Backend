@@ -1,0 +1,12 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+gunicorn==21.2.0
+python-multipart==0.0.6
+PyPDF2==3.0.1
+reportlab==4.0.7
+PyMuPDF>=1.24.0
+
+# PAdES Digital Signature
+pyhanko==0.25.2
+cryptography>=42.0.0
+certifi>=2024.2.2

@@ -320,13 +320,12 @@ async def check_notary() -> Dict[str, Any]:
 
 
 async def check_cloudflare_r2() -> Dict[str, Any]:
-    """Verificar estado de Cloudflare R2"""
+    """Verificar estado de Cloudflare R2 usando list_buckets (no requiere tenant)"""
     try:
+        from botocore.exceptions import ClientError
         from services.storage.cloudflare import get_r2_client
 
         endpoint = os.getenv('CF_R2_ENDPOINT')
-        bucket_oficial = os.getenv('CF_R2_BUCKET_OFICIAL')
-        bucket_tosign = os.getenv('CF_R2_BUCKET_TOSIGN')
 
         if not endpoint:
             return {
@@ -353,13 +352,27 @@ async def check_cloudflare_r2() -> Dict[str, Any]:
                 }
             }
 
-        # Intentar listar objetos (no descarga nada, solo verifica acceso)
+        # Usar list_buckets para validar credenciales sin necesitar bucket name de tenant
         start_time = time.time()
-        r2_client._client.list_objects_v2(
-            Bucket=bucket_oficial,
-            MaxKeys=1
-        )
-        latency_ms = (time.time() - start_time) * 1000
+        try:
+            response = r2_client._client.list_buckets()
+            latency_ms = (time.time() - start_time) * 1000
+            bucket_names = [b["Name"] for b in response.get("Buckets", [])]
+            extra_details = {
+                "buckets_found": len(bucket_names),
+                "buckets": bucket_names
+            }
+        except ClientError as e:
+            latency_ms = (time.time() - start_time) * 1000
+            error_code = e.response.get("Error", {}).get("Code", "")
+            # AccessDenied = credenciales validas pero sin permiso ListBuckets
+            # (token "Object Read & Write" no incluye ListAllMyBuckets)
+            if error_code == "AccessDenied":
+                extra_details = {
+                    "note": "Credentials valid (authenticated). Token lacks ListBuckets permission - this is expected for Object Read & Write tokens.",
+                }
+            else:
+                raise
 
         # Determinar status
         if latency_ms < THRESHOLDS["cloudflare_r2"]["healthy"]:
@@ -375,13 +388,13 @@ async def check_cloudflare_r2() -> Dict[str, Any]:
             "threshold": THRESHOLDS["cloudflare_r2"],
             "details": {
                 "endpoint": endpoint,
-                "bucket_oficial": bucket_oficial,
-                "bucket_tosign": bucket_tosign,
                 "configured": True,
-                "reachable": True
+                "reachable": True,
+                **extra_details
             }
         }
     except Exception as e:
+        # Errores reales: InvalidAccessKeyId, SignatureDoesNotMatch, network errors
         return {
             "status": "unhealthy",
             "latency_ms": None,
@@ -622,12 +635,12 @@ def generate_alerts(services: Dict[str, Any], system_metrics: Dict[str, Any]) ->
 @router.get("/livez")
 async def liveness_probe():
     """
-    Liveness Probe - Endpoint simple para Railway health checks.
+    Liveness Probe - Endpoint simple para Fly.io health checks.
 
     Retorna 200 OK si el servicio está vivo (sin verificar dependencias).
     Para verificación completa de dependencias, usar /api/v1/system/health.
     """
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 
 @router.get("/api/v1/system/health")
@@ -709,7 +722,7 @@ async def health_check():
     # Construir response
     response = {
         "status": system_status,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now().isoformat(),
         "version": "1.2",
         "environment": os.getenv("RAILWAY_ENVIRONMENT", "local"),
         "services": services,

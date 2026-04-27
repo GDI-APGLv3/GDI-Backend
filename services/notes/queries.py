@@ -139,7 +139,8 @@ def get_sent_notes_query() -> str:
             ) as openings_count
         FROM official_documents od
         JOIN document_types dt ON dt.id = od.document_type_id
-        WHERE od.id IN (
+        WHERE od.signed_at IS NOT NULL
+        AND od.id IN (
             SELECT DISTINCT nr.document_id
             FROM notes_recipients nr
             WHERE nr.sender_sector_id = %s
@@ -155,7 +156,8 @@ def get_sent_notes_count_query() -> str:
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id
-        WHERE nr.sender_sector_id = %s
+        WHERE od.signed_at IS NOT NULL
+        AND nr.sender_sector_id = %s
     """
 
 
@@ -191,6 +193,7 @@ def get_received_notes_query() -> str:
         JOIN document_types dt ON dt.id = od.document_type_id
         JOIN sectors ss ON ss.id = nr.sender_sector_id
         JOIN departments sd ON sd.id = ss.department_id
+        WHERE od.signed_at IS NOT NULL
         ORDER BY od.signed_at DESC
         LIMIT %s OFFSET %s
     """
@@ -202,6 +205,7 @@ def get_received_notes_count_query() -> str:
         SELECT COUNT(*)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id AND nr.sector_id = %s AND nr.is_archived = false
+        WHERE od.signed_at IS NOT NULL
     """
 
 
@@ -223,6 +227,7 @@ def get_note_detail_query() -> str:
         JOIN document_types dt ON dt.id = od.document_type_id
         JOIN departments d ON d.id = od.department_id
         WHERE od.id = %s
+          AND od.signed_at IS NOT NULL
     """
 
 
@@ -288,6 +293,7 @@ def get_received_notes_multi_sector_query() -> str:
         JOIN document_types dt ON dt.id = od.document_type_id
         JOIN sectors ss ON ss.id = nr.sender_sector_id
         JOIN departments sd ON sd.id = ss.department_id
+        WHERE od.signed_at IS NOT NULL
         ORDER BY od.id, od.signed_at DESC
     """
 
@@ -329,7 +335,7 @@ def get_received_notes_multi_sector_paginated_query(date_where: str = "") -> str
             JOIN document_types dt ON dt.id = od.document_type_id
             JOIN sectors ss ON ss.id = nr.sender_sector_id
             JOIN departments sd ON sd.id = ss.department_id
-            WHERE 1=1 {date_where}
+            WHERE od.signed_at IS NOT NULL {date_where}
             ORDER BY od.id, nr.recipient_type
         )
         SELECT * FROM distinct_notes
@@ -344,7 +350,7 @@ def get_received_notes_multi_sector_count_query(date_where: str = "") -> str:
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id AND nr.sector_id = ANY(%s::uuid[]) AND nr.is_archived = false
-        WHERE 1=1 {date_where}
+        WHERE od.signed_at IS NOT NULL {date_where}
     """
 
 
@@ -380,7 +386,8 @@ def get_sent_notes_multi_sector_query(date_where: str = "") -> str:
             ) as openings_count
         FROM official_documents od
         JOIN document_types dt ON dt.id = od.document_type_id
-        WHERE od.id IN (
+        WHERE od.signed_at IS NOT NULL
+        AND od.id IN (
             SELECT DISTINCT nr.document_id
             FROM notes_recipients nr
             WHERE nr.sender_sector_id = ANY(%s::uuid[])
@@ -397,7 +404,8 @@ def get_sent_notes_multi_sector_count_query(date_where: str = "") -> str:
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id
-        WHERE nr.sender_sector_id = ANY(%s::uuid[])
+        WHERE od.signed_at IS NOT NULL
+        AND nr.sender_sector_id = ANY(%s::uuid[])
         {date_where}
     """
 
@@ -445,7 +453,8 @@ def get_received_notes_multi_sector_search_query(date_where: str = "") -> str:
             JOIN document_types dt ON dt.id = od.document_type_id
             JOIN sectors ss ON ss.id = nr.sender_sector_id
             JOIN departments sd ON sd.id = ss.department_id
-            WHERE (
+            WHERE od.signed_at IS NOT NULL
+            AND (
                 od.official_number ILIKE %s
                 OR od.reference ILIKE %s
                 OR od.content->>'html' ILIKE %s
@@ -466,7 +475,8 @@ def get_received_notes_multi_sector_search_count_query(date_where: str = "") -> 
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id AND nr.sector_id = ANY(%s::uuid[]) AND nr.is_archived = false
-        WHERE (
+        WHERE od.signed_at IS NOT NULL
+        AND (
             od.official_number ILIKE %s
             OR od.reference ILIKE %s
             OR od.content->>'html' ILIKE %s
@@ -508,7 +518,8 @@ def get_sent_notes_multi_sector_search_query(date_where: str = "") -> str:
             ) as openings_count
         FROM official_documents od
         JOIN document_types dt ON dt.id = od.document_type_id
-        WHERE od.id IN (
+        WHERE od.signed_at IS NOT NULL
+        AND od.id IN (
             SELECT DISTINCT nr.document_id
             FROM notes_recipients nr
             WHERE nr.sender_sector_id = ANY(%s::uuid[])
@@ -531,7 +542,8 @@ def get_sent_notes_multi_sector_search_count_query(date_where: str = "") -> str:
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id
-        WHERE nr.sender_sector_id = ANY(%s::uuid[])
+        WHERE od.signed_at IS NOT NULL
+        AND nr.sender_sector_id = ANY(%s::uuid[])
         AND (
             od.official_number ILIKE %s
             OR od.reference ILIKE %s
@@ -614,6 +626,7 @@ def get_archived_notes_multi_sector_paginated_query() -> str:
             JOIN document_types dt ON dt.id = od.document_type_id
             JOIN sectors ss ON ss.id = nr.sender_sector_id
             JOIN departments sd ON sd.id = ss.department_id
+            WHERE od.signed_at IS NOT NULL
             ORDER BY od.id, nr.recipient_type
         )
         SELECT * FROM distinct_notes
@@ -628,6 +641,7 @@ def get_archived_notes_multi_sector_count_query() -> str:
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id AND nr.sector_id = ANY(%s::uuid[]) AND nr.is_archived = true
+        WHERE od.signed_at IS NOT NULL
     """
 
 
@@ -670,7 +684,8 @@ def get_archived_notes_multi_sector_search_query() -> str:
             JOIN document_types dt ON dt.id = od.document_type_id
             JOIN sectors ss ON ss.id = nr.sender_sector_id
             JOIN departments sd ON sd.id = ss.department_id
-            WHERE (
+            WHERE od.signed_at IS NOT NULL
+            AND (
                 od.official_number ILIKE %s
                 OR od.reference ILIKE %s
                 OR od.content->>'html' ILIKE %s
@@ -690,7 +705,8 @@ def get_archived_notes_multi_sector_search_count_query() -> str:
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN notes_recipients nr ON nr.document_id = od.id AND nr.sector_id = ANY(%s::uuid[]) AND nr.is_archived = true
-        WHERE (
+        WHERE od.signed_at IS NOT NULL
+        AND (
             od.official_number ILIKE %s
             OR od.reference ILIKE %s
             OR od.content->>'html' ILIKE %s

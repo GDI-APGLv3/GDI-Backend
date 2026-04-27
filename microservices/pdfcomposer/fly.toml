@@ -1,0 +1,36 @@
+# Plantilla Fly.io para el microservicio PDFComposer (generación de PDFs).
+app = "<YOUR_PDFCOMPOSER_APP_NAME>"
+primary_region = "gru"
+
+[build]
+
+[env]
+  TZ = "America/Argentina/Buenos_Aires"
+  PORT = "8080"
+  PYTHONUNBUFFERED = "1"
+  GUNICORN_WORKERS = "2"
+  GUNICORN_TIMEOUT = "120"
+  DEFAULT_TIMEOUT = "60"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 20
+    soft_limit = 15
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"

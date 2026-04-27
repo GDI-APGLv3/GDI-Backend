@@ -19,8 +19,9 @@ sys.path.insert(0, backend_root)
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from api_gateway.auth_rest import validate_rest_api_key
-from api_gateway.tools import cases, documents, system, notes
+from api_gateway.auth_rest import validate_rest_api_key, validate_backup_api_key, BackupAuthError, check_and_log_sync_access
+from api_gateway.tools import cases, documents, system, notes, sync, records, memos, search
+from shared.exceptions import NotFoundError, AuthorizationError, ValidationError, DocumentNotFoundError, DocumentStateError, ConflictError
 
 # Nota: 'system' ya estaba importado pero aseguramos que esté disponible
 
@@ -75,8 +76,10 @@ async def api_search_cases(request: Request) -> JSONResponse:
         - page_size: int (default 20, max 100)
         - search: str (buscar por case_number o reference)
         - status: str (active, inactive, archived)
-        - date_filter: str (today, week, month, year)
+        - date_filter: str (hoy, ayer, ultimos_7_dias, ultimos_30_dias)
         - sector_filter: str (acronym del sector)
+
+    Response includes: case_number, reference, ai_summary, short_ai_summary
 
     Headers:
         - X-API-Key: required
@@ -107,9 +110,11 @@ async def api_search_cases(request: Request) -> JSONResponse:
 
     except ValueError as e:
         return _error_response(str(e), status_code=400)
+    except ValidationError as e:
+        return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en search_cases")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_case(request: Request) -> JSONResponse:
@@ -124,10 +129,14 @@ async def api_get_case(request: Request) -> JSONResponse:
 
     Headers:
         - X-API-Key: required
-        - X-User-ID: optional (omitir salta validación de permisos)
+        - X-User-ID: required
     """
     api_key = _get_api_key(request)
     user_id = _get_user_id(request)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
     case_id = request.path_params.get("case_id")
 
     try:
@@ -158,7 +167,7 @@ async def api_get_case(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_case")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_case_history(request: Request) -> JSONResponse:
@@ -168,12 +177,18 @@ async def api_get_case_history(request: Request) -> JSONResponse:
     Path params:
         - case_id: UUID del expediente
 
+    Response includes: ai_summary, short_ai_summary, movements
+
     Headers:
         - X-API-Key: required
         - X-User-ID: required
     """
     api_key = _get_api_key(request)
     user_id = _get_user_id(request)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
     case_id = request.path_params.get("case_id")
 
     try:
@@ -185,14 +200,16 @@ async def api_get_case_history(request: Request) -> JSONResponse:
         return _error_response("case_id es requerido", status_code=400)
 
     try:
-        result = cases.get_case_history(ctx=ctx, case_id=case_id)
+        result = cases.get_case_history(ctx=ctx, case_id=case_id, user_id=user_id)
         return _success_response(result)
 
+    except ValueError as e:
+        return _error_response(str(e), status_code=403)
     except Exception as e:
         if "no encontrado" in str(e).lower():
             return _error_response("Expediente no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en get_case_history")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_case_documents(request: Request) -> JSONResponse:
@@ -204,10 +221,14 @@ async def api_get_case_documents(request: Request) -> JSONResponse:
 
     Headers:
         - X-API-Key: required
-        - X-User-ID: optional (para validar permisos)
+        - X-User-ID: required
     """
     api_key = _get_api_key(request)
     user_id = _get_user_id(request)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
     case_id = request.path_params.get("case_id")
 
     try:
@@ -230,7 +251,7 @@ async def api_get_case_documents(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=403)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_case_documents")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_case_permissions(request: Request) -> JSONResponse:
@@ -246,6 +267,10 @@ async def api_get_case_permissions(request: Request) -> JSONResponse:
     """
     api_key = _get_api_key(request)
     user_id = _get_user_id(request)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
     case_id = request.path_params.get("case_id")
 
     try:
@@ -255,9 +280,6 @@ async def api_get_case_permissions(request: Request) -> JSONResponse:
 
     if not case_id:
         return _error_response("case_id es requerido", status_code=400)
-
-    if not user_id:
-        return _error_response("X-User-ID header requerido", status_code=400)
 
     try:
         result = cases.get_case_permissions(
@@ -271,7 +293,7 @@ async def api_get_case_permissions(request: Request) -> JSONResponse:
         if "no encontrado" in str(e).lower():
             return _error_response("Expediente no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en get_case_permissions")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -321,7 +343,7 @@ async def api_search_documents(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en search_documents")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_document(request: Request) -> JSONResponse:
@@ -330,6 +352,8 @@ async def api_get_document(request: Request) -> JSONResponse:
 
     Path params:
         - document_id: UUID del documento
+
+    Response includes: ai_summary, short_resume, state_category, status, details
 
     Headers:
         - X-API-Key: required
@@ -356,11 +380,16 @@ async def api_get_document(request: Request) -> JSONResponse:
         )
         return _success_response(result)
 
+    except ValueError as e:
+        msg = str(e).lower()
+        if "permisos" in msg:
+            return _error_response(str(e), status_code=403)
+        return _error_response(str(e), status_code=400)
     except Exception as e:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Documento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en get_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_document_content(request: Request) -> JSONResponse:
@@ -391,15 +420,21 @@ async def api_get_document_content(request: Request) -> JSONResponse:
     try:
         result = documents.get_document_content(
             ctx=ctx,
-            document_id=document_id
+            document_id=document_id,
+            user_id=user_id
         )
         return _success_response(result)
 
+    except ValueError as e:
+        msg = str(e).lower()
+        if "permisos" in msg:
+            return _error_response(str(e), status_code=403)
+        return _error_response(str(e), status_code=400)
     except Exception as e:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Documento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en get_document_content")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_pending_signatures(request: Request) -> JSONResponse:
@@ -415,13 +450,13 @@ async def api_get_pending_signatures(request: Request) -> JSONResponse:
     api_key = _get_api_key(request)
     user_id = _get_user_id(request)
 
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
     try:
         ctx = validate_rest_api_key(api_key, user_id)
     except ValueError as e:
         return _error_response(str(e), status_code=401)
-
-    if not user_id:
-        return _error_response("X-User-ID header requerido", status_code=400)
 
     try:
         result = documents.get_pending_signatures(
@@ -434,7 +469,7 @@ async def api_get_pending_signatures(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_pending_signatures")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -465,7 +500,7 @@ async def api_get_document_types(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_document_types")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_user_info(request: Request) -> JSONResponse:
@@ -493,6 +528,13 @@ async def api_get_user_info(request: Request) -> JSONResponse:
     if not target_user_id:
         return _error_response("user_id path param es requerido", status_code=400)
 
+    # SEC-12: Solo permitir consultar la propia info
+    if target_user_id != auth_user_id:
+        return _error_response(
+            "Solo puede consultar su propia informacion de usuario",
+            status_code=403
+        )
+
     try:
         result = system.get_user_info(ctx=ctx, user_id=target_user_id)
         return _success_response(result)
@@ -503,7 +545,7 @@ async def api_get_user_info(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_user_info")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_document_url(request: Request) -> JSONResponse:
@@ -533,20 +575,32 @@ async def api_get_document_url(request: Request) -> JSONResponse:
     document_id = request.path_params.get("document_id")
 
     try:
-        ctx = validate_rest_api_key(api_key, user_id)
+        ctx = validate_rest_api_key(api_key, user_id, request=request)
     except ValueError as e:
         return _error_response(str(e), status_code=401)
 
     if not document_id:
         return _error_response("document_id es requerido", status_code=400)
 
+    # SEC-13: Verificar permisos del usuario sobre el documento
+    # Service auth (AI Worker) bypasea authz - necesita acceso a todos
+    # los documentos del tenant para transcripcion
+    if ctx.auth_source != "service":
+        from services.documents.permissions import can_user_view_document
+        if not can_user_view_document(document_id, user_id, schema_name=ctx.schema_name):
+            return _error_response(
+                "No tiene permisos para acceder a este documento",
+                status_code=403
+            )
+
     try:
-        # Buscar documento oficial en BD
+        # Buscar documento oficial en BD (solo firmados, signed_at NOT NULL)
         result = execute_query(
             """
             SELECT official_number
             FROM official_documents
             WHERE id = %s
+              AND signed_at IS NOT NULL
             """,
             (document_id,),
             fetch_one=True,
@@ -581,7 +635,7 @@ async def api_get_document_url(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_document_url")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -631,15 +685,20 @@ async def api_create_document(request: Request) -> JSONResponse:
             document_type_acronym=document_type_acronym,
             reference=reference,
             user_id=user_id,
-            case_id=case_id
+            case_id=case_id,
+            recipients=body.get("recipients")
         )
         return JSONResponse(result, status_code=201)
 
     except ValueError as e:
         return _error_response(str(e), status_code=400)
+    except ValidationError as e:
+        return _error_response(str(e), status_code=400)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
     except Exception as e:
         logger.exception(f"[REST API] Error en create_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_save_document(request: Request) -> JSONResponse:
@@ -684,19 +743,25 @@ async def api_save_document(request: Request) -> JSONResponse:
             user_id=user_id,
             content=body.get("content"),
             reference=body.get("reference"),
-            signers=body.get("signers")
+            signers=body.get("signers"),
+            recipients=body.get("recipients"),
+            proposed_case_ids=body.get("proposed_case_ids")
         )
         return _success_response(result)
 
     except ValueError as e:
         return _error_response(str(e), status_code=400)
+    except DocumentNotFoundError:
+        return _error_response("Documento no encontrado", status_code=404)
+    except DocumentStateError:
+        return _error_response("Documento no puede editarse en su estado actual", status_code=409)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except ValidationError as e:
+        return _error_response(str(e), status_code=400)
     except Exception as e:
-        if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
-            return _error_response("Documento no encontrado", status_code=404)
-        if "estado" in str(e).lower() or "state" in str(e).lower():
-            return _error_response("Documento no puede editarse en su estado actual", status_code=409)
         logger.exception(f"[REST API] Error en save_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_start_signing(request: Request) -> JSONResponse:
@@ -734,22 +799,28 @@ async def api_start_signing(request: Request) -> JSONResponse:
 
     except ValueError as e:
         return _error_response(str(e), status_code=400)
+    except ValidationError as e:
+        return _error_response(str(e), status_code=400)
+    except DocumentNotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except DocumentStateError as e:
+        return _error_response(str(e), status_code=409)
     except Exception as e:
         error_msg = str(e).lower()
         if "no autorizado" in error_msg or "unauthorized" in error_msg:
             return _error_response("Usuario no autorizado", status_code=403)
-        # Diferenciar tipos de "no encontrado" para mensajes más precisos
         if "usuario" in error_msg and "no encontrado" in error_msg:
             return _error_response("Usuario no encontrado", status_code=404)
         if "documento" in error_msg and "no encontrado" in error_msg:
             return _error_response("Documento no encontrado", status_code=404)
         if "no encontrado" in error_msg or "not found" in error_msg:
-            # Mantener mensaje original para otros casos de "no encontrado"
             return _error_response(str(e), status_code=404)
         if "estado" in error_msg or "state" in error_msg:
             return _error_response("Documento no puede firmarse en su estado actual", status_code=409)
         logger.exception(f"[REST API] Error en start_signing")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -771,6 +842,10 @@ async def api_get_case_by_number(request: Request) -> JSONResponse:
     """
     api_key = _get_api_key(request)
     user_id = _get_user_id(request)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
     case_number = request.path_params.get("case_number")
 
     try:
@@ -785,7 +860,7 @@ async def api_get_case_by_number(request: Request) -> JSONResponse:
         result = cases.get_case_by_number(
             ctx=ctx,
             case_number=case_number,
-            user_id=_get_user_id(request)
+            user_id=user_id
         )
 
         if not result:
@@ -795,7 +870,7 @@ async def api_get_case_by_number(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_case_by_number")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_prepare_assignment(request: Request) -> JSONResponse:
@@ -833,7 +908,7 @@ async def api_prepare_assignment(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en prepare_assignment")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_assign_case(request: Request) -> JSONResponse:
@@ -881,7 +956,7 @@ async def api_assign_case(request: Request) -> JSONResponse:
         return _error_response("reason es requerido", status_code=400)
 
     try:
-        result = cases.assign_case(
+        result = await cases.assign_case(
             ctx=ctx,
             case_id=case_id,
             target_sector_id=target_sector_id,
@@ -898,7 +973,7 @@ async def api_assign_case(request: Request) -> JSONResponse:
         if "permiso" in str(e).lower() or "authorization" in str(e).lower():
             return _error_response("Sin permisos para asignar", status_code=403)
         logger.exception(f"[REST API] Error en assign_case")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_close_assignment(request: Request) -> JSONResponse:
@@ -944,7 +1019,7 @@ async def api_close_assignment(request: Request) -> JSONResponse:
         return _error_response("reason es requerido", status_code=400)
 
     try:
-        result = cases.close_assignment(
+        result = await cases.close_assignment(
             ctx=ctx,
             case_id=case_id,
             movement_id=movement_id,
@@ -961,7 +1036,7 @@ async def api_close_assignment(request: Request) -> JSONResponse:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Movimiento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en close_assignment")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -992,7 +1067,7 @@ async def api_get_document_states(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_document_states")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1041,7 +1116,7 @@ async def api_sign_document(request: Request) -> JSONResponse:
         if "estado" in error_msg or "state" in error_msg:
             return _error_response("Documento no puede firmarse en su estado actual", status_code=409)
         logger.exception(f"[REST API] Error en sign_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_reject_document(request: Request) -> JSONResponse:
@@ -1100,7 +1175,7 @@ async def api_reject_document(request: Request) -> JSONResponse:
         if "estado" in error_msg or "state" in error_msg:
             return _error_response("Documento no puede rechazarse en su estado actual", status_code=409)
         logger.exception(f"[REST API] Error en reject_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_delete_document(request: Request) -> JSONResponse:
@@ -1145,7 +1220,7 @@ async def api_delete_document(request: Request) -> JSONResponse:
         if "estado" in error_msg or "state" in error_msg:
             return _error_response("Solo se pueden eliminar documentos en estado draft o rejected", status_code=409)
         logger.exception(f"[REST API] Error en delete_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1203,7 +1278,7 @@ async def api_create_case(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en create_case")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_transfer_case(request: Request) -> JSONResponse:
@@ -1251,7 +1326,7 @@ async def api_transfer_case(request: Request) -> JSONResponse:
         return _error_response("reason es requerido", status_code=400)
 
     try:
-        result = cases.transfer_case(
+        result = await cases.transfer_case(
             ctx=ctx,
             case_id=case_id,
             target_sector_id=target_sector_id,
@@ -1268,7 +1343,7 @@ async def api_transfer_case(request: Request) -> JSONResponse:
         if "permiso" in str(e).lower() or "authorization" in str(e).lower():
             return _error_response("Sin permisos para transferir", status_code=403)
         logger.exception(f"[REST API] Error en transfer_case")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_link_document(request: Request) -> JSONResponse:
@@ -1327,7 +1402,7 @@ async def api_link_document(request: Request) -> JSONResponse:
         if "no encontrado" in error_msg or "not found" in error_msg:
             return _error_response("Expediente o documento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en link_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_propose_document(request: Request) -> JSONResponse:
@@ -1381,7 +1456,7 @@ async def api_propose_document(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en propose_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_prepare_transfer(request: Request) -> JSONResponse:
@@ -1422,7 +1497,7 @@ async def api_prepare_transfer(request: Request) -> JSONResponse:
         if "permiso" in error_msg or "authorization" in error_msg:
             return _error_response("Sin permisos para transferir este expediente", status_code=403)
         logger.exception(f"[REST API] Error en prepare_transfer")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_accept_proposal(request: Request) -> JSONResponse:
@@ -1474,6 +1549,8 @@ async def api_accept_proposal(request: Request) -> JSONResponse:
 
     except ValueError as e:
         return _error_response(str(e), status_code=400)
+    except ValidationError as e:
+        return _error_response(str(e), status_code=400)
     except Exception as e:
         error_msg = str(e).lower()
         if "permiso" in error_msg or "authorization" in error_msg:
@@ -1481,7 +1558,7 @@ async def api_accept_proposal(request: Request) -> JSONResponse:
         if "no encontrado" in error_msg or "not found" in error_msg:
             return _error_response("Propuesta no encontrada", status_code=404)
         logger.exception(f"[REST API] Error en accept_proposal")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_reject_proposal(request: Request) -> JSONResponse:
@@ -1540,7 +1617,7 @@ async def api_reject_proposal(request: Request) -> JSONResponse:
         if "no encontrado" in error_msg or "not found" in error_msg:
             return _error_response("Propuesta no encontrada", status_code=404)
         logger.exception(f"[REST API] Error en reject_proposal")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1571,7 +1648,7 @@ async def api_get_sectors(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_sectors")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_case_templates(request: Request) -> JSONResponse:
@@ -1598,7 +1675,7 @@ async def api_get_case_templates(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_case_templates")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_search_users(request: Request) -> JSONResponse:
@@ -1636,7 +1713,7 @@ async def api_search_users(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en search_users")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1667,7 +1744,7 @@ async def api_get_dashboard_stats(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_dashboard_stats")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_dashboard_feed(request: Request) -> JSONResponse:
@@ -1707,7 +1784,7 @@ async def api_get_dashboard_feed(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en get_dashboard_feed")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1739,7 +1816,7 @@ async def api_get_notes(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=401)
 
     if not user_id:
-        return _error_response("X-User-ID header requerido", status_code=400)
+        return _error_response("X-User-ID es requerido", status_code=401)
 
     params = request.query_params
     page = int(params.get("page", 1))
@@ -1762,7 +1839,7 @@ async def api_get_notes(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_notes")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1802,7 +1879,7 @@ async def api_get_sector_users(request: Request) -> JSONResponse:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Sector no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en get_sector_users")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1842,11 +1919,16 @@ async def api_search_document_by_number(request: Request) -> JSONResponse:
         )
         return _success_response(result)
 
+    except ValueError as e:
+        msg = str(e).lower()
+        if "permisos" in msg:
+            return _error_response(str(e), status_code=403)
+        return _error_response(str(e), status_code=400)
     except Exception as e:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Documento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en search_document_by_number")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_signature_details(request: Request) -> JSONResponse:
@@ -1886,7 +1968,7 @@ async def api_get_signature_details(request: Request) -> JSONResponse:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Documento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en get_signature_details")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -1943,7 +2025,7 @@ async def api_import_document(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en import_document")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_replace_imported_pdf(request: Request) -> JSONResponse:
@@ -2002,7 +2084,7 @@ async def api_replace_imported_pdf(request: Request) -> JSONResponse:
         if "estado" in error_msg or "state" in error_msg:
             return _error_response("Solo se puede reemplazar PDF en documentos draft", status_code=409)
         logger.exception(f"[REST API] Error en replace_imported_pdf")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -2054,7 +2136,7 @@ async def api_check_signer_permissions(request: Request) -> JSONResponse:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Usuario o tipo de documento no encontrado", status_code=404)
         logger.exception(f"[REST API] Error en check_signer_permissions")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_list_all_users(request: Request) -> JSONResponse:
@@ -2081,7 +2163,7 @@ async def api_list_all_users(request: Request) -> JSONResponse:
 
     except Exception as e:
         logger.exception(f"[REST API] Error en list_all_users")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 # ============================================================================
@@ -2112,7 +2194,7 @@ async def api_get_sent_notes(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=401)
 
     if not user_id:
-        return _error_response("X-User-ID header requerido", status_code=400)
+        return _error_response("X-User-ID es requerido", status_code=401)
 
     params = request.query_params
     page = int(params.get("page", 1))
@@ -2133,7 +2215,7 @@ async def api_get_sent_notes(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_sent_notes")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_archived_notes(request: Request) -> JSONResponse:
@@ -2160,7 +2242,7 @@ async def api_get_archived_notes(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=401)
 
     if not user_id:
-        return _error_response("X-User-ID header requerido", status_code=400)
+        return _error_response("X-User-ID es requerido", status_code=401)
 
     params = request.query_params
     page = int(params.get("page", 1))
@@ -2181,7 +2263,7 @@ async def api_get_archived_notes(request: Request) -> JSONResponse:
         return _error_response(str(e), status_code=400)
     except Exception as e:
         logger.exception(f"[REST API] Error en get_archived_notes")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_archive_note(request: Request) -> JSONResponse:
@@ -2246,7 +2328,7 @@ async def api_archive_note(request: Request) -> JSONResponse:
         if "no encontrado" in error_msg or "not found" in error_msg:
             return _error_response("Nota no encontrada", status_code=404)
         logger.exception(f"[REST API] Error en archive_note")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
 
 
 async def api_get_note_detail(request: Request) -> JSONResponse:
@@ -2282,8 +2364,1152 @@ async def api_get_note_detail(request: Request) -> JSONResponse:
         )
         return _success_response(result)
 
+    except ValueError as e:
+        return _error_response(str(e), status_code=400)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
     except Exception as e:
         if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
             return _error_response("Nota no encontrada", status_code=404)
         logger.exception(f"[REST API] Error en get_note_detail")
-        return _error_response(f"Error interno: {str(e)}", status_code=500)
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+# ============================================================================
+# MEMOS ENDPOINTS
+# ============================================================================
+
+
+async def api_get_memos(request: Request) -> JSONResponse:
+    """GET /api/v1/memos/received - Obtiene memos recibidos del usuario."""
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
+    params = request.query_params
+    try:
+        page = int(params.get("page", 1))
+        page_size = int(params.get("page_size", 20))
+    except (ValueError, TypeError):
+        return _error_response("page y page_size deben ser numeros enteros", status_code=400)
+    search = params.get("search")
+
+    try:
+        result = memos.get_memos(
+            ctx=ctx,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+            search=search
+        )
+        return _success_response(result)
+    except Exception as e:
+        logger.exception(f"[REST API] Error en get_memos")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_sent_memos(request: Request) -> JSONResponse:
+    """GET /api/v1/memos/sent - Obtiene memos enviados por el usuario."""
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
+    params = request.query_params
+    try:
+        page = int(params.get("page", 1))
+        page_size = int(params.get("page_size", 20))
+    except (ValueError, TypeError):
+        return _error_response("page y page_size deben ser numeros enteros", status_code=400)
+    search = params.get("search")
+
+    try:
+        result = memos.get_sent_memos_tool(
+            ctx=ctx,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+            search=search
+        )
+        return _success_response(result)
+    except Exception as e:
+        logger.exception(f"[REST API] Error en get_sent_memos")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_archived_memos(request: Request) -> JSONResponse:
+    """GET /api/v1/memos/archived - Obtiene memos archivados del usuario."""
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    if not user_id:
+        return _error_response("X-User-ID es requerido", status_code=401)
+
+    params = request.query_params
+    try:
+        page = int(params.get("page", 1))
+        page_size = int(params.get("page_size", 20))
+    except (ValueError, TypeError):
+        return _error_response("page y page_size deben ser numeros enteros", status_code=400)
+    search = params.get("search")
+
+    try:
+        result = memos.get_archived_memos_tool(
+            ctx=ctx,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+            search=search
+        )
+        return _success_response(result)
+    except Exception as e:
+        logger.exception(f"[REST API] Error en get_archived_memos")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_memo_detail(request: Request) -> JSONResponse:
+    """GET /api/v1/memos/{memo_id} - Obtiene detalle de un memo."""
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+    memo_id = request.path_params.get("memo_id")
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    if not memo_id:
+        return _error_response("memo_id es requerido", status_code=400)
+
+    try:
+        result = memos.get_memo_detail(
+            ctx=ctx,
+            memo_id=memo_id,
+            user_id=user_id
+        )
+        return _success_response(result)
+
+    except ValueError as e:
+        return _error_response(str(e), status_code=400)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except Exception as e:
+        if "no encontrado" in str(e).lower() or "not found" in str(e).lower():
+            return _error_response("Memo no encontrado", status_code=404)
+        logger.exception(f"[REST API] Error en get_memo_detail")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+# ============================================================================
+# BACKUP SYNC ENDPOINTS
+# ============================================================================
+
+def _backup_error_response(e: BackupAuthError) -> JSONResponse:
+    """Convierte BackupAuthError en JSONResponse con Retry-After si aplica."""
+    headers = {}
+    if e.retry_after:
+        headers["Retry-After"] = str(e.retry_after)
+    return JSONResponse({"error": e.message}, status_code=e.status_code, headers=headers)
+
+
+async def api_sync_schema(request: Request) -> JSONResponse:
+    """GET /api/v1/sync/schema — Catálogo de tablas sincronizables."""
+    try:
+        backup_ctx = validate_backup_api_key(request)
+    except BackupAuthError as e:
+        return _backup_error_response(e)
+
+    result = sync.get_sync_catalog(schema_name=backup_ctx["schema_name"])
+    return _success_response(result)
+
+
+async def api_sync_data(request: Request) -> JSONResponse:
+    """GET /api/v1/sync/data — Datos incrementales de una tabla (Backup)."""
+    try:
+        backup_ctx = validate_backup_api_key(request)
+    except BackupAuthError as e:
+        return _backup_error_response(e)
+
+    # Validar params ANTES del rate limit (no gastar rate limit en requests inválidos)
+    table = request.query_params.get("table")
+    since = request.query_params.get("since")
+    if not table or not since:
+        return _error_response("Parámetros 'table' y 'since' son requeridos", 400)
+
+    # Validar tabla en whitelist
+    from api_gateway.tools.sync import SYNC_TABLES
+    if table not in SYNC_TABLES:
+        return _error_response(f"Tabla '{table}' no es sincronizable", 400)
+
+    # Validar since como ISO 8601
+    try:
+        datetime.fromisoformat(since.replace('Z', '+00:00'))
+    except ValueError:
+        return _error_response("Formato de 'since' inválido. Use ISO 8601.", 400)
+
+    # Validar page/page_size
+    try:
+        page = int(request.query_params.get("page", 1))
+        page_size = min(int(request.query_params.get("page_size", 100)), 100)
+    except (ValueError, TypeError):
+        return _error_response("page y page_size deben ser enteros", 400)
+
+    # Rate limit atómico DESPUÉS de validar params (no gastar rate limit en requests inválidos)
+    rate = backup_ctx.get("rate_limit_per_minute") or 1
+    retry_after = check_and_log_sync_access(
+        api_key_id=backup_ctx["api_key_id"],
+        schema_name=backup_ctx["schema_name"],
+        action="sync_data",
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("User-Agent", ""),
+        rate_limit_per_minute=rate
+    )
+    if retry_after is not None:
+        return _backup_error_response(BackupAuthError("Rate limit", 429, retry_after))
+
+    try:
+        result = sync.get_sync_data(table, since, page, page_size, schema_name=backup_ctx["schema_name"])
+    except ValueError as e:
+        return _error_response(str(e), 400)
+
+    return _success_response(result)
+
+
+# ============================================================================
+# RECORDS (RLM) ENDPOINTS
+# ============================================================================
+
+async def api_search_records(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/records/search
+
+    Query params:
+        - page: int (default 1)
+        - page_size: int (default 20, max 100)
+        - family_code: str (ARQ, LUM, ORD)
+        - search: str (buscar por número o datos)
+        - state: str (filtro por estado)
+
+    Response includes: record_number, display_name, state, resume (resumen IA)
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    params = request.query_params
+
+    try:
+        result = records.search_records(
+            ctx=ctx,
+            family_code=params.get("family_code"),
+            search=params.get("search"),
+            state=params.get("state"),
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 20)),
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en search_records")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+# ============================================================================
+# SEMANTIC SEARCH ENDPOINT
+# ============================================================================
+
+async def api_semantic_search(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/search/semantic
+
+    Query params:
+        - query: str (required, min 3 chars) - texto de busqueda
+        - limit: int (default 6, max 50) - max resultados
+
+    Response includes: documentos similares con vinculaciones a expedientes y legajos.
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    params = request.query_params
+    query = params.get("query", "").strip()
+
+    if not query or len(query) < 3:
+        return _error_response("query param requerido (min 3 caracteres)", status_code=400)
+
+    try:
+        limit = min(int(params.get("limit", 6)), 50)
+    except (ValueError, TypeError):
+        limit = 6
+
+    try:
+        result = search.semantic_search_tool(
+            ctx=ctx,
+            query=query,
+            limit=limit,
+        )
+        return _success_response(result)
+
+    except Exception as e:
+        logger.exception("[REST API] Error en semantic_search")
+        return _error_response("Busqueda temporalmente no disponible", status_code=503)
+
+
+async def api_get_record(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/records/{record_id}
+
+    Response includes: datos enriquecidos, estado, registro, permisos, resume (resumen IA)
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+
+    try:
+        result = records.get_record_detail(
+            ctx=ctx,
+            record_id=record_id,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en get_record")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_create_record(request: Request) -> JSONResponse:
+    """
+    POST /api/v1/records
+
+    Body JSON:
+        - registry_code: str (ARQ, LUM, ORD) - REQUIRED
+        - data: dict (campos enriquecidos) - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_response("Body JSON inválido", status_code=400)
+
+    registry_code = body.get("registry_code")
+    if not registry_code:
+        return _error_response("registry_code es requerido", status_code=400)
+
+    display_name = body.get("display_name")
+    if not display_name:
+        return _error_response("display_name es requerido", status_code=400)
+
+    try:
+        from services.rlm.records import create_record
+        result = create_record(
+            registry_code=registry_code,
+            data=body.get("data") or {},
+            display_name=display_name,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+        )
+
+        # Encolar generación de resumen IA (async, non-blocking)
+        try:
+            from services.shared.resume_trigger import enqueue_record_resume_fire_and_forget
+            enqueue_record_resume_fire_and_forget(result['id'], ctx.schema_name)
+        except Exception:
+            pass
+
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en create_record")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_registry_families(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/registries
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    try:
+        result = records.get_registry_families(ctx=ctx)
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en get_registry_families")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+# ============================================================================
+# RLM - ENDPOINTS ADICIONALES (Fase 2.6)
+# ============================================================================
+
+async def api_update_record(request: Request) -> JSONResponse:
+    """
+    PATCH /api/v1/records/{record_id}
+
+    Body JSON:
+        - state: str - optional (at least one of state/display_name required)
+        - display_name: str - optional
+        - reason: str - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_response("Body JSON invalido", status_code=400)
+
+    state = body.get("state")
+    display_name = body.get("display_name")
+    if not state and not display_name:
+        return _error_response("Debe enviar al menos 'state' o 'display_name'", status_code=400)
+
+    try:
+        from services.rlm.records import update_record
+        result = update_record(
+            record_id=record_id,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+            new_state=state,
+            new_display_name=display_name,
+            reason=body.get("reason"),
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en update_record")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_update_record_field(request: Request) -> JSONResponse:
+    """
+    PATCH /api/v1/records/{record_id}/fields/{field_name}
+
+    Body JSON:
+        - value: any - optional
+        - expiration_date: str - optional
+        - document_id: str - optional
+        - notes: str - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    field_name = request.path_params.get("field_name", "")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_response("Body JSON invalido", status_code=400)
+
+    try:
+        from services.rlm.fields import update_field
+        result = update_field(
+            record_id=record_id,
+            field_name=field_name,
+            user_id=ctx.user_id,
+            value=body.get("value"),
+            expiration_date=body.get("expiration_date"),
+            document_id=body.get("document_id"),
+            notes=body.get("notes"),
+            document_reference=body.get("document_reference"),
+            document_resume=body.get("document_resume"),
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en update_record_field")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_verify_record_field(request: Request) -> JSONResponse:
+    """
+    POST /api/v1/records/{record_id}/fields/{field_name}/verify
+
+    Body JSON:
+        - document_id: str - required (ID del documento oficial de respaldo)
+        - notes: str - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    field_name = request.path_params.get("field_name", "")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    document_id = body.get("document_id")
+    if not document_id:
+        return _error_response("document_id es obligatorio para verificar un campo", status_code=400)
+
+    try:
+        from services.rlm.fields import verify_field
+        result = verify_field(
+            record_id=record_id,
+            field_name=field_name,
+            user_id=ctx.user_id,
+            document_id=document_id,
+            notes=body.get("notes"),
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en verify_record_field")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_record_history(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/records/{record_id}/history
+
+    Query params:
+        - page: int (default 1)
+        - page_size: int (default 20)
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    params = request.query_params
+
+    try:
+        from services.rlm.history import get_history
+        result = get_history(
+            record_id=record_id,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 20)),
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en get_record_history")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_generate_record_report(request: Request) -> JSONResponse:
+    """
+    POST /api/v1/records/{record_id}/report
+
+    Genera un informe IFRLM del legajo.
+    Crea un documento tipo IFRLM con snapshot actual, lo vincula al legajo
+    y registra en historial.
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+
+    try:
+        from services.rlm.report import generate_ifrlm
+        result = await generate_ifrlm(
+            record_id=record_id,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+            is_initial=False,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en generate_record_report")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_record_relations(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/records/{record_id}/relations
+
+    Query params:
+        - page: int (default 1)
+        - page_size: int (default 20)
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    params = request.query_params
+
+    try:
+        from services.rlm.relations import get_relations
+        result = get_relations(
+            record_id,
+            ctx.user_id,
+            schema_name=ctx.schema_name,
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 20)),
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en get_record_relations")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_create_record_relation(request: Request) -> JSONResponse:
+    """
+    POST /api/v1/records/{record_id}/relations
+
+    Body JSON:
+        - target_record_id: str - REQUIRED
+        - relation_type: str - REQUIRED (parent, child, related, replaces)
+        - notes: str - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_response("Body JSON invalido", status_code=400)
+
+    target_record_id = body.get("target_record_id")
+    relation_type = body.get("relation_type")
+    if not target_record_id or not relation_type:
+        return _error_response("target_record_id y relation_type son requeridos", status_code=400)
+
+    try:
+        from services.rlm.relations import create_relation
+        result = create_relation(
+            record_id=record_id,
+            target_record_id=target_record_id,
+            relation_type=relation_type,
+            user_id=ctx.user_id,
+            notes=body.get("notes"),
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en create_record_relation")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_delete_record_relation(request: Request) -> JSONResponse:
+    """
+    DELETE /api/v1/records/{record_id}/relations/{relation_id}
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    relation_id = request.path_params.get("relation_id", "")
+
+    try:
+        from services.rlm.relations import delete_relation
+        result = delete_relation(
+            record_id=record_id,
+            relation_id=relation_id,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en delete_record_relation")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_record_cases(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/records/{record_id}/cases
+
+    Query params:
+        - page: int (default 1)
+        - page_size: int (default 20)
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    params = request.query_params
+
+    try:
+        from services.rlm.links import get_linked_cases
+        result = get_linked_cases(
+            record_id,
+            ctx.user_id,
+            schema_name=ctx.schema_name,
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 20)),
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en get_record_cases")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_link_record_case(request: Request) -> JSONResponse:
+    """
+    POST /api/v1/records/{record_id}/cases
+
+    Body JSON:
+        - case_id: str - REQUIRED
+        - notes: str - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_response("Body JSON invalido", status_code=400)
+
+    case_id = body.get("case_id")
+    if not case_id:
+        return _error_response("case_id es requerido", status_code=400)
+
+    try:
+        from services.rlm.links import link_case
+        result = link_case(
+            record_id=record_id,
+            case_id=case_id,
+            user_id=ctx.user_id,
+            notes=body.get("notes"),
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except ConflictError as e:
+        return _error_response(str(e), status_code=409)
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en link_record_case")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_unlink_record_case(request: Request) -> JSONResponse:
+    """
+    DELETE /api/v1/records/{record_id}/cases/{link_id}
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    link_id = request.path_params.get("link_id", "")
+
+    try:
+        from services.rlm.links import unlink_case
+        result = unlink_case(
+            record_id=record_id,
+            link_id=link_id,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en unlink_record_case")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_get_record_documents(request: Request) -> JSONResponse:
+    """
+    GET /api/v1/records/{record_id}/documents
+
+    Query params:
+        - page: int (default 1)
+        - page_size: int (default 20)
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    params = request.query_params
+
+    try:
+        from services.rlm.links import get_linked_documents
+        result = get_linked_documents(
+            record_id,
+            ctx.user_id,
+            schema_name=ctx.schema_name,
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 20)),
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en get_record_documents")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_link_record_document(request: Request) -> JSONResponse:
+    """
+    POST /api/v1/records/{record_id}/documents
+
+    Body JSON:
+        - document_id: str - REQUIRED
+        - field_name: str - optional
+        - notes: str - optional
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_response("Body JSON invalido", status_code=400)
+
+    document_id = body.get("document_id")
+    if not document_id:
+        return _error_response("document_id es requerido", status_code=400)
+
+    try:
+        from services.rlm.links import link_document
+        result = link_document(
+            record_id=record_id,
+            document_id=document_id,
+            user_id=ctx.user_id,
+            field_name=body.get("field_name"),
+            notes=body.get("notes"),
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except ConflictError as e:
+        return _error_response(str(e), status_code=409)
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en link_record_document")
+        return _error_response("Error interno del servidor", status_code=500)
+
+
+async def api_unlink_record_document(request: Request) -> JSONResponse:
+    """
+    DELETE /api/v1/records/{record_id}/documents/{link_id}
+
+    Headers:
+        - X-API-Key: required
+        - X-User-ID: required
+    """
+    api_key = _get_api_key(request)
+    user_id = _get_user_id(request)
+
+    try:
+        ctx = validate_rest_api_key(api_key, user_id)
+    except ValueError as e:
+        return _error_response(str(e), status_code=401)
+
+    record_id = request.path_params.get("record_id", "")
+    link_id = request.path_params.get("link_id", "")
+
+    try:
+        from services.rlm.links import unlink_document
+        result = unlink_document(
+            record_id=record_id,
+            link_id=link_id,
+            user_id=ctx.user_id,
+            schema_name=ctx.schema_name,
+        )
+        return _success_response(result)
+
+    except NotFoundError as e:
+        return _error_response(str(e), status_code=404)
+    except AuthorizationError as e:
+        return _error_response(str(e), status_code=403)
+    except (ValidationError, ValueError) as e:
+        return _error_response(str(e), status_code=400)
+    except Exception as e:
+        logger.exception("[REST API] Error en unlink_record_document")
+        return _error_response("Error interno del servidor", status_code=500)

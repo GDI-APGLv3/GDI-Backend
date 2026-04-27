@@ -44,7 +44,9 @@ class DocumentSigningDetails(BaseModel):
     creator_department_sector: Optional[str] = Field(None, description="Departamento y sector del creador en formato 'DEPT#SECTOR'")
     created_at: Optional[str] = Field(None, description="Fecha de creación")
     resume: Optional[str] = Field(None, description="Resumen del documento generado por IA")
+    short_resume: Optional[str] = Field(None, description="Resumen corto del documento generado por IA (1-2 oraciones)")
     has_embeddings: Optional[bool] = Field(None, description="True si el documento está indexado para RAG (tiene embeddings)")
+    official_number: Optional[str] = Field(None, description="Número oficial del documento (solo si ya fue numerado/firmado)")
 
 class SigningProgressInfo(BaseModel):
     """Información del progreso de firmas."""

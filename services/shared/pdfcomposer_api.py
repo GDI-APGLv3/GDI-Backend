@@ -18,7 +18,7 @@ from config.constants import DEFAULT_LOGO_URL
 logger = get_logger(__name__)
 
 
-async def call_pdfcomposer_create_case(cover_data: Dict[str, Any]) -> bytes:
+async def call_pdfcomposer_create_case(cover_data: Dict[str, Any], *, schema_name: str) -> bytes:
     """
     Llama a PDFComposer /create-case/ para generar PDF de carátula de expediente.
 
@@ -55,7 +55,7 @@ async def call_pdfcomposer_create_case(cover_data: Dict[str, Any]) -> bytes:
         "document_type_acronym", "document_type_name", "document_reference",
         "case_number", "case_type_acronym", "case_type_name", "case_motive",
         "initiating_department", "case_creator", "signer_full_name",
-        "signer_municipality", "official_document_number", "city_name"
+        "signer_municipality", "city_name"
     ]
 
     missing_fields = [field for field in required_fields if not cover_data.get(field)]
@@ -72,6 +72,13 @@ async def call_pdfcomposer_create_case(cover_data: Dict[str, Any]) -> bytes:
         raise ValidationError("PDFCOMPOSER_API_KEY no configurado en variables de entorno")
 
     logo_url = cover_data.get('municipality_logo_url') or DEFAULT_LOGO_URL
+
+    # DEBUG: Verificar valor de case_motive ANTES de crear payload
+    logger.debug("Valor de case_motive en cover_data:")
+    logger.debug(f"case_motive: '{cover_data.get('case_motive')}'")
+    logger.debug(f"case_motive type: {type(cover_data.get('case_motive'))}")
+    logger.debug(f"case_motive is None: {cover_data.get('case_motive') is None}")
+    logger.debug(f"case_motive is empty string: {cover_data.get('case_motive') == ''}")
 
     # Preparar payload para PDFComposer (multipart/form-data)
     # PDFComposer /create-case/ SOLO acepta estos 10 campos (segun spec del usuario)
@@ -94,10 +101,20 @@ async def call_pdfcomposer_create_case(cover_data: Dict[str, Any]) -> bytes:
         "creator": cover_data["case_creator"]
     }
 
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        pdfcomposer_data["frase_anual"] = annual_slogan
+
     logger.info(f"URL: {pdfcomposer_url}/create-case/")
     logger.info(f"Case: {cover_data['case_number']}")
-    logger.info(f"Official number: {cover_data['official_document_number']}")
     logger.info(f"Signer: {cover_data['signer_full_name']}")
+
+    # DEBUG: Mostrar TODO el payload que se enviará
+    logger.debug("Payload completo a enviar:")
+    for key, value in pdfcomposer_data.items():
+        logger.debug(f"{key}: '{value}' (type: {type(value).__name__})")
 
     # Llamar a PDFComposer con retry
     timeout = httpx.Timeout(90.0)  # Timeout largo para generación de PDF
@@ -179,7 +196,7 @@ async def call_pdfcomposer_create_case(cover_data: Dict[str, Any]) -> bytes:
     raise ExternalServiceError("PDFComposer: error desconocido despues de reintentos")
 
 
-async def call_pdfcomposer_create_transfer(transfer_data: Dict[str, Any]) -> bytes:
+async def call_pdfcomposer_create_transfer(transfer_data: Dict[str, Any], *, schema_name: str) -> bytes:
     """
     Llama a PDFComposer /move/ para generar PDF de pase/transferencia.
 
@@ -251,9 +268,14 @@ async def call_pdfcomposer_create_transfer(transfer_data: Dict[str, Any]) -> byt
         "motivo": transfer_data["movement_reason"]
     }
 
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        pdfcomposer_data["frase_anual"] = annual_slogan
+
     logger.info(f"URL: {pdfcomposer_url}/move/")
     logger.info(f"Movement: {transfer_data['movement_type']}")
-    logger.info(f"Official number: {transfer_data['official_document_number']}")
 
     # Llamar a PDFComposer con retry (mismo patrón que create_case)
     timeout = httpx.Timeout(90.0)
@@ -324,7 +346,7 @@ async def call_pdfcomposer_create_transfer(transfer_data: Dict[str, Any]) -> byt
     raise ExternalServiceError("PDFComposer: error desconocido despues de reintentos")
 
 
-async def call_pdfcomposer_preview_pdf(document_data: Dict[str, Any]) -> bytes:
+async def call_pdfcomposer_preview_pdf(document_data: Dict[str, Any], *, schema_name: str) -> bytes:
     """
     Llama a PDFComposer /preview-pdf/ para generar PDF de previsualización con marca de agua.
 
@@ -385,6 +407,12 @@ async def call_pdfcomposer_preview_pdf(document_data: Dict[str, Any]) -> bytes:
         "Reference": document_data["reference"],
         "Text": json.dumps({"html": html_content})  # CRITICAL: Must be JSON string with html key
     }
+
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        pdfcomposer_data["frase_anual"] = annual_slogan
 
     logger.info(f"URL: {pdfcomposer_url}/preview-pdf/")
     logger.info(f"Document: {document_data.get('reference', 'N/A')}")
@@ -481,7 +509,9 @@ async def call_pdfcomposer_import(
     url_logo: str,
     name_acrony_type: str,
     document_type: str,
-    reference: str
+    reference: str,
+    *,
+    schema_name: str
 ) -> bytes:
     """
     Llama a PDFComposer /import/ para procesar PDF importado.
@@ -547,6 +577,12 @@ async def call_pdfcomposer_import(
         'document_type': document_type,
         'reference': reference
     }
+
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        data["frase_anual"] = annual_slogan
 
     # Llamar a PDFComposer con retry
     timeout = httpx.Timeout(90.0)  # Timeout largo para procesamiento de PDF
@@ -632,7 +668,9 @@ async def call_pdfcomposer_import(
 async def call_pdfcomposer_note_preview(
     document_data: Dict[str, Any],
     para: str,
-    cc: Optional[str] = None
+    cc: Optional[str] = None,
+    *,
+    schema_name: str
 ) -> bytes:
     """
     Llama a PDFComposer /note-preview/ para generar preview de NOTA con marca de agua.
@@ -699,6 +737,12 @@ async def call_pdfcomposer_note_preview(
     # Agregar CC solo si existe
     if cc:
         pdfcomposer_data["cc"] = cc
+
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        pdfcomposer_data["frase_anual"] = annual_slogan
 
     logger.info(f"URL: {pdfcomposer_url}/note-preview/")
     logger.info(f"Document: {document_data.get('reference', 'N/A')}")
@@ -782,7 +826,9 @@ async def call_pdfcomposer_note_preview(
 async def call_pdfcomposer_note_final(
     document_data: Dict[str, Any],
     para: str,
-    cc: Optional[str] = None
+    cc: Optional[str] = None,
+    *,
+    schema_name: str
 ) -> bytes:
     """
     Llama a PDFComposer /note/ para generar PDF final de NOTA sin marca de agua.
@@ -857,6 +903,12 @@ async def call_pdfcomposer_note_final(
     # Agregar CC solo si existe
     if cc:
         pdfcomposer_data["cc"] = cc
+
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        pdfcomposer_data["frase_anual"] = annual_slogan
 
     logger.info(f"URL: {pdfcomposer_url}/note/")
     logger.info(f"Document: {reference}")
@@ -935,3 +987,159 @@ async def call_pdfcomposer_note_final(
                 await asyncio.sleep(1)
 
     raise ExternalServiceError("PDFComposer note: error desconocido despues de reintentos")
+
+
+async def call_pdfcomposer_create_ifrlm(ifrlm_data: Dict[str, Any], *, schema_name: str) -> bytes:
+    """
+    Llama a PDFComposer /ifrlm/ para generar PDF de informe de legajo.
+
+    Usa template especial ifrlm.html con campos del legajo y snapshot HTML.
+
+    Args:
+        ifrlm_data: Dict con datos del informe:
+            - municipality_logo_url: URL del logo (opcional, usa DEFAULT_LOGO_URL)
+            - document_type_acronym: IFRLM
+            - document_type_name: Nombre del tipo de documento
+            - document_reference: Referencia del documento
+            - record_number: Numero del legajo
+            - registry_name: Nombre de la familia de registro
+            - state: Estado actual del legajo
+            - snapshot_html: HTML del snapshot del legajo
+            - signer_full_name: Nombre del firmante
+            - signer_municipality: Municipalidad
+            - official_document_number: Numero oficial
+            - city_name: Ciudad
+
+    Returns:
+        bytes: PDF generado por PDFComposer
+
+    Raises:
+        ValidationError: Si faltan campos requeridos
+        ExternalServiceError: Si PDFComposer falla o no responde
+    """
+    logger.info("Llamando a PDFComposer /ifrlm/...")
+
+    # Validar campos requeridos
+    required_fields = [
+        "document_type_acronym", "document_type_name", "document_reference",
+        "record_number", "registry_name", "snapshot_html",
+        "signer_full_name", "signer_municipality",
+        "official_document_number", "city_name"
+    ]
+
+    missing_fields = [field for field in required_fields if not ifrlm_data.get(field)]
+    if missing_fields:
+        raise ValidationError(f"Campos requeridos faltantes para PDFComposer IFRLM: {', '.join(missing_fields)}")
+
+    # Obtener credenciales desde .env
+    pdfcomposer_url = os.getenv('PDFCOMPOSER_URL')
+    if not pdfcomposer_url:
+        raise ValidationError("PDFCOMPOSER_URL no configurado en variables de entorno")
+
+    pdfcomposer_api_key = os.getenv('PDFCOMPOSER_API_KEY')
+    if not pdfcomposer_api_key:
+        raise ValidationError("PDFCOMPOSER_API_KEY no configurado en variables de entorno")
+
+    logo_url = ifrlm_data.get('municipality_logo_url') or DEFAULT_LOGO_URL
+
+    # Preparar payload para PDFComposer (multipart/form-data)
+    # PDFComposer /ifrlm/ acepta estos campos
+    # Firmante, document_number y city NO son parte de este endpoint
+    # Esos se agregan en el paso de firma con Notary
+    pdfcomposer_data = {
+        # Logo
+        "urlLogo": logo_url,
+        # Documento
+        "NameAcronyType": ifrlm_data["document_type_acronym"],
+        "document_type": ifrlm_data["document_type_name"],
+        "reference": ifrlm_data["document_reference"],
+        # Legajo
+        "record_number": ifrlm_data["record_number"],
+        "registry_name": ifrlm_data["registry_name"],
+        "state": ifrlm_data["state"],
+        # Snapshot HTML
+        "snapshot_html": ifrlm_data["snapshot_html"],
+    }
+
+    # Inyectar frase_anual desde settings del tenant
+    from services.shared.settings_utils import get_tenant_settings
+    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    if annual_slogan:
+        pdfcomposer_data["frase_anual"] = annual_slogan
+
+    logger.info(f"URL: {pdfcomposer_url}/ifrlm/")
+    logger.info(f"Record: {ifrlm_data['record_number']}")
+    logger.info(f"Official number: {ifrlm_data['official_document_number']}")
+    logger.info(f"Signer: {ifrlm_data['signer_full_name']}")
+
+    # Llamar a PDFComposer con retry (mismo patron que create_case)
+    timeout = httpx.Timeout(90.0)
+    headers = {"X-API-Key": pdfcomposer_api_key}
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(2):
+            try:
+                logger.info(f"Intento {attempt + 1}/2")
+
+                response = await client.post(
+                    f"{pdfcomposer_url}/ifrlm/",
+                    data=pdfcomposer_data,
+                    headers=headers,
+                    follow_redirects=True
+                )
+
+                response.raise_for_status()
+
+                pdf_bytes = await response.aread()
+                pdf_size = len(pdf_bytes)
+
+                logger.info("PDF IFRLM generado exitosamente")
+                logger.info(f"Size: {pdf_size} bytes ({pdf_size/1024:.2f} KB)")
+
+                # Validaciones
+                if pdf_size == 0:
+                    raise ExternalServiceError("PDFComposer retorno PDF vacio")
+
+                if not pdf_bytes.startswith(b'%PDF'):
+                    logger.warning("Respuesta no parece ser PDF valido")
+
+                MAX_PDF_SIZE = 10 * 1024 * 1024
+                if pdf_size > MAX_PDF_SIZE:
+                    raise ExternalServiceError(f"PDF excede tamano maximo ({pdf_size/1024/1024:.2f}MB > 10MB)")
+
+                return pdf_bytes
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP Error: {e.response.status_code}")
+                logger.error(f"Response: {e.response.text[:200]}")
+                if attempt == 1:
+                    raise ExternalServiceError(
+                        f"PDFComposer IFRLM error: HTTP {e.response.status_code}",
+                        details={"response": e.response.text[:500]}
+                    )
+
+            except httpx.TimeoutException:
+                logger.error("Timeout (90s excedido)")
+                if attempt == 1:
+                    raise ExternalServiceError("PDFComposer IFRLM timeout despues de 90 segundos")
+
+            except httpx.RequestError as e:
+                logger.error(f"Request Error: {str(e)}")
+                if attempt == 1:
+                    raise ExternalServiceError(f"Error de conexion con PDFComposer: {str(e)}")
+
+            except ExternalServiceError:
+                if attempt == 1:
+                    raise
+
+            except Exception as e:
+                logger.error(f"Error inesperado: {type(e).__name__} - {str(e)}")
+                if attempt == 1:
+                    raise ExternalServiceError(f"Error inesperado en PDFComposer IFRLM: {str(e)}")
+
+            if attempt == 0:
+                import asyncio
+                logger.info("Esperando 1s antes de reintentar...")
+                await asyncio.sleep(1)
+
+    raise ExternalServiceError("PDFComposer IFRLM: error desconocido despues de reintentos")

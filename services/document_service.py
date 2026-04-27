@@ -299,8 +299,9 @@ def get_user_documents(
             LEFT JOIN document_signers ds ON ds.document_id = d.id AND ds.user_id = %(user_id)s
             WHERE dt.is_active = true
               AND d.is_deleted = false
-              -- Excluir documentos que ya tienen versión oficial
-              AND NOT EXISTS (SELECT 1 FROM official_documents WHERE id = d.id)
+              -- Excluir documentos que ya tienen versión oficial firmada
+              -- (signed_at IS NULL = número reservado pero firma fallida → sigue siendo draft)
+              AND NOT EXISTS (SELECT 1 FROM official_documents WHERE id = d.id AND signed_at IS NOT NULL)
               AND (
                 -- Es creator: ve todos sus documentos
                 d.created_by = %(user_id)s
@@ -319,6 +320,7 @@ def get_user_documents(
                     EXISTS (SELECT 1 FROM users u2 WHERE u2.id = d.created_by AND u2.sector_id = ANY(%(user_sectors)s::uuid[]))
                     AND d.created_by != %(user_id)s
                     AND d.status IN ('sent_to_sign', 'signed')
+                    AND dt.acronym NOT IN ('NOTA', 'MEMO')
                 )
             )
             """
@@ -375,6 +377,7 @@ def get_user_documents(
             LEFT JOIN document_signers ds ON ds.document_id = o.id AND ds.user_id = %(user_id)s
             WHERE dt.is_active = true
               AND d.is_deleted = false
+              AND o.signed_at IS NOT NULL
               AND (
                 -- Es creator: ve todos los documentos oficiales
                 d.created_by = %(user_id)s
@@ -390,6 +393,7 @@ def get_user_documents(
                 (
                     o.signer_sector_ids && %(user_sectors)s::uuid[]
                     AND d.created_by != %(user_id)s
+                    AND dt.acronym NOT IN ('NOTA', 'MEMO')
                 )
             )
             """

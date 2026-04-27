@@ -160,6 +160,7 @@ class CaseFilters:
                         JOIN official_documents od ON cod.official_document_id = od.id
                         WHERE cod.case_id = c.id
                         AND cod.is_active = true
+                        AND od.signed_at IS NOT NULL
                         AND (
                             unaccent(LOWER(COALESCE(od.official_number, ''))) LIKE unaccent(%s)
                             OR unaccent(LOWER(COALESCE(od.reference, ''))) LIKE unaccent(%s)

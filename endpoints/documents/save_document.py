@@ -137,13 +137,17 @@ async def save_document_changes_endpoint(
             ]
             logger.debug(f"Actualizando {len(signers_list)} firmantes")
 
-        # Transformar recipients a formato dict si existen (solo para NOTA)
+        # Transformar recipients a formato dict si existen (NOTA o MEMO)
         recipients_dict = None
         sender_sector_id = None
         if body.recipients is not None:
             recipients_dict = body.recipients.model_dump()
             sender_sector_id = _get_primary_sector_id(current_user)
-            logger.debug(f"Actualizando recipients: TO={len(recipients_dict.get('to', []))}, CC={len(recipients_dict.get('cc', []))}")
+            logger.debug(f"Actualizando recipients NOTA: TO={len(recipients_dict.get('to', []))}, CC={len(recipients_dict.get('cc', []))}")
+        elif body.memo_recipients is not None:
+            recipients_dict = body.memo_recipients.model_dump()
+            sender_sector_id = _get_primary_sector_id(current_user)
+            logger.debug(f"Actualizando recipients MEMO: TO={len(recipients_dict.get('to', []))}, CC={len(recipients_dict.get('cc', []))}")
 
         # Obtener user_id del request state
         user_id = str(request.state.tenant_user_id)

@@ -53,7 +53,10 @@ def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any]:
                 "reference": doc['reference'],
                 "linked_date": doc['linking_date'].isoformat() if doc['linking_date'] else None,
                 "is_active": doc['is_active'],
-                "pdf_url": None  # Se llenará después
+                "pdf_url": None,  # Se llenará después
+                "short_resume": doc.get('short_resume'),
+                "linked_by": doc.get('linked_by'),
+                "linked_sector": doc.get('linked_sector'),
             })
 
         # Obtener URLs de PDFs para documentos oficiales
@@ -77,7 +80,8 @@ def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any]:
                 "document_type_acronym": doc.get('document_type_acronym'),
                 "can_link": bool(doc.get('can_link', False)),
                 "proposed_date": doc['proposing_date'].isoformat() if doc['proposing_date'] else None,
-                "proposed_by": doc['proposed_by']
+                "proposed_by": doc['proposed_by'],
+                "short_resume": doc.get('short_resume'),
             }
             for doc in (proposed_docs or [])
         ]
@@ -103,7 +107,8 @@ def link_official_document(
     user_sector_id: str,
     *,
     schema_name: str,
-    reason_override: str | None = None
+    reason_override: str | None = None,
+    auth_source: str = "jwt"
 ) -> Dict[str, Any]:
     """
     Vincular documento oficial a expediente
@@ -201,11 +206,12 @@ def link_official_document(
         if not permission_result:
             raise AuthorizationError("No tiene permisos para vincular documentos a este expediente")
 
-        # 3. Verificar que el documento oficial existe
+        # 3. Verificar que el documento oficial existe (y está firmado, no solo numerado)
         doc_query = """
             SELECT id, official_number, reference
             FROM official_documents
             WHERE id = %s
+              AND signed_at IS NOT NULL
         """
         doc_result = execute_query(doc_query, (official_document_id,), schema_name=schema_name)
 
@@ -232,6 +238,11 @@ def link_official_document(
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
                 try:
+                    # Inyectar GUC para audit triggers
+                    if linking_user_id:
+                        cursor.execute("SET LOCAL app.user_id = %s", (linking_user_id,))
+                    cursor.execute("SET LOCAL app.auth_source = %s", (auth_source,))
+
                     # Bloquear la fila del expediente para evitar race conditions
                     cursor.execute("""
                         SELECT 1 FROM cases WHERE id = %s FOR UPDATE
@@ -323,7 +334,8 @@ def accept_proposed_document(
     user_id: str,
     user_sector_id: str,
     *,
-    schema_name: str
+    schema_name: str,
+    auth_source: str = "jwt"
 ) -> Dict[str, Any]:
     """
     Aceptar documento propuesto: vincular el documento oficial al expediente y desactivar la propuesta.
@@ -380,12 +392,13 @@ def accept_proposed_document(
             linking_user_id=user_id,
             user_sector_id=user_sector_id,
             schema_name=schema_name,
-            reason_override=reason_msg
+            reason_override=reason_msg,
+            auth_source=auth_source
         )
 
         # 6. Desactivar la propuesta
         execute_update(
-            deactivate_proposed_document_query(), (proposed_id,), schema_name=schema_name
+            deactivate_proposed_document_query(), (proposed_id,), schema_name=schema_name, user_id=user_id, auth_source=auth_source
         )
 
         logger.info(f"Proposed document {proposed_id} accepted and linked to case {case_id}")
@@ -405,7 +418,8 @@ def reject_proposed_document(
     user_id: str,
     user_sector_id: str = None,
     *,
-    schema_name: str
+    schema_name: str,
+    auth_source: str = "jwt"
 ) -> Dict[str, Any]:
     """
     Rechazar documento propuesto: desactivar la propuesta sin vincular.
@@ -502,7 +516,7 @@ def reject_proposed_document(
 
         # 4. Desactivar la propuesta
         execute_update(
-            deactivate_proposed_document_query(), (proposed_id,), schema_name=schema_name
+            deactivate_proposed_document_query(), (proposed_id,), schema_name=schema_name, user_id=user_id, auth_source=auth_source
         )
 
         # 5. Registrar en historial del expediente
@@ -543,7 +557,8 @@ def reject_proposed_document(
                 admin_sector_id=admin_sector_id,
                 reason=reason,
                 supporting_document_id=str(proposed_doc['document_draft_id']) if proposed_doc.get('status') == 'signed' else None,
-                schema_name=schema_name
+                schema_name=schema_name,
+                auth_source=auth_source
             )
             logger.info(f"Rejection history recorded for case {case_id}")
         except Exception as hist_error:

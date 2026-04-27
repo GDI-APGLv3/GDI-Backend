@@ -1,0 +1,40 @@
+# Plantilla Fly.io para el microservicio Notary (firma digital).
+app = "<YOUR_NOTARY_APP_NAME>"
+primary_region = "gru"
+
+[build]
+
+[env]
+  TZ = "America/Argentina/Buenos_Aires"
+  PORT = "8080"
+  PYTHONUNBUFFERED = "1"
+  ENVIRONMENT = "test"
+  GUNICORN_WORKERS = "2"
+  GUNICORN_TIMEOUT = "90"
+  FALLBACK_TO_VISUAL = "true"
+  TSA_URL = "http://timestamp.digicert.com"
+  TSA_TIMEOUT = "3"
+  TSA_RETRIES = "2"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 100
+    soft_limit = 80
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

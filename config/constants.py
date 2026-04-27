@@ -3,7 +3,7 @@ Archivo para centralizar constantes utilizadas en la aplicación.
 """
 
 # Tipos de documentos excluidos en las consultas
-EXCLUDED_DOCUMENT_TYPES = ('CAEX', 'PV')
+EXCLUDED_DOCUMENT_TYPES = ('CAEX', 'PV', 'TST')
 
 # Estados de documentos
 EDITABLE_DOCUMENT_STATES = ['draft', 'rejected']
@@ -105,9 +105,6 @@ OWNERSHIP_LEVEL_OWNER = "owner"
 OWNERSHIP_LEVEL_CREATOR = "creator"
 OWNERSHIP_LEVEL_DEPARTMENT = "department_member"
 OWNERSHIP_LEVEL_PARTICIPANT = "participant"
-
-# Case status
-CASE_STATUS_ACTIVE = "active"
 
 # Case history messages
 CASE_HISTORY_SUCCESS_MESSAGE = "Historial obtenido exitosamente"
@@ -218,7 +215,7 @@ SIGNATURE_USER_NOT_FOUND_ERROR = "Usuario no encontrado en el sistema"
 START_SIGNING_SUCCESS_MESSAGE = "Proceso de firma iniciado exitosamente"
 START_SIGNING_ONLY_CREATOR_ERROR = "Solo el creador puede iniciar el proceso de firma"
 START_SIGNING_INVALID_STATE_ERROR = "Documento no puede iniciarse para firma en su estado actual"
-START_SIGNING_PDF_GENERATION_ERROR = "Error al generar PDF: Legal Orchestrator no devolvió document_generate_id válido"
+START_SIGNING_PDF_GENERATION_ERROR = "Error al generar PDF: no se obtuvo document_generate_id válido"
 START_SIGNING_NO_SIGNERS_ERROR = "El documento debe tener al menos un firmante asignado"
 START_SIGNING_NO_NUMERATOR_ERROR = "El documento debe tener un numerador asignado"
 
@@ -345,6 +342,6 @@ SEARCH_MAX_LIMIT = 100
 # LOGOS DEFAULT (R2 público - bucket gdi-assets)
 # ============================================================================
 
-DEFAULT_LOGO_URL = "https://pub-0b5b632ca7bd4f45b3ced5507e755b3a.r2.dev/500x150.png"
-DEFAULT_ISOLOGO_URL = "https://pub-0b5b632ca7bd4f45b3ced5507e755b3a.r2.dev/150x150.png"
+DEFAULT_LOGO_URL = "https://your-r2-public.r2.dev/500x150.png"
+DEFAULT_ISOLOGO_URL = "https://your-r2-public.r2.dev/150x150.png"
 

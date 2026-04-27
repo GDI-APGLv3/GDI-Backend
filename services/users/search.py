@@ -146,6 +146,7 @@ def _fetch_users_with_search_patterns(search_patterns: Dict[str, str], limit: Op
                 {
                     "pattern_start": search_patterns["pattern_start"],
                     "pattern_word_start": search_patterns["pattern_word_start"],
+                    "search_term": search_patterns["search_term"],
                     "limit": limit
                 }
             )
@@ -175,7 +176,8 @@ def _count_users_with_search_patterns(search_patterns: Dict[str, str], *, schema
                 query,
                 {
                     "pattern_start": search_patterns["pattern_start"],
-                    "pattern_word_start": search_patterns["pattern_word_start"]
+                    "pattern_word_start": search_patterns["pattern_word_start"],
+                    "search_term": search_patterns["search_term"]
                 }
             )
             result = cursor.fetchone()
@@ -207,6 +209,7 @@ def _format_user_search_results(users_raw_data: List[Dict]) -> List[Dict]:
             "full_name": user['full_name'],
             "email": user.get('email'),  # Incluir email para todos los usuarios
             "department_acronym": user.get('department_acronym'),  # Acrónimo del departamento (ej: ADGEN, OBPU)
+            "sector_acronym": user.get('sector_acronym'),  # Acrónimo del sector
             "seal_name": user.get('seal_name'),  # Nombre del sello desde city_seals
             "profile_picture_url": user.get('profile_picture_url'),
             "is_active": bool(user.get('is_active', 1))  # Conversión directa: 1=True, 0=False, None=True(default)

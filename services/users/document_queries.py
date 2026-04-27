@@ -94,7 +94,7 @@ class DocumentQueries:
             )
             AND d.is_deleted = false
             AND NOT EXISTS (
-                SELECT 1 FROM official_documents od WHERE od.id = d.id
+                SELECT 1 FROM official_documents od WHERE od.id = d.id AND od.signed_at IS NOT NULL
             )
 
             UNION ALL
@@ -139,6 +139,7 @@ class DocumentQueries:
                 ) AND d.created_by != %s)
             )
             AND d.is_deleted = false
+            AND o.signed_at IS NOT NULL
         ) AS combined_documents
         WHERE {{where_clause}}
         ORDER BY can_sign_now DESC, updated_at DESC, created_at DESC
@@ -174,7 +175,7 @@ class DocumentQueries:
             )
             AND d.is_deleted = false
             AND NOT EXISTS (
-                SELECT 1 FROM official_documents od WHERE od.id = d.id
+                SELECT 1 FROM official_documents od WHERE od.id = d.id AND od.signed_at IS NOT NULL
             )
 
             UNION ALL
@@ -202,6 +203,7 @@ class DocumentQueries:
                 ) AND d.created_by != %s)
             )
             AND d.is_deleted = false
+            AND o.signed_at IS NOT NULL
         ) AS combined_count
         WHERE {where_clause}
         """

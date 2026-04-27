@@ -3,8 +3,6 @@
 from shared.logging import get_logger
 from typing import Dict, Any
 from datetime import datetime
-import os
-import httpx
 import json
 from fastapi.concurrency import run_in_threadpool
 
@@ -12,10 +10,9 @@ from database import get_db_connection
 from shared.exceptions import (
     ValidationError, ExternalServiceError, DocumentNotFoundError
 )
-from services.shared.signer_data import get_signer_data
-from shared.config import get_external_api_config
-from services.documents.lifecycle.creation import create_document
 from shared.numbering import generate_official_number
+from services.shared.signer_data import get_signer_data
+from services.documents.lifecycle.creation import create_document
 from config.constants import (
     DOCUMENT_TYPE_CAEX,
     CASE_COVER_REFERENCE_TEMPLATE,
@@ -25,17 +22,10 @@ from config.constants import (
 )
 from services.shared.settings_utils import get_city_from_settings
 from services.case_queries import (
-    get_document_type_id_query,
-    get_document_reference_query,
-    get_document_signers_query,
     update_document_content_query,
-    insert_official_document_query,
-    delete_official_document_query,
     update_document_status_signed_query,
     update_signer_status_signed_query,
     insert_case_official_document_query,
-    delete_document_signers_query,
-    delete_document_draft_query
 )
 
 logger = get_logger(__name__)
@@ -50,21 +40,24 @@ async def create_case_cover(
     filing_department_id: str,
     user_id: str,
     *,
-    schema_name: str,
-    connection=None
+    schema_name: str
 ) -> Dict[str, Any]:
     """
     Crea carátula automática para un expediente.
 
     Flujo:
-    1. Crear documento CAEX en draft
-    2. Guardar contenido y firmante (usuario como numerador)
-    3. Generar número oficial
-    4. INSERT en official_documents (reservar número)
-    5. Obtener datos completos para Legal Orchestrator
-    6. Llamar a Legal Orchestrator /create-case-cover
-    7. Si exitoso: Actualizar document_draft y document_signers a 'signed'
-    8. Si falla: DELETE de official_documents y raise error
+    MOMENTO 1 (lock corto ~5ms):
+      1. Crear documento CAEX en draft
+      2. Guardar contenido HTML
+      3. Construir cover_data y llamar generate_official_number()
+         → INSERT en official_documents con signed_at=NULL
+         (la función abre su propia conexión, lock ultra corto)
+    MOMENTO 2 (sin lock):
+      4. PDFComposer + Notary + R2
+      5. Si OK: UPDATE official_documents SET signed_at, signers
+      6. Si falla: re-raise (la fila queda con signed_at=NULL como hueco aceptable)
+      7. Actualizar document_draft y document_signers a 'signed'
+      8. Vincular carátula al expediente
 
     Args:
         case_id: UUID del expediente
@@ -80,13 +73,16 @@ async def create_case_cover(
 
     Raises:
         ValidationError: Si faltan datos o validaciones fallan
-        ExternalServiceError: Si falla Legal Orchestrator
+        ExternalServiceError: Si falla PDFComposer/Notary/R2
     """
     logger.info(f"Iniciando creación de carátula para expediente {case_number}")
     logger.info(f"Case ID: {case_id[:8]}")
     logger.info(f"User ID: {user_id[:8]}")
 
-    logger.info("Creando documento CAEX...")
+    # ================================================================
+    # PASO 1: Crear documento CAEX en draft
+    # ================================================================
+    logger.info("PASO 1: Creando documento CAEX...")
     caex_document = create_document(
         document_type_acronym=DOCUMENT_TYPE_CAEX,
         reference=CASE_COVER_REFERENCE_TEMPLATE.format(case_number=case_number),
@@ -99,10 +95,11 @@ async def create_case_cover(
     logger.info(f"Documento CAEX creado: {document_id[:8]}...")
 
     try:
-        # PASO 2: Guardar contenido HTML y firmante (INSERT directo, sin save_document_changes)
-        logger.info("Construyendo HTML de carátula...")
+        # ================================================================
+        # PASO 2: Guardar contenido HTML en document_draft
+        # ================================================================
+        logger.info("PASO 2: Construyendo HTML de carátula...")
 
-        # Construir HTML descriptivo con todos los datos
         caratula_html = f"""
         <div style="font-family: Arial, sans-serif; padding: 20px;">
             <h1 style="text-align: center; color: #333;">CARÁTULA DE EXPEDIENTE</h1>
@@ -120,264 +117,102 @@ async def create_case_cover(
         </div>
         """
 
-        logger.info(f"Guardando contenido y firmante (INSERT directo)...")
-
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
-                # Actualizar document_draft con el content en formato correcto
                 content_structure = {
                     "html": caratula_html,
                     "format_version": "2.0",
                     "updated_at": datetime.now().isoformat()
                 }
-
                 cursor.execute(update_document_content_query(), (
                     json.dumps(content_structure),
                     document_id
                 ))
-
-                # NOTA: NO insertar firmante aquí - create_document() ya lo asignó automáticamente
-                # como firmante numerador (ver services/documents/creation.py líneas 76-84)
-
                 conn.commit()
 
-        logger.info(f"Contenido HTML guardado exitosamente (firmante ya asignado por create_document)")
+        logger.info("Contenido HTML guardado exitosamente")
 
-        # PASO 3: Generar número oficial con función centralizada
-        logger.info("Generando número oficial con función centralizada...")
+        # ================================================================
+        # PASO 3: Construir cover_data (payload para PDFComposer/Notary)
+        #         ANTES de llamar a generate_official_number, porque la
+        #         función nueva requiere content y signers como parámetros.
+        # ================================================================
+        logger.info("PASO 3: Recolectando datos para generate_official_number...")
         current_year = datetime.now().year
 
-        # ✅ USAR FUNCIÓN CENTRALIZADA (con lock ultra corto 10-20ms)
-        official_number, department_id, global_sequence = await generate_official_number(
-            document_type_acronym="CAEX",
-            user_id=user_id,
-            year=current_year,
-            connection=connection,  # Usar conexión de la transacción
-            schema_name=schema_name  # Multi-tenant
-        )
-        logger.info(f"Número oficial generado: {official_number}")
-        logger.info(f"Global sequence capturada: {global_sequence}")
-
-        # PASO 4: Construir payload para Legal Orchestrator
-        # MOVIDO AQUÍ para guardar en official_documents.content
-        logger.info("Construyendo payload para Legal Orchestrator...")
-        cover_data = _fetch_cover_data(
-            case_id=case_id,
-            case_number=case_number,
-            case_reference=case_reference,
-            case_template_acronym=case_template_acronym,
-            case_template_name=case_template_name,
-            document_id=document_id,
-            document_type_name=document_type_name,
-            official_number=official_number,
-            user_id=user_id,
-            filing_department_id=filing_department_id,
-            schema_name=schema_name
-        )
-        logger.info(f"Payload construido exitosamente")
-        logger.info(f"Claves del payload: {list(cover_data.keys())}")
-
-        # PASO 5: INSERT en official_documents (RESERVAR NÚMERO)
-        # Guardar el MISMO payload que enviamos a Legal Orchestrator
-        logger.info("Reservando número en official_documents...")
+        # Obtener document_type_id
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
-                cursor.execute(get_document_type_id_query(), (DOCUMENT_TYPE_CAEX,))
+                cursor.execute(
+                    "SELECT id as document_type_id FROM document_types WHERE acronym = %s",
+                    (DOCUMENT_TYPE_CAEX,)
+                )
                 type_result = cursor.fetchone()
-
                 if not type_result:
                     raise ValidationError(f"Tipo de documento {DOCUMENT_TYPE_CAEX} no encontrado")
-
                 document_type_id = type_result['document_type_id']
 
                 # Obtener reference del documento
-                cursor.execute(get_document_reference_query(), (document_id,))
-                doc_data = cursor.fetchone()
-
-                if not doc_data:
+                cursor.execute(
+                    "SELECT reference FROM document_draft WHERE id = %s",
+                    (document_id,)
+                )
+                doc_ref_row = cursor.fetchone()
+                if not doc_ref_row:
                     raise DocumentNotFoundError(document_id)
+                reference_text = doc_ref_row['reference']
 
-                # Obtener firmantes del documento
-                cursor.execute(get_document_signers_query(), (document_id,))
+                # Obtener firmantes
+                cursor.execute(
+                    """
+                    SELECT json_agg(
+                        json_build_object(
+                            'user_id', ds.user_id,
+                            'full_name', u.full_name,
+                            'status', ds.status,
+                            'is_numerator', ds.is_numerator,
+                            'signing_order', ds.signing_order,
+                            'signed_at', ds.signed_at
+                        )
+                    ) as signers
+                    FROM document_signers ds
+                    JOIN users u ON ds.user_id = u.id
+                    WHERE ds.document_id = %s
+                    """,
+                    (document_id,)
+                )
                 signers_result = cursor.fetchone()
                 signers_data = signers_result['signers'] if signers_result else []
 
-                # Obtener sector_ids de los firmantes (para filtro por sector)
-                signer_sectors_query = """
+                # Obtener sector_ids de los firmantes
+                cursor.execute(
+                    """
                     SELECT ARRAY_AGG(DISTINCT u.sector_id) FILTER (WHERE u.sector_id IS NOT NULL) as sector_ids
                     FROM document_signers ds
                     JOIN users u ON ds.user_id = u.id
                     WHERE ds.document_id = %s
-                """
-                cursor.execute(signer_sectors_query, (document_id,))
+                    """,
+                    (document_id,)
+                )
                 signer_sectors_result = cursor.fetchone()
                 signer_sector_ids = signer_sectors_result['sector_ids'] if signer_sectors_result else None
 
-                # INSERT en official_documents
-                cursor.execute(insert_official_document_query(), (
-                    document_id,
-                    doc_data['reference'],
-                    json.dumps(cover_data),
-                    official_number,
-                    current_year,
-                    department_id,
-                    user_id,
-                    document_type_id,
-                    global_sequence,
-                    json.dumps(signers_data) if signers_data else None,
-                    signer_sector_ids
-                ))
-                conn.commit()
+        # PASO 3: Reservar numero oficial
+        logger.info("PASO 3: Generando numero oficial (lock ultra corto ~5ms)...")
 
-        logger.info(f"Número oficial reservado en BD")
-        logger.info(f"Content guardado: Payload de Legal Orchestrator")
+        signer_data_for_payload = get_signer_data(user_id, schema_name=schema_name)
 
-        # PASO 6: Generar, firmar y publicar carátula directamente
-        # Phase 5: Eliminación de Legal Orchestrator
-        logger.info("Generando y firmando caratula directamente...")
-        try:
-            # 6.1: Generar PDF con PDFComposer
-            logger.info(f"6.1: Generando PDF con PDFComposer /create-case/...")
-            from services.shared.pdfcomposer_api import call_pdfcomposer_create_case
-
-            pdf_bytes = await call_pdfcomposer_create_case(cover_data)
-            logger.info(f"[OK] PDF generado: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
-
-            # 6.2: Firmar PDF con Notary (CON official_number y city)
-            logger.info(f"6.2: Firmando PDF con Notary...")
-            from services.shared.notary_api import call_notary_sign_pdf
-
-            signed_pdf_bytes = await call_notary_sign_pdf(
-                pdf_bytes=pdf_bytes,
-                signer_name=cover_data["signer_full_name"],
-                signer_seal=cover_data["signer_seal"],
-                signer_department=cover_data["signer_department"],
-                signer_municipality=cover_data["signer_municipality"],
-                official_number=cover_data["official_document_number"],
-                city=cover_data["city_name"],
-                tenant_id=schema_name  # Para firma PAdES
-            )
-            logger.info(f"[OK] PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
-
-            # 6.3: Subir a R2 oficial
-            logger.info(f"6.3: Subiendo a R2 oficial...")
-            from services.storage.cloudflare import get_tenant_r2_client
-            r2_client = get_tenant_r2_client(schema_name=schema_name)
-
-            # Filename: official_number.pdf
-            filename_oficial = f"{official_number}.pdf"
-
-            await run_in_threadpool(r2_client.upload_oficial, signed_pdf_bytes, filename_oficial)
-            logger.info(f"[OK] Subido a R2 oficial: {filename_oficial}")
-
-            logger.info(f"[OK] Caratula generada, firmada y publicada exitosamente")
-
-        except Exception as e:
-            # Si falla generación/firma/publicación, hacer rollback del official_documents
-            logger.info(f"[ERR] Fallo en generacion/firma/publicacion - {str(e)}")
-            logger.info(f"Ejecutando ROLLBACK: Eliminando de official_documents...")
-
-            with get_db_connection(schema_name) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(delete_official_document_query(), (document_id,))
-                    conn.commit()
-
-            logger.info(f"Rollback completado")
-            raise ExternalServiceError(CASE_COVER_CREATION_ERROR.format(error=str(e)))
-
-        # PASO 7: Actualizar document_draft y document_signers a 'signed'
-        logger.info("Actualizando estados a 'signed'...")
         with get_db_connection(schema_name) as conn:
             with conn.cursor() as cursor:
-                cursor.execute(update_document_status_signed_query(), (document_id,))
-                cursor.execute(update_signer_status_signed_query(), (document_id, user_id))
-                conn.commit()
+                cursor.execute("SELECT logo_url FROM settings LIMIT 1")
+                settings_result = cursor.fetchone()
+                logo_url = (
+                    settings_result['logo_url']
+                    if settings_result and settings_result.get('logo_url')
+                    else DEFAULT_LOGO_URL
+                )
+                city = get_city_from_settings(cursor=cursor)
 
-        logger.info(f"Estados actualizados a 'signed'")
-
-        # PASO 8: Vincular carátula al expediente
-        logger.info("Vinculando carátula al expediente...")
-
-        # Usar la conexión de la transacción si está disponible, sino crear una nueva
-        if connection:
-            cursor = connection.cursor()
-            cursor.execute(insert_case_official_document_query(), (case_id, document_id, user_id))
-        else:
-            with get_db_connection(schema_name) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(insert_case_official_document_query(), (case_id, document_id, user_id))
-                    conn.commit()
-
-        logger.info(f"Carátula vinculada al expediente")
-        logger.info(f"Link: case_id={case_id[:8]} -> document_id={document_id[:8]}")
-        logger.info(f"Proceso completado exitosamente")
-
-        return {
-            "success": True,
-            "document_id": document_id,
-            "official_number": official_number,
-            "message": CASE_COVER_CREATED_SUCCESS.format(official_number=official_number)
-        }
-
-    except Exception as e:
-        # Si hay cualquier error después de crear el documento, eliminarlo
-        logger.info(f"ERROR GENERAL: {str(e)}")
-        logger.info(f"Limpiando documento creado...")
-
-        try:
-            with get_db_connection(schema_name) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(delete_document_signers_query(), (document_id,))
-                    cursor.execute(delete_document_draft_query(), (document_id,))
-                    conn.commit()
-            logger.info(f"Documento limpiado")
-        except Exception as cleanup_error:
-            logger.info(f"ERROR en limpieza: {cleanup_error}")
-
-        # Re-lanzar la excepción original
-        raise
-
-
-# ============================================================================
-# FUNCIONES AUXILIARES
-# ============================================================================
-
-def _fetch_cover_data(
-    case_id: str,
-    case_number: str,
-    case_reference: str,
-    case_template_acronym: str,
-    case_template_name: str,
-    document_id: str,
-    document_type_name: str,
-    official_number: str,
-    user_id: str,
-    filing_department_id: str,
-    schema_name: str
-) -> Dict[str, Any]:
-    """
-    Recupera todos los datos necesarios para Legal Orchestrator /create-case-cover.
-
-    Hace un query grande con JOINs para obtener toda la información de una vez.
-
-    Returns:
-        Dict con todos los campos requeridos por Legal Orchestrator
-    """
-    with get_db_connection(schema_name) as conn:
-        # Obtener datos del firmante usando función compartida
-        signer_data = get_signer_data(user_id, schema_name=schema_name)
-
-        # Obtener logo del municipio desde settings
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT logo_url FROM settings LIMIT 1")
-            settings_result = cursor.fetchone()
-            logo_url = settings_result['logo_url'] if settings_result and settings_result.get('logo_url') else DEFAULT_LOGO_URL
-
-        # Obtener city desde settings del tenant
-        with conn.cursor() as city_cursor:
-            city = get_city_from_settings(cursor=city_cursor)
-
-        # Construir payload para Legal Orchestrator usando datos del usuario
         cover_data = {
             "municipality_logo_url": logo_url,
             "document_type_acronym": "CAEX",
@@ -387,21 +222,171 @@ def _fetch_cover_data(
             "case_type_acronym": case_template_acronym,
             "case_type_name": case_template_name,
             "case_motive": case_reference,
-            "initiating_department": signer_data['department_name'],
-            "case_creator": signer_data['full_name'],
-            "signer_full_name": signer_data['full_name'],
-            "signer_seal": signer_data['seal'],
-            "signer_department": signer_data['department_name'],
-            "signer_municipality": signer_data['municipality_name'],
-            "official_document_number": official_number,
+            "initiating_department": signer_data_for_payload['department_name'],
+            "case_creator": signer_data_for_payload['full_name'],
+            "signer_full_name": signer_data_for_payload['full_name'],
+            "signer_seal": signer_data_for_payload['seal'],
+            "signer_department": signer_data_for_payload['department_name'],
+            "signer_municipality": signer_data_for_payload['municipality_name'],
             "city_name": city
         }
 
-        logger.info(f"Payload para Legal Orchestrator:")
-        logger.info(f"  - Case number: {cover_data['case_number']}")
-        logger.info(f"  - Official number: {cover_data['official_document_number']}")
-        logger.info(f"  - Signer: {cover_data['signer_full_name']}")
-        logger.info(f"  - Department: {cover_data['initiating_department']}")
+        official_number, department_id, global_sequence = await generate_official_number(
+            document_type_acronym="CAEX",
+            user_id=user_id,
+            year=current_year,
+            schema_name=schema_name,
+            document_id=document_id,
+            reference=reference_text,
+            document_type_id=document_type_id,
+            content=cover_data,
+            signers=signers_data,
+            signer_sector_ids=signer_sector_ids,
+        )
+        logger.info(f"Número oficial generado: {official_number}")
+        logger.info(f"Global sequence: {global_sequence}")
 
-        return cover_data
+        # ================================================================
+        # PASO 5: PDFComposer + Notary + R2
+        # ================================================================
+        logger.info("PASO 5: Generando, firmando y publicando carátula...")
+        try:
+            # 5.1: Generar PDF con PDFComposer
+            logger.info("5.1: Generando PDF con PDFComposer /create-case/...")
+            from services.shared.pdfcomposer_api import call_pdfcomposer_create_case
+
+            pdf_bytes = await call_pdfcomposer_create_case(cover_data, schema_name=schema_name)
+            logger.info(f"[OK] PDF generado: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
+
+            # 5.2: Firmar PDF con Notary
+            logger.info("5.2: Firmando PDF con Notary...")
+            from services.shared.notary_api import call_notary_sign_pdf
+
+            signed_pdf_bytes = await call_notary_sign_pdf(
+                pdf_bytes=pdf_bytes,
+                signer_name=cover_data["signer_full_name"],
+                signer_seal=cover_data["signer_seal"],
+                signer_department=cover_data["signer_department"],
+                signer_municipality=cover_data["signer_municipality"],
+                official_number=official_number,
+                city=cover_data["city_name"],
+                tenant_id=schema_name,
+                schema_name=schema_name
+            )
+            logger.info(f"[OK] PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
+
+            # 5.3: Subir a R2 oficial
+            logger.info("5.3: Subiendo a R2 oficial...")
+            from services.storage.cloudflare import get_tenant_r2_client
+            r2_client = get_tenant_r2_client(schema_name=schema_name)
+
+            filename_oficial = f"{official_number}.pdf"
+            await run_in_threadpool(r2_client.upload_oficial, signed_pdf_bytes, filename_oficial)
+            logger.info(f"[OK] Subido a R2 oficial: {filename_oficial}")
+
+        except Exception as e:
+            # PDFComposer/Notary/R2 falló.
+            # NO hacemos DELETE de official_documents.
+            # La fila queda con signed_at=NULL (hueco aceptable por diseño).
+            # El caller (creation.py) captura este error y lo maneja.
+            logger.error(f"[ERR] Fallo en generacion/firma/publicacion: {str(e)}")
+            logger.error(
+                f"official_documents queda con signed_at=NULL para doc={document_id}. "
+                f"Número {official_number} reservado como hueco aceptable."
+            )
+            raise ExternalServiceError(CASE_COVER_CREATION_ERROR.format(error=str(e)))
+
+        # ================================================================
+        # PASO 6: UPDATE official_documents (signed_at + signers)
+        #         NO INSERT - generate_official_number ya insertó con signed_at=NULL
+        # ================================================================
+        logger.info("PASO 6: Confirmando firma en official_documents (UPDATE)...")
+        with get_db_connection(schema_name) as conn:
+            with conn.cursor() as cursor:
+                # Marcar como firmado
+                cursor.execute(
+                    """
+                    UPDATE official_documents
+                    SET signed_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND signed_at IS NULL
+                    """,
+                    (document_id,)
+                )
+
+                # Actualizar el firmante en el array signers con jsonb_set
+                # Formato ISO con T y Z para consistencia con numerator.py (commit 490cd24)
+                cursor.execute(
+                    """
+                    UPDATE official_documents
+                    SET signers = (
+                        SELECT jsonb_agg(
+                            CASE WHEN s->>'user_id' = %s
+                                THEN jsonb_set(
+                                    jsonb_set(s, '{status}', '"signed"'),
+                                    '{signed_at}', to_jsonb(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                                )
+                                ELSE s
+                            END
+                        )
+                        FROM jsonb_array_elements(signers) s
+                    )
+                    WHERE id = %s
+                    """,
+                    (user_id, document_id)
+                )
+                conn.commit()
+        logger.info("official_documents actualizado con signed_at y signers")
+
+        # ================================================================
+        # PASO 7: Actualizar document_draft y document_signers a 'signed'
+        # ================================================================
+        logger.info("PASO 7: Actualizando estados a 'signed'...")
+        with get_db_connection(schema_name) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(update_document_status_signed_query(), (document_id,))
+                cursor.execute(update_signer_status_signed_query(), (document_id, user_id))
+                conn.commit()
+        logger.info("Estados actualizados a 'signed'")
+
+        # ================================================================
+        # PASO 8: Vincular carátula al expediente
+        # ================================================================
+        logger.info("PASO 8: Vinculando carátula al expediente...")
+        with get_db_connection(schema_name) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(insert_case_official_document_query(), (case_id, document_id, user_id))
+                conn.commit()
+        logger.info(f"Carátula vinculada al expediente")
+        logger.info(f"Link: case_id={case_id[:8]} -> document_id={document_id[:8]}")
+        logger.info("Proceso completado exitosamente")
+
+        return {
+            "success": True,
+            "document_id": document_id,
+            "official_number": official_number,
+            "message": CASE_COVER_CREATED_SUCCESS.format(official_number=official_number)
+        }
+
+    except Exception as e:
+        # Error general: NO limpiar document_draft ni document_signers.
+        #
+        # Si el error ocurrió ANTES de generate_official_number:
+        #   - document_draft queda en estado 'draft' (sin número oficial)
+        #   - document_signers queda intacto
+        #   - No hay fila en official_documents → estado consistente
+        #
+        # Si el error ocurrió DESPUÉS de generate_official_number (PDFComposer/Notary/R2):
+        #   - official_documents queda con signed_at=NULL (hueco aceptable por diseño)
+        #   - document_draft queda en estado 'draft' → consistente con el hueco
+        #   - document_signers queda intacto → consistente
+        #
+        # El caller (creation.py) maneja el error: expediente queda inactive,
+        # log + mail de alerta. El usuario reintenta manualmente.
+        logger.error(
+            f"ERROR GENERAL en create_case_cover: {str(e)} | "
+            f"doc={document_id} queda como draft con signed_at=NULL en official_documents "
+            f"(si generate_official_number ya ejecutó). Hueco aceptable por diseño."
+        )
+        raise
+
 

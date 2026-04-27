@@ -10,14 +10,13 @@ from shared.logging import get_logger
 from database import (
     execute_query,
     get_case_number_format,
-    CASE_STATUS_ACTIVE
 )
 from services.cases.queries import (
     get_department_and_municipality_query,
     get_advisory_lock_query,
     get_next_case_sequence_query,
 )
-from config.constants import MOVEMENT_TYPES
+from config.constants import MOVEMENT_TYPES, CASE_STATUS_INACTIVE
 
 logger = get_logger(__name__)
 
@@ -71,6 +70,7 @@ def create_case(
         # Usar la conexión externa (ya está en transacción)
         with connection.cursor() as cursor:
             # Adquirir Advisory Lock ANTES de calcular secuencia
+            cursor.execute("SET LOCAL lock_timeout = '10s'")
             cursor.execute(get_advisory_lock_query())
 
             # Generar número secuencial (dentro del lock)
@@ -96,7 +96,7 @@ def create_case(
             """
 
             cursor.execute(case_insert, (
-                case_id, case_number, reference, CASE_STATUS_ACTIVE,
+                case_id, case_number, reference, CASE_STATUS_INACTIVE,
                 case_template_id, created_by_user_id,
                 filing_department_id, owner_sector_id
             ))
@@ -137,7 +137,7 @@ def create_case(
                 "case_id": case_id,
                 "case_number": case_number,
                 "reference": reference,
-                "status": CASE_STATUS_ACTIVE,
+                "status": CASE_STATUS_INACTIVE,
                 "created_at": datetime.now()
             }
 

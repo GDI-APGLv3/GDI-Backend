@@ -10,9 +10,10 @@ from shared.exceptions import (
     DocumentAlreadySignedError, InvalidSignatureOrderError, DocumentAlreadyRejectedError, AuthorizationError,
     ExternalServiceError
 )
+from shared.pdf_validation import has_end_text_marker
 # Imports de validate_document_id y validate_user_id removidos - ya no se usan
 from fastapi.concurrency import run_in_threadpool
-from services.shared.external_api import generate_final_document_pdf, call_legal_orchestrator_sign_document
+from services.shared.external_api import generate_final_document_pdf
 from services.shared.signer_data import get_signer_data
 from services.shared.resume_trigger import enqueue_resume_fire_and_forget
 from services.documents.core.queries import (
@@ -103,6 +104,11 @@ async def start_document_signing_process(document_id: str, user_id: str, *, sche
                 from services.notes.validation import validate_nota_recipients_for_signing
                 validate_nota_recipients_for_signing(document_id, schema_name=schema_name)
 
+            # Si es MEMO, validar recipients antes de firmar
+            elif document.get('type_acronym') == 'MEMO':
+                from services.memos.validation import validate_memo_recipients_for_signing
+                validate_memo_recipients_for_signing(document_id, schema_name=schema_name)
+
             # Obtener firmantes
             cursor.execute(get_document_signers_for_pdf_query(), (document_id,))
             all_signers = cursor.fetchall()
@@ -128,6 +134,51 @@ async def start_document_signing_process(document_id: str, user_id: str, *, sche
                     f"document_generate_id: {pdf_result.get('document_generate_id') if pdf_result else 'No pdf_result'}"
                 )
                 raise ExternalServiceError(START_SIGNING_PDF_GENERATION_ERROR)
+
+            # Validar que el PDF contiene el marker 'end-text' requerido por Notary
+            document_url = pdf_result.get('document_url')
+            if document_url:
+                try:
+                    import httpx as _httpx
+                    async with _httpx.AsyncClient(timeout=30.0) as _client:
+                        _pdf_response = await _client.get(document_url)
+                        _pdf_response.raise_for_status()
+                        _pdf_bytes = _pdf_response.content
+                    if not has_end_text_marker(_pdf_bytes):
+                        logger.error(
+                            f"PDF generado no contiene marker 'end-text'. "
+                            f"document_id={document_id}, schema={schema_name}"
+                        )
+                        # Borrar el PDF de R2 tosign (no se va a usar, ahorra storage)
+                        try:
+                            from services.storage.cloudflare import get_tenant_r2_client
+                            _r2_client = get_tenant_r2_client(schema_name=schema_name)
+                            _filename = document_id.replace('-', '') + '.pdf'
+                            _r2_client.delete_tosign(_filename)
+                            logger.info(
+                                f"PDF invalido eliminado de R2 tosign: {_filename}"
+                            )
+                        except Exception as _del_e:
+                            logger.warning(
+                                f"No se pudo eliminar PDF invalido de R2 tosign "
+                                f"(soft-fail): {_del_e}"
+                            )
+                        raise ValidationError(
+                            "El PDF generado no tiene espacio correcto para la firma. "
+                            "Por favor agregue saltos de línea para generar otra página."
+                        )
+                    logger.info(f"Validación end-text OK para documento {document_id}")
+                except ValidationError:
+                    raise
+                except Exception as _e:
+                    logger.warning(
+                        f"No se pudo validar end-text del PDF (se continúa igualmente): {_e}"
+                    )
+            else:
+                logger.warning(
+                    f"document_url no disponible en pdf_result, se omite validación end-text. "
+                    f"document_id={document_id}"
+                )
 
             # Obtener usuarios inactivos para enviar invitaciones
             cursor.execute(get_inactive_signers_query(), (document_id,))
@@ -298,7 +349,8 @@ async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> 
             signer_municipality=signer_municipality,
             official_number="",  # Vacío para firmante común
             city="",             # Vacío para firmante común
-            tenant_id=schema_name  # Para firma PAdES
+            tenant_id=schema_name,  # Para firma PAdES
+            schema_name=schema_name  # Para resolver certificado de R2
         )
 
         logger.info(f"PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
@@ -450,7 +502,7 @@ async def _send_user_invitations(inactive_signers: List[Dict], document_id: str,
 
                             <!-- Botón de acción principal -->
                             <div style="text-align: center; margin: 35px 0;">
-                                <a href="https://gdilatam.com/"
+                                <a href="https://nuevogdi.framer.website/"
                                    style="display: inline-block; background-color: #16158C;
                                           color: white; text-decoration: none; padding: 16px 32px;
                                           border-radius: 8px; font-weight: 600; font-size: 16px;

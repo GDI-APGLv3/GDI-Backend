@@ -32,7 +32,7 @@ from .documents.catalog.states import get_all_display_states
 from .documents.catalog.types import get_all_document_types
 from .users.user_documents import get_user_documents
 from .documents.signing import start_document_signing_process, get_document_signature_details, sign_document
-from .documents.signing.numerator import numerate_document, sign_document_as_numerator
+from .documents.signing.numerator import sign_document_as_numerator
 from .documents.lifecycle.rejection import reject_document, get_document_rejections
 
 # Usuarios - Funciones principales (refactorizado)
@@ -61,7 +61,6 @@ __all__ = [
     "sign_document",
     
     # Documentos - Numerator
-    "numerate_document",
     "sign_document_as_numerator",
     
     # Documentos - Rejection

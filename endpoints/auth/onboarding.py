@@ -9,7 +9,7 @@ from auth import decode_jwt_from_request
 from shared.tenant_validation import get_user_tenants, invalidate_user_cache
 from models.tenant_models import OnboardingResponse, OnboardingUser, TenantAccess, UserProfile
 from models.tags import Tags
-from database import execute_query, execute_update
+from database import execute_query, execute_update, DEMO_MODE
 
 router = APIRouter(prefix="/api/auth", tags=[Tags.USERS])
 logger = get_logger(__name__)
@@ -45,7 +45,7 @@ logger = get_logger(__name__)
                 "application/json": {
                     "example": {
                         "user": {
-                            "email": "juan.perez@gdilatam.com",
+                            "email": "juan.perez@example.com",
                             "full_name": "Juan Pérez",
                             "profile_picture_url": "https://s.gravatar.com/avatar/123.jpg"
                         },
@@ -64,7 +64,7 @@ logger = get_logger(__name__)
                         "default_tenant": "san_miguel",
                         "default_profile": {
                             "user_id": "550e8400-e29b-41d4-a716-446655440000",
-                            "email": "juan.perez@gdilatam.com",
+                            "email": "juan.perez@example.com",
                             "sector_id": "770e8400-e29b-41d4-a716-446655440222",
                             "department_id": "880e8400-e29b-41d4-a716-446655440333",
                             "estado": 1
@@ -138,8 +138,16 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
         # 3. Obtener tenants del usuario
         tenants_data = get_user_tenants(email)
 
-        # 4. Si no tiene tenants, intentar auto-crear en 100_test (solo si el schema existe)
+        # 4. Si no tiene tenants, decidir según DEMO_MODE
         if not tenants_data:
+            if not DEMO_MODE:
+                logger.warning(f"Usuario {email} sin acceso a ninguna municipalidad")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tiene acceso a ninguna municipalidad. Contacte al administrador."
+                )
+
+            # --- DEMO_MODE: auto-crear usuario SOLO en 100_test ---
             # Verificar si el schema 100_test existe en la BD
             schema_check = execute_query(
                 "SELECT 1 FROM information_schema.schemata WHERE schema_name = '100_test'",
@@ -240,37 +248,22 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                     detail="Error creando usuario en tenant de pruebas"
                 )
 
-        # 5. Actualizar profile_picture_url si está NULL (usuario existente sin foto)
-        if picture and tenants_data:
+        # 5. Completar datos faltantes del usuario (auth_id y profile_picture_url)
+        auth_id_from_jwt = jwt_payload.get("sub")
+        if tenants_data and (auth_id_from_jwt or picture):
             for tenant in tenants_data:
                 try:
-                    # Verificar si el usuario tiene profile_picture_url NULL
-                    check_query = """
-                        SELECT id FROM users
-                        WHERE LOWER(email) = %s AND profile_picture_url IS NULL
-                    """
-                    result = execute_query(
-                        check_query,
-                        (email.lower(),),
-                        fetch_one=True,
+                    execute_update(
+                        """UPDATE users
+                           SET auth_id = COALESCE(auth_id, %s),
+                               profile_picture_url = COALESCE(profile_picture_url, %s)
+                           WHERE LOWER(email) = %s
+                             AND (auth_id IS NULL OR profile_picture_url IS NULL)""",
+                        (auth_id_from_jwt, picture, email.lower()),
                         schema_name=tenant["schema_name"]
                     )
-
-                    if result:
-                        # Actualizar profile_picture_url
-                        update_query = """
-                            UPDATE users
-                            SET profile_picture_url = %s
-                            WHERE LOWER(email) = %s
-                        """
-                        execute_update(
-                            update_query,
-                            (picture, email.lower()),
-                            schema_name=tenant["schema_name"]
-                        )
-                        logger.info(f"profile_picture_url actualizado para {email} en {tenant['schema_name']}")
                 except Exception as e:
-                    logger.warning(f"Error actualizando profile_picture_url en {tenant['schema_name']}: {e}")
+                    logger.warning(f"Error actualizando datos de usuario en {tenant['schema_name']}: {e}")
 
         # 6. Construir respuesta
         tenants = [TenantAccess(**t) for t in tenants_data]

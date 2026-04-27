@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List
 from api_gateway.context import MCPContext
 from services.notes.retrieval import get_received_notes_multi_sector, get_sent_notes_multi_sector, get_archived_notes_multi_sector
 from services.shared.sector_utils import get_user_sector_ids
-from shared.exceptions import ValidationError, AuthorizationError
+from shared.exceptions import ValidationError, AuthorizationError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +283,7 @@ def get_note_detail(
 
         return result
 
-    except (AuthorizationError, ValueError):
+    except (AuthorizationError, NotFoundError, ValueError):
         raise
     except Exception as e:
         logger.error(f"[MCP] get_note_detail - error: {e}")

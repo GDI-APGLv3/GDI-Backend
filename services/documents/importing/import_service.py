@@ -118,7 +118,8 @@ async def create_imported_document(
             url_logo=logo_url,
             name_acrony_type=doc_type['acronym'],
             document_type=doc_type['name'],
-            reference=reference
+            reference=reference,
+            schema_name=schema_name
         )
     except Exception as e:
         logger.error(f"Error procesando PDF: {str(e)}")
@@ -315,7 +316,8 @@ async def replace_imported_pdf(
             url_logo=logo_url,
             name_acrony_type=doc['type_acronym'],
             document_type=doc['type_name'],
-            reference=doc['reference']
+            reference=doc['reference'],
+            schema_name=schema_name
         )
     except Exception as e:
         logger.error(f"Error procesando PDF: {str(e)}")

@@ -4,8 +4,11 @@ Reemplaza llamadas a Legal Orchestrator para firma de documentos.
 
 Incluye manejo automático de FULLPAGE:
 - Primer intento: Intentar firmar PDF
-- Si responde FULLPAGE: Agregar SignPage.pdf (con marcador "end-text") y reintentar
+- Si responde FULLPAGE: Agregar página de firma (con marcador "end-text") y reintentar
 - Segundo intento: Firmar PDF aumentado
+
+Si hay certificado en R2 (resolve_certificate), envía cert_file + cert_password
+en el multipart para que Notary firme con PAdES sin necesitar el .p12 local.
 """
 
 import os
@@ -26,7 +29,7 @@ NOTARY_API_KEY = os.getenv('NOTARY_API_KEY')
 if not NOTARY_API_KEY:
     raise RuntimeError("NOTARY_API_KEY no configurado en variables de entorno")
 
-NOTARY_TIMEOUT = 120.0  # 2 minutos para operaciones de firma
+NOTARY_TIMEOUT = 20.0  # 20s: tolerancia a TSA externo lento en p99 (timestamp.digicert.com)
 
 
 async def call_notary_sign_pdf(
@@ -39,43 +42,37 @@ async def call_notary_sign_pdf(
     city: str = "LATAM",
     stamp_position: str = "",
     *,
-    tenant_id: str = None
+    tenant_id: str = None,
+    schema_name: str = None
 ) -> bytes:
     """
     Llama a Notary /sign-pdf con manejo automático de FULLPAGE.
 
     Flujo:
-    1. Primer intento: Enviar PDF original a Notary
-    2. Si responde FULLPAGE (400 con texto "FULLPAGE"):
-       - Agregar SignPage.pdf (contiene marcador "end-text") al PDF
+    1. Si tenant_id y schema_name: intenta resolver certificado de R2
+    2. Primer intento: Enviar PDF a Notary (con cert_file si disponible)
+    3. Si responde FULLPAGE (400):
+       - Agregar página de firma (con marcador "end-text")
        - Reintentar con PDF aumentado
-    3. Retornar PDF firmado
+    4. Retornar PDF firmado
 
     Args:
         pdf_bytes: Contenido binario del PDF a firmar
         signer_name: Nombre completo del firmante
-        signer_seal: Sello del firmante (ej: "Subsecretaria de Gestión")
-        signer_department: Departamento (ej: "Administración General")
-        signer_municipality: Municipalidad (ej: "Municipalidad de Test")
-        official_number: Número oficial del documento (ej: IF-2025-000000157-MT-DGOBR)
+        signer_seal: Sello del firmante
+        signer_department: Departamento
+        signer_municipality: Municipalidad
+        official_number: Número oficial del documento
         city: Ciudad para el sello (default: "LATAM")
+        stamp_position: Posición del sello
+        tenant_id: ID del tenant para certificado PAdES
+        schema_name: Schema del tenant (para resolver certificado de R2)
 
     Returns:
         bytes: PDF firmado por Notary
 
     Raises:
-        Exception: Si Notary falla en ambos intentos o si hay error de conexión
-
-    Examples:
-        >>> pdf_bytes = open('document.pdf', 'rb').read()
-        >>> signed_pdf = await call_notary_sign_pdf(
-        ...     pdf_bytes=pdf_bytes,
-        ...     signer_name="Juan Perez",
-        ...     signer_seal="Subsecretaria",
-        ...     signer_department="Admin",
-        ...     signer_municipality="Muni Test",
-        ...     official_number="IF-2025-000000157-MT-DGOBR"
-        ... )
+        Exception: Si Notary falla en ambos intentos
     """
     logger.info("Preparando llamada a Notary")
     logger.info(f"URL: {NOTARY_URL}/sign-pdf")
@@ -89,7 +86,22 @@ async def call_notary_sign_pdf(
     logger.info(f"tenant_id: {tenant_id or '(none)'}")
     logger.info(f"   Tamaño PDF: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
 
-    # Preparar multipart form-data (igual que Legal Orchestrator)
+    # Intentar resolver certificado de R2 si tenemos tenant_id + schema_name
+    cert_bytes = None
+    cert_password = None
+
+    if tenant_id and schema_name:
+        try:
+            from services.shared.certificate_resolver import resolve_certificate
+            cert_bytes, cert_password = await resolve_certificate(
+                tenant_id, schema_name=schema_name
+            )
+            logger.info(f"Certificado resuelto de R2 para {tenant_id} ({len(cert_bytes)} bytes)")
+        except Exception as e:
+            logger.warning(f"No se pudo resolver certificado de R2 para {tenant_id}: {e}")
+            logger.info("Continuando con tenant_id (Notary usará certificado local)")
+
+    # Preparar multipart form-data
     files = {
         "pdf_file": ("document.pdf", pdf_bytes, "application/pdf"),
         "name": (None, signer_name),
@@ -107,6 +119,11 @@ async def call_notary_sign_pdf(
     # Agregar tenant_id para firma PAdES (criptográfica)
     if tenant_id:
         files["tenant_id"] = (None, tenant_id)
+
+    # Agregar certificado si se resolvió de R2
+    if cert_bytes and cert_password:
+        files["cert_file"] = ("cert.p12", cert_bytes, "application/x-pkcs12")
+        files["cert_password"] = (None, cert_password)
 
     headers = {
         "x-api-key": NOTARY_API_KEY
@@ -151,13 +168,13 @@ async def call_notary_sign_pdf(
 
             if is_fullpage:
                 logger.warning("Notary respondió FULLPAGE (PDF sin espacio para firma)")
-                logger.info("Agregando SignPage.pdf con marcador 'end-text' y reintentando...")
+                logger.info("Agregando página de firma con marcador 'end-text' y reintentando...")
 
                 # AGREGAR SIGNPAGE.PDF CON MARCADOR "end-text"
                 try:
                     augmented_pdf = add_blank_page_to_pdf(pdf_bytes)
                 except Exception as pdf_error:
-                    logger.error(f"Error agregando SignPage.pdf: {pdf_error}")
+                    logger.error(f"Error agregando página de firma: {pdf_error}")
                     raise Exception(f"Error manipulando PDF para FULLPAGE: {str(pdf_error)}")
 
                 # SEGUNDO INTENTO: Firmar PDF aumentado
@@ -180,6 +197,11 @@ async def call_notary_sign_pdf(
                 # Agregar tenant_id para firma PAdES
                 if tenant_id:
                     files_retry["tenant_id"] = (None, tenant_id)
+
+                # Agregar certificado si se resolvió de R2
+                if cert_bytes and cert_password:
+                    files_retry["cert_file"] = ("cert.p12", cert_bytes, "application/x-pkcs12")
+                    files_retry["cert_password"] = (None, cert_password)
 
                 async with httpx.AsyncClient(timeout=NOTARY_TIMEOUT) as client:
                     response_retry = await client.post(

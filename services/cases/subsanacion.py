@@ -66,35 +66,67 @@ async def subsanar_document_service(
         raise NotFoundError(f"Expediente no encontrado: {case_id}")
 
     # =================================================================
-    # PASO 2: VALIDAR PERMISOS ADMIN
+    # PASO 2: VALIDAR PERMISOS ADMIN (patron robusto de 3 condiciones)
     # =================================================================
-    # Obtener sectores donde el usuario puede editar (principal + permissions con can_edit=true)
     user_sector_ids = get_user_editable_sector_ids(user_id, schema_name=schema_name)
 
     if not user_sector_ids:
         raise AuthorizationError("Usuario sin sectores asignados")
 
-    # Obtener admin_sector del expediente (último movimiento cerrado creation/transfer)
-    admin_sector_query = """
-        SELECT s.id as sector_id
-        FROM case_movements cm
-        JOIN sectors s ON cm.admin_sector_id = s.id
-        WHERE cm.case_id = %s
-          AND cm.is_active = false
-          AND cm.type IN ('creation', 'transfer')
-        ORDER BY cm.closed_at DESC
-        LIMIT 1
+    sector_placeholders = ",".join(["%s"] * len(user_sector_ids))
+
+    admin_check = f"""
+        SELECT 1 FROM cases c
+        WHERE c.id = %s
+        AND (
+            EXISTS (
+                SELECT 1 FROM case_movements cm
+                WHERE cm.case_id = c.id
+                AND cm.type = 'transfer'
+                AND cm.is_active = false
+                AND cm.admin_sector_id IN ({sector_placeholders})
+                AND cm.closed_at = (
+                    SELECT MAX(cm2.closed_at)
+                    FROM case_movements cm2
+                    WHERE cm2.case_id = c.id
+                    AND cm2.type = 'transfer'
+                    AND cm2.is_active = false
+                )
+            )
+            OR
+            (
+                EXISTS (
+                    SELECT 1 FROM case_movements cm
+                    WHERE cm.case_id = c.id
+                    AND cm.type = 'creation'
+                    AND cm.admin_sector_id IN ({sector_placeholders})
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM case_movements cm
+                    WHERE cm.case_id = c.id
+                    AND cm.type = 'transfer'
+                )
+            )
+        )
     """
-    admin_sector_result = execute_query(admin_sector_query, (case_id,), schema_name=schema_name)
+    admin_params = [case_id] + (user_sector_ids * 2)
+    admin_result = execute_query(admin_check, tuple(admin_params), schema_name=schema_name)
 
-    if not admin_sector_result:
-        raise NotFoundError("Expediente sin sector administrador")
-
-    admin_sector_id = str(admin_sector_result[0]['sector_id'])
-
-    # Verificar que usuario es ADMIN (mismo permiso que transfer)
-    if admin_sector_id not in user_sector_ids:
+    if not admin_result:
         raise AuthorizationError("Solo el sector administrador puede subsanar documentos en este expediente")
+
+    # Obtener admin_sector_id para los movimientos (necesario para insert)
+    admin_sector_query = """
+        SELECT COALESCE(
+            (SELECT cm.admin_sector_id FROM case_movements cm
+             WHERE cm.case_id = %s AND cm.type = 'transfer' AND cm.is_active = false
+             ORDER BY cm.closed_at DESC LIMIT 1),
+            (SELECT cm.admin_sector_id FROM case_movements cm
+             WHERE cm.case_id = %s AND cm.type = 'creation' LIMIT 1)
+        ) as admin_sector_id
+    """
+    sector_result = execute_query(admin_sector_query, (case_id, case_id), schema_name=schema_name)
+    admin_sector_id = str(sector_result[0]['admin_sector_id'])
 
     # =================================================================
     # PASO 3: VALIDAR DOCUMENTO ERRÓNEO
@@ -110,6 +142,7 @@ async def subsanar_document_service(
         JOIN official_documents od ON cod.official_document_id = od.id
         WHERE cod.case_id = %s
           AND cod.official_document_id = %s
+          AND od.signed_at IS NOT NULL
     """
     doc_erroneo_result = execute_query(
         doc_erroneo_query,
@@ -135,6 +168,7 @@ async def subsanar_document_service(
         SELECT id, official_number, reference
         FROM official_documents
         WHERE id = %s
+          AND signed_at IS NOT NULL
     """
     doc_justifica_result = execute_query(
         doc_justifica_query,

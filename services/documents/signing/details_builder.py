@@ -75,9 +75,10 @@ async def build_signature_details_response(document_id: str, user_id: str, *, sc
     # 5. Obtener firmantes
     signers_data = get_document_signers_complete_data(document_id, schema_name=schema_name)
 
-    # 5.1 Obtener recipients si es documento tipo NOTA
+    # 5.1 Obtener recipients si es documento tipo NOTA o MEMO
     recipients = None
-    if document_info.get('document_type_acronym') == 'NOTA':
+    doc_type_acronym = document_info.get('document_type_acronym')
+    if doc_type_acronym == 'NOTA':
         # Obtener sector_id del usuario actual
         user_data = get_user_complete_data(user_id, schema_name=schema_name)
         requesting_sector_id = user_data.get('sector_id') if user_data else None
@@ -92,6 +93,17 @@ async def build_signature_details_response(document_id: str, user_id: str, *, sc
             except Exception as e:
                 logger.warning(f"No se pudieron obtener recipients para NOTA {document_id[:8]}: {e}")
                 recipients = None
+    elif doc_type_acronym == 'MEMO':
+        try:
+            from services.memos.recipients import get_visible_memo_recipients
+            recipients = get_visible_memo_recipients(
+                document_id=document_id,
+                requesting_user_id=user_id,
+                schema_name=schema_name
+            )
+        except Exception as e:
+            logger.warning(f"No se pudieron obtener recipients para MEMO {document_id[:8]}: {e}")
+            recipients = None
 
     # 5.2 Obtener expedientes propuestos
     proposed_cases = _fetch_proposed_cases(document_id, schema_name=schema_name)
@@ -391,7 +403,9 @@ async def _build_final_response(
         "creator_seal_name": creator_info.get('seal_name') if creator_info else None,
         "created_at": document_info['last_modified_at'].isoformat() if hasattr(document_info['last_modified_at'], 'isoformat') and document_info['last_modified_at'] else None,
         "resume": document_info.get('resume'),
-        "has_embeddings": has_embeddings
+        "short_resume": document_info.get('short_resume'),
+        "has_embeddings": has_embeddings,
+        "official_number": document_info.get('official_number')
     }
 
     pdf_url = None
@@ -447,7 +461,7 @@ async def _build_final_response(
     if user_message:
         response["message"] = user_message
 
-    # Agregar recipients si existen (para docs NOTA)
+    # Agregar recipients si existen (para docs NOTA o MEMO)
     if recipients:
         response["recipients"] = recipients
 

@@ -39,9 +39,9 @@ class DocumentTypeInfo(BaseModel):
     """
     name: str = Field(..., description="Nombre completo del tipo de documento")
     acronym: str = Field(..., description="Acrónimo o código del tipo de documento")
-    type: Optional[Literal['HTML', 'Importado', 'NOTA']] = Field(
+    type: Optional[Literal['HTML', 'Importado', 'NOTA', 'MEMO']] = Field(
         default='HTML',
-        description="Tipo de fuente del documento: HTML (editor), Importado (PDF externo) o NOTA (con recipients)"
+        description="Tipo de fuente del documento: HTML (editor), Importado (PDF externo), NOTA (con recipients) o MEMO (memo interno)"
     )
     trust: bool = Field(default=True, description="true = gobierno (confiable), false = externo (requiere validacion)")
 

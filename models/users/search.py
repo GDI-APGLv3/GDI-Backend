@@ -15,6 +15,7 @@ class UserSearchDetail(BaseModel):
     full_name: str = Field(..., description="Nombre completo del usuario")
     email: Optional[str] = Field(None, description="Email del usuario (especialmente para usuarios virtuales)")
     department_acronym: Optional[str] = Field(None, description="Acrónimo del departamento (ej: ADGEN, OBPU)")
+    sector_acronym: Optional[str] = Field(None, description="Acrónimo del sector (ej: MESA, RRHH)")
     seal_name: Optional[str] = Field(None, description="Nombre del sello asignado")
     profile_picture_url: Optional[str] = Field(None, description="URL de foto de perfil")
     is_active: bool = Field(True, description="Estado activo del usuario")

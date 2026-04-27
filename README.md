@@ -1,5 +1,3 @@
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-
 # GDI Backend - Sistema de Gestión Documental Institucional
 
 **Version 1.2** (Phase 2-6 Complete - Direct Integrations)
@@ -347,7 +345,7 @@ POST /documents/{doc_id}/start-signing
                 "email": "user@example.com",
                 "name": "Juan Pérez",
                 "document_reference": "MEMO-001",
-                "cta_url": "https://gdilatam.com/"
+                "cta_url": "https://nuevogdi.framer.website/"
               }
               │
               └─→ UPDATE users SET invited_at = NOW()
@@ -356,14 +354,14 @@ POST /documents/{doc_id}/start-signing
 **Características:**
 - ✅ Best-effort: No bloquea proceso de firma si email falla
 - ✅ Plantilla HTML personalizada con branding GDI
-- ✅ CTA link apunta a: https://gdilatam.com/
+- ✅ CTA link apunta a: https://nuevogdi.framer.website/
 - ✅ Tracking de invitaciones en `users.invited_at`
 - ⚠️ Requiere configurar `EMAIL_SERVICE_URL` y `EMAIL_API_KEY`
 
 **Variables de entorno:**
 ```bash
-EMAIL_SERVICE_URL=https://your-email-service.railway.app
-EMAIL_API_KEY=your-email-api-key
+EMAIL_SERVICE_URL=https://<your-email-service-url>
+EMAIL_API_KEY=miapikey
 ```
 
 **Archivo clave:**
@@ -385,7 +383,7 @@ EMAIL_API_KEY=your-email-api-key
 - Mayor control sobre el flujo de datos
 - Manejo granular de errores (ej: FULLPAGE)
 
-Ver la documentacion de Phases 2-6 para detalles completos
+Ver `.claude/PHASES_2_TO_6_DOCUMENTATION.md` para detalles completos
 
 ---
 
@@ -468,8 +466,8 @@ POST /api/v1/cases/{case_id}/transfer
 ### Conexión:
 
 El sistema usa PostgreSQL en Railway (producción) con configuración en `database.py`:
-- Host: `your-db-host:5432`
-- Base de datos: `your-database`
+- Host: `shortline.proxy.rlwy.net:41254`
+- Base de datos: `municipios_test`
 - Pool de conexiones con `psycopg2`
 
 ---
@@ -498,7 +496,7 @@ El backend tiene configurado CORS para permitir peticiones desde el frontend:
 Cuando el backend está en Railway y necesitas acceder desde el frontend en producción, configura la variable de entorno:
 
 ```bash
-FRONTEND_URL=https://tu-frontend.railway.app
+FRONTEND_URL=https://<your-frontend-url>
 ```
 
 Esto agregará automáticamente tu frontend de Railway a los orígenes permitidos.
@@ -509,17 +507,17 @@ Esto agregará automáticamente tu frontend de Railway a los orígenes permitido
 
 ```bash
 # 1. Navegar a la carpeta del proyecto
-cd GDI-Backend
+cd Backend1/Backend
 
 # 2. Crear entorno virtual
-python3 -m venv .venv
+py -3.12 -m venv .venv
 
 # 3. Activar entorno virtual
-source .venv/bin/activate        # Linux/Mac
-# .venv\Scripts\activate         # Windows
+.venv\Scripts\activate  # Windows
+source .venv/bin/activate  # Linux/Mac
 
 # 4. Instalar dependencias
-pip install -r requirements.txt
+.venv/Scripts/pip install -r requirements.txt
 
 # 5. Configurar variables de entorno
 # Copiar .env.example a .env y completar con tus credenciales
@@ -546,7 +544,7 @@ cp .env.example .env
 # Ver .env.example para detalles completos
 
 # 6. Iniciar servidor
-python main.py
+.venv/Scripts/python main.py
 ```
 
 ### Servidor Corriendo:
@@ -708,7 +706,7 @@ Configura estas variables en Railway Dashboard → Variables:
 
 **Base de Datos (Crítico):**
 ```bash
-DB_HOST=your-railway-db-host.railway.app
+DB_HOST=<your-db-host>
 DB_PORT=5432
 DB_USER=postgres
 DB_PASSWORD=your-railway-db-password
@@ -718,11 +716,11 @@ DB_NAME=railway
 **APIs Externas:**
 ```bash
 # PDFComposer (Phase 2, 5, 6)
-PDFCOMPOSER_URL=https://your-pdfcomposer.railway.app
+PDFCOMPOSER_URL=https://<your-pdfcomposer-url>
 PDFCOMPOSER_API_KEY=your-api-key
 
 # Notary API (Phase 3, 4, 5, 6)
-NOTARY_URL=https://your-notary.railway.app
+NOTARY_URL=https://<your-notary-url>
 NOTARY_API_KEY=your-api-key
 ```
 
@@ -738,7 +736,7 @@ CF_R2_SIGN_EXPIRATION=600
 
 **CORS (si frontend en Railway):**
 ```bash
-FRONTEND_URL=https://your-frontend.railway.app
+FRONTEND_URL=https://<your-frontend-url>
 ```
 
 **Opcional:**
@@ -773,7 +771,7 @@ reload = False if is_production else True
 #### 4. Checklist para Deploy
 
 - [ ] Crear proyecto en Railway
-- [ ] Conectar repositorio GitHub (rama `santiago4`)
+- [ ] Conectar repositorio GitHub (rama `dev`)
 - [ ] Configurar todas las variables de entorno
 - [ ] Agregar PostgreSQL database (Railway add-on)
 - [ ] Verificar que el build es exitoso
@@ -811,12 +809,28 @@ Para reportar bugs o solicitar features:
 
 ## Licencia
 
-Este proyecto esta licenciado bajo [AGPL-3.0](LICENSE).
+Este proyecto está licenciado bajo la **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
-## Contribuir
+Ver el archivo [LICENSE](LICENSE) para los términos completos.
 
-Ver [CONTRIBUTING.md](CONTRIBUTING.md) para guia de contribucion.
+> **Nota**: la AGPL-3.0 requiere que cualquier modificación desplegada como servicio
+> de red sea publicada bajo la misma licencia. Si fork-eás este proyecto y lo
+> ofrecés como SaaS, debés publicar tu código.
 
-## Seguridad
+---
 
-Ver [SECURITY.md](SECURITY.md) para reportar vulnerabilidades.
+**Documentación actualizada:** Octubre 2025
+**Versión del sistema:** 1.2 (Phases 2-6 Complete - Direct Integrations)
+**Última actualización README:** 2025-10-23
+
+**Cambios Phases 2-6:**
+- ✅ Phase 2: Integración directa PDFComposer para generación de PDFs (documentos manuales)
+- ✅ Phase 3: Integración directa Notary API para firma digital (numerador)
+- ✅ Phase 4: Integración directa Notary API para firma digital (firmantes comunes)
+- ✅ Phase 5: Generación directa de carátulas CAEX (PDFComposer /create-case/ + Notary)
+- ✅ Phase 6: Generación directa de pases PV (PDFComposer /move/ + Notary)
+- ✅ Almacenamiento directo Cloudflare R2 (S3-compatible)
+- ✅ Manejo automático de error FULLPAGE con pypdf
+- ✅ Eliminada dependencia de Legal Orchestrator (solo usado en preview)
+- ✅ Router unificado en _document_creator_base.py para CAEX y PV
+

@@ -3,6 +3,7 @@ Configuración centralizada de logging con soporte para correlation_id.
 """
 
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -35,7 +36,7 @@ class CorrelationIdFormatter(logging.Formatter):
 
 
 def setup_logging(
-    level: int = logging.INFO,
+    level: int = None,
     format_string: Optional[str] = None
 ) -> None:
     """
@@ -44,9 +45,12 @@ def setup_logging(
     IMPORTANTE: Llamar ANTES de importar módulos que usen logging.
 
     Args:
-        level: Nivel de logging (default: INFO)
+        level: Nivel de logging (default: INFO, configurable via LOG_LEVEL env var)
         format_string: Formato custom (opcional)
     """
+    if level is None:
+        level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+
     if format_string is None:
         format_string = (
             "%(asctime)s - [%(correlation_id)s] - [%(name)s] - "

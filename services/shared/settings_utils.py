@@ -29,7 +29,7 @@ def get_tenant_settings(schema_name: str) -> dict:
         schema_name: Schema del tenant
 
     Returns:
-        dict con logo_url, city, municipality_name (u otros campos de settings)
+        dict con logo_url, isologo_url, city, annual_slogan
     """
     now = datetime.now()
 
@@ -44,7 +44,7 @@ def get_tenant_settings(schema_name: str) -> dict:
 
     try:
         results = execute_query(
-            "SELECT logo_url, isologo_url, city, municipality_name FROM settings LIMIT 1",
+            "SELECT logo_url, isologo_url, city, annual_slogan FROM settings LIMIT 1",
             schema_name=schema_name
         )
 
@@ -54,14 +54,14 @@ def get_tenant_settings(schema_name: str) -> dict:
                 "logo_url": result.get('logo_url'),
                 "isologo_url": result.get('isologo_url'),
                 "city": result.get('city') or DEFAULT_CITY,
-                "municipality_name": result.get('municipality_name') or ""
+                "annual_slogan": result.get('annual_slogan') or ""
             }
         else:
             settings = {
                 "logo_url": None,
                 "isologo_url": None,
                 "city": DEFAULT_CITY,
-                "municipality_name": ""
+                "annual_slogan": ""
             }
 
         # Guardar en caché
@@ -74,7 +74,7 @@ def get_tenant_settings(schema_name: str) -> dict:
             "logo_url": None,
             "isologo_url": None,
             "city": DEFAULT_CITY,
-            "municipality_name": ""
+            "annual_slogan": ""
         }
 
 

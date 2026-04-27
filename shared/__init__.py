@@ -39,8 +39,7 @@ from .validation import (
     validate_document_type_acronym,
     validate_email,
     validate_pagination_params,
-    validate_document_signers,
-    sanitize_html_basic
+    validate_document_signers
 )
 
 # Importaciones principales de utils
@@ -108,7 +107,6 @@ __all__ = [
     "validate_email",
     "validate_pagination_params",
     "validate_document_signers",
-    "sanitize_html_basic",
     
     # Utils
     "generate_uuid",

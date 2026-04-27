@@ -301,7 +301,6 @@ def _build_transfer_payload(
         "movement_reason": movement_reason,
         "movement_type": movement_type,  # "Transferencia" o "Asignación"
         "municipality_logo_url": transfer_data.get('municipality_logo_url', DEFAULT_LOGO_URL),
-        "official_document_number": official_number,
         "receiving_area": transfer_data['receiving_area'],
         "requesting_area": transfer_data['requesting_area'],
         "signer_department": transfer_data['signer_department'],
@@ -310,9 +309,8 @@ def _build_transfer_payload(
         "signer_seal": transfer_data['signer_seal']
     }
 
-    logger.info("Payload para Legal Orchestrator:")
+    logger.info("Payload para PDFComposer/Notary:")
     logger.info(f"  - Case: {payload['document_reference']}")
-    logger.info(f"  - Official number: {payload['official_document_number']}")
     logger.info(f"  - Movement type: {payload['movement_type']}")
     logger.info(f"  - From: {payload['requesting_area']}")
     logger.info(f"  - To: {payload['receiving_area']}")

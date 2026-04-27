@@ -5,6 +5,9 @@ Define la jerarquía de excepciones de la aplicación.
 
 from typing import Any, Dict, Optional
 from fastapi import HTTPException, status
+import logging
+
+_logger = logging.getLogger(__name__)
 
 class GDIBaseException(Exception):
     """
@@ -200,11 +203,12 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
     """
     # Si no es una excepción personalizada, manejarla como error genérico
     if not isinstance(exc, GDIBaseException):
+        _logger.error(f"Unhandled exception: {type(exc).__name__}: {exc}")
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
-                "message": str(exc),
-                "type": type(exc).__name__
+                "message": "Error interno del servidor",
+                "type": "InternalServerError"
             }
         )
     
@@ -335,7 +339,7 @@ def handle_exceptions(func):
             raise exception_to_http_exception(exc)
         except Exception as exc:
             # Log del error no manejado (aquí podrías agregar logging)
-            print(f"Error no manejado en {func.__name__}: {exc}")
+            _logger.error(f"Error no manejado en {func.__name__}: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={

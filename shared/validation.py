@@ -6,6 +6,7 @@ Centraliza las validaciones comunes para mantener consistencia.
 import re
 from uuid import UUID
 from typing import Optional, List, Dict, Any
+import nh3
 from database import check_user_exists, check_document_exists
 
 def validate_uuid(uuid_string: str) -> bool:
@@ -242,27 +243,45 @@ def validate_document_signers(signers: List[Dict[str, Any]], *, schema_name: str
     
     return None
 
-def sanitize_html_basic(html_content: str) -> str:
+def sanitize_html(html_content: str) -> str:
     """
-    Sanitización básica de contenido HTML.
-    Elimina scripts y contenido potencialmente peligroso.
-    
+    Sanitiza contenido HTML usando nh3 con allowlist de tags seguros.
+    Previene XSS stored eliminando tags/atributos no permitidos.
+
     Args:
         html_content: Contenido HTML a sanitizar
-        
+
     Returns:
         Contenido HTML sanitizado
     """
     if not html_content:
         return ""
-    
-    # Eliminar scripts
-    html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.IGNORECASE | re.DOTALL)
-    
-    # Eliminar eventos de JavaScript
-    html_content = re.sub(r'\s*on\w+\s*=\s*["\'][^"\']*["\']', '', html_content, flags=re.IGNORECASE)
-    
-    # Eliminar javascript: links
-    html_content = re.sub(r'javascript:', '', html_content, flags=re.IGNORECASE)
-    
-    return html_content.strip()
+
+    allowed_tags = {
+        "p", "br", "hr", "div", "span", "blockquote", "pre",
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "strong", "b", "em", "i", "u", "s", "sub", "sup", "mark",
+        "ul", "ol", "li",
+        "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col",
+        "img", "a",
+        "figure", "figcaption", "details", "summary",
+    }
+
+    allowed_attributes = {
+        "*": {"class", "id"},
+        "a": {"href", "title", "target"},  # rel lo maneja link_rel automaticamente
+        "img": {"src", "alt", "title", "width", "height"},
+        "td": {"colspan", "rowspan"},
+        "th": {"colspan", "rowspan"},
+        "col": {"span"},
+        "colgroup": {"span"},
+        "table": {"border", "cellpadding", "cellspacing"},
+    }
+
+    return nh3.clean(
+        html_content,
+        tags=allowed_tags,
+        attributes=allowed_attributes,
+        url_schemes={"http", "https", "mailto"},
+        link_rel="noopener noreferrer",
+    )

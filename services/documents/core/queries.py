@@ -44,6 +44,7 @@ def autocomplete_official_documents_query() -> str:
         FROM official_documents o
         JOIN document_types dt ON o.document_type_id = dt.id
         WHERE o.official_number ILIKE %s
+          AND o.signed_at IS NOT NULL
           {excluded_clause}
         ORDER BY o.official_number
         LIMIT %s OFFSET %s
@@ -118,6 +119,7 @@ def get_document_details_for_editing_query() -> str:
             d.created_by as creator_id,
             d.last_modified_at,
             d.resume,
+            d.short_resume,
             dt.name as document_type_name,
             dt.acronym as document_type_acronym,
             dt.type as document_type_source,
@@ -221,6 +223,7 @@ def get_official_document_info_query() -> str:
         FROM official_documents od
         INNER JOIN document_draft dd ON od.id = dd.id
         WHERE od.id = %s
+          AND od.signed_at IS NOT NULL
     """
 
 def get_all_display_states_query() -> str:
@@ -347,7 +350,7 @@ def get_document_info_for_rejection_query() -> str:
 
 def check_document_is_official_query() -> str:
     """Query para verificar si un documento es oficial."""
-    return "SELECT COUNT(*) as count FROM official_documents WHERE id = %s"
+    return "SELECT COUNT(*) as count FROM official_documents WHERE id = %s AND signed_at IS NOT NULL"
 
 def get_document_generate_id_query() -> str:
     """Query para obtener document_generate_id (usa el id del documento)."""
@@ -459,10 +462,12 @@ def get_document_basic_info_for_signature_query() -> str:
             d.sent_by,
             dt.name as document_type_name,
             dt.acronym as document_type_acronym,
-            COALESCE(od.resume, d.resume) as resume
+            COALESCE(od.resume, d.resume) as resume,
+            COALESCE(od.short_resume, d.short_resume) as short_resume,
+            od.official_number
         FROM document_draft d
         JOIN document_types dt ON d.document_type_id = dt.id
-        LEFT JOIN official_documents od ON od.id = d.id
+        LEFT JOIN official_documents od ON od.id = d.id AND od.signed_at IS NOT NULL
         WHERE d.id = %s
     """
 
@@ -473,6 +478,7 @@ def check_document_has_official_number_query() -> str:
             SELECT 1
             FROM official_documents
             WHERE id = %s
+              AND signed_at IS NOT NULL
         ) as has_official_number
     """
 
@@ -675,6 +681,7 @@ def search_official_document_by_number_query() -> str:
         -- Join con users para obtener numerador
         LEFT JOIN users numerator ON od.numerator_id = numerator.id
         WHERE od.official_number = %s
+          AND od.signed_at IS NOT NULL
         LIMIT 1
     """
 

@@ -27,14 +27,16 @@ def get_user_tenants(email: str) -> List[Dict]:
     Returns:
         Lista de diccionarios con schema_name, display_name, is_default
     """
-    cached_entry = _user_tenant_cache.get(email)
-    if cached_entry:
-        cached_at = cached_entry.get("cached_at")
-        if cached_at and datetime.now() - cached_at < timedelta(minutes=CACHE_TTL_MINUTES):
-            logger.debug(f"Cache HIT para {email} (edad: {datetime.now() - cached_at})")
-            return cached_entry["tenants"]
-        else:
-            logger.debug(f"Cache EXPIRED para {email}")
+    # CACHE DESACTIVADO TEMPORALMENTE PARA DEBUGGING
+    # TODO: Reactivar cache cuando el flujo esté estable
+    # cached_entry = _user_tenant_cache.get(email)
+    # if cached_entry:
+    #     cached_at = cached_entry.get("cached_at")
+    #     if cached_at and datetime.now() - cached_at < timedelta(minutes=CACHE_TTL_MINUTES):
+    #         logger.debug(f"Cache HIT para {email} (edad: {datetime.now() - cached_at})")
+    #         return cached_entry["tenants"]
+    #     else:
+    #         logger.debug(f"Cache EXPIRED para {email}")
 
     # Cache miss o expirado - consultar BD
     logger.info(f"Consultando tenants para {email}")

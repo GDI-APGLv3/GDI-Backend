@@ -1,8 +1,9 @@
 # Variables de entorno
 .env
-.env.*
-!.env.example
+.env.local
+.env.*.local
 .env_backup
+.env.railway
 aaa.env
 
 # Entornos virtuales
@@ -78,12 +79,5 @@ temp_yanina_service.txt
 # Archivos de listados temporales
 *_files.txt
 *_files_raw.txt
-# Claude / agent config
-.claude/
-
-# Documentacion interna (no open source)
-Documentacion/
-
-# Archivos internos de agentes / guias
+.claude/settings.local.json
 AGENTS.md
-GUIA_REFACTORIZACION.md

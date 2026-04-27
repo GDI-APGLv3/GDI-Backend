@@ -133,12 +133,14 @@ class DashboardService:
                     "reference": row.get('case_reference', ''),
                     "case_type": row.get('case_type', ''),
                     "case_type_name": row.get('case_type_name', ''),
-                    "ai_summary": row.get('case_ai_summary')
+                    "ai_summary": row.get('case_ai_summary'),
+                    "short_ai_summary": row.get('case_short_ai_summary')
                 },
                 "user": {
                     "name": user_name,
                     "photo_url": row.get('user_photo'),
-                    "sector": row.get('user_sector', '')
+                    "sector": row.get('user_sector', ''),
+                    "sector_color": row.get('user_sector_color')
                 },
                 "supporting_document": None
             }
@@ -148,7 +150,8 @@ class DashboardService:
                 item["supporting_document"] = {
                     "official_number": row['doc_number'],
                     "reference": row.get('doc_reference', ''),
-                    "ai_summary": row.get('doc_ai_summary')
+                    "ai_summary": row.get('doc_ai_summary'),
+                    "short_resume": row.get('doc_short_resume')
                 }
 
             items.append(item)

@@ -34,6 +34,7 @@ def get_official_document_content(document_id: str, schema_name: str) -> Dict[st
         FROM official_documents od
         LEFT JOIN document_types dt ON od.document_type_id = dt.id
         WHERE od.id = %s
+          AND od.signed_at IS NOT NULL
     """
 
     result = execute_query(query, (document_id,), fetch_one=True, schema_name=schema_name)

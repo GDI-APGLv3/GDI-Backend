@@ -1,0 +1,47 @@
+# Plantilla Fly.io para el Gateway MCP/OAuth de GDI.
+# Renombrar valores marcados con <...> para tu propio deploy.
+app = "<YOUR_GATEWAY_APP_NAME>"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile.gateway"
+
+[env]
+  TZ = "America/Argentina/Buenos_Aires"
+  PORT = "8080"
+  PYTHONUNBUFFERED = "1"
+  DB_PORT = "5432"
+  DB_USER = "postgres"
+  DB_NAME = "<YOUR_DB_NAME>"
+  AUTH0_DOMAIN = "<YOUR_TENANT>.auth0.com"
+  AUTH0_AUDIENCE = "https://<YOUR_TENANT>.auth0.com/api/v2/"
+  MCP_RESOURCE_URI = "https://<YOUR_GATEWAY_DOMAIN>"
+  TESTING_MODE = "false"
+  CF_R2_SIGN_EXPIRATION = "600"
+  PDFCOMPOSER_URL = "http://<YOUR_PDFCOMPOSER_APP>.internal:8080"
+  NOTARY_URL = "http://<YOUR_NOTARY_APP>.internal:8080"
+  AGENT_URL = "http://<YOUR_AGENT_APP>.internal:8080"
+  FRONTEND_URL = "https://<YOUR_FRONTEND_DOMAIN>"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[http_service.checks]]
+  grace_period = "30s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

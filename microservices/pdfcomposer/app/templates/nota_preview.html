@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>PREVISUALIZACIÓN NOTA - GDILatam.com</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% include 'fonts.html' %}
+  <style>
+    /* Design System GDI - Tokens alineados con frontend shadcn/ui Neutral */
+    :root {
+      --foreground: rgba(10, 10, 10, 1.00);
+      --foreground-muted: rgba(115, 115, 115, 1.00);
+      --card: rgba(255, 255, 255, 1.00);
+      --card-foreground: rgba(10, 10, 10, 1.00);
+      --background-muted: rgba(245, 245, 245, 1.00);
+      --border: rgba(229, 229, 229, 1.00);
+      --border-strong: rgba(163, 163, 163, 1.00);
+      --divider: rgba(212, 212, 212, 1.00);
+      --primary: rgba(23, 23, 23, 1.00);
+      --primary-foreground: rgba(250, 250, 250, 1.00);
+      --radius-sm: 4px;
+      --radius-md: 6px;
+      --radius-lg: 8px;
+      --radius-card: 10px;
+      --elevation-sm: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.06);
+    }
+
+    .corner-img {
+      position: absolute;
+      top: 25.5pt;
+      right: 0;
+      width: 50%;
+      height: 85px;
+      object-fit: cover;
+      border-radius: 0 0px 0 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+    .header {
+      position: relative;
+      z-index: 1;
+    }
+    @page { size: A4; margin: 7mm 10mm 10mm 10mm; }
+    body {
+      margin: 0;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      color: var(--foreground);
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      line-height: 1.35;
+      font-size: 11pt;
+    }
+    .page { }
+    /* Cabecera */
+    .doc-type {
+      font-size: 13pt;
+      font-weight: 700;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      color: var(--foreground);
+      letter-spacing: 0.02em;
+      margin: 0;
+    }
+    .citydate, .docnum {
+      font-size: 11pt;
+      font-weight: 500;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      margin: 0;
+    }
+    .docnum {
+      margin-bottom: 24pt;
+    }
+    .ref {
+      font-size: 11pt;
+      font-weight: 400;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      margin-top: 12pt;
+      margin-bottom: 0.3em;
+    }
+    .frase-anual {
+      text-align: center;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      font-weight: 300;
+      font-size: 8pt;
+      color: var(--foreground-muted);
+      margin: 0;
+      padding: 0;
+      height: 12pt;
+      line-height: 12pt;
+      overflow: hidden;
+    }
+    .divider {
+      border-top: 1.5px solid var(--divider);
+      margin: 0;
+      margin-bottom: 0.3em;
+    }
+    /* Contenido */
+    .content {
+      margin-top: 0.3em;
+      text-align: justify;
+      font-size: 11pt;
+      font-weight: 400;
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+    }
+
+    /* Caja de destinatarios - refinada */
+    .destinatarios-box {
+      background-color: var(--background-muted);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 12px 16px;
+      margin-bottom: 16px;
+    }
+    .destinatario-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .destinatario-row:last-child {
+      margin-bottom: 0;
+    }
+    .destinatario-row .label {
+      font-weight: 600;
+      font-size: 10pt;
+      color: var(--foreground-muted);
+      min-width: 40px;
+    }
+    .destinatario-row .value {
+      font-weight: 500;
+      font-size: 10pt;
+      color: var(--foreground);
+    }
+
+    /* Contenido HTML libre */
+    .text-content {
+      margin-top: 16px;
+    }
+
+    /* Marca de agua */
+    .watermark {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(-45deg);
+      font-size: 72pt;
+      font-weight: 700;
+      color: rgba(200, 200, 200, 0.3);
+      font-family: 'Montserrat', Tahoma, Arial, sans-serif;
+      z-index: 999;
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <!-- Marca de agua -->
+  <div class="watermark">PREVISUALIZACIÓN</div>
+
+  <div class="page" style="position: relative;">
+    {% if logo_data %}
+    <img class="corner-img" src="{{logo_data}}" alt="Imagen esquina superior derecha">
+    {% endif %}
+    <section class="header">
+      <p class="frase-anual">{% if frase_anual %}{{ frase_anual }}{% else %}&nbsp;{% endif %}</p>
+      <br>
+      <p class="doc-type">{{name_acrony_type}} - {{document_type}}</p>
+      <p class="citydate" style="color: rgb(0, 0, 0);"> [ciudad y fecha a asignar]</p>
+      <p class="docnum" style="color: rgb(0, 0, 0);"> [numero a asignar]</p>
+      <br>
+      <p class="ref">{{reference}}</p>
+      <div class="divider"></div>
+    </section>
+
+    <main class="content">
+      <!-- Caja de destinatarios (solo si hay PARA o CC) -->
+      {% if para or cc %}
+      <div class="destinatarios-box">
+        {% if para %}
+        <div class="destinatario-row">
+          <span class="label">PARA:</span>
+          <span class="value">{{para}}</span>
+        </div>
+        {% endif %}
+        {% if cc %}
+        <div class="destinatario-row">
+          <span class="label">CC:</span>
+          <span class="value">{{cc}}</span>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Contenido HTML libre -->
+      <div class="text-content">
+{{text_html | safe}}
+      </div>
+
+      <div id="end-text" style="color: white;">end-text</div>
+
+    </main>
+  </div>
+</body>
+</html>

@@ -54,7 +54,7 @@ Múltiples llamadas con mismo document_id no duplican:
 ```bash
 # GDI-AgenteLANG URL
 AGENTE_URL=http://localhost:8004  # Local
-# AGENTE_URL=http://your-agente.railway.internal:8004  # Production
+# AGENTE_URL=http://gdi-agente.railway.internal:8004  # Production
 
 # API Key interna (compartida con PDFComposer, Notary)
 INTERNAL_API_KEY=your-internal-api-key

@@ -35,6 +35,9 @@ async def get_document_signature_details(
 ) -> DocumentSignatureDetailsResponse:
     """Obtiene detalles completos de un documento en proceso de firma."""
     try:
+        from services.documents.permissions import can_user_view_document
+        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+            raise AuthorizationError("No tiene permisos para ver este documento")
         logger.info(f"Obteniendo detalles de firma - Usuario: {request.state.tenant_user_id[:8]}")
         result = await build_signature_details_response(document_id, request.state.tenant_user_id, schema_name=schema_name)
         logger.info("Detalles de firma obtenidos exitosamente")

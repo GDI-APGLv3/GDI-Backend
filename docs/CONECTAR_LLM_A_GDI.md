@@ -13,7 +13,7 @@ Puedes conectar tu asistente IA (Claude, ChatGPT, Gemini) para consultar tus exp
 |-------|-------|
 | URL MCP | `https://mcp.gdilatam.com/mcp` |
 | OpenAPI | `https://mcp.gdilatam.com/.well-known/openapi.json` |
-| Auth Server | `https://gdilatam.us.auth0.com` |
+| Auth Server | `https://<your-tenant>.auth0.com` |
 | Protocolo | OAuth 2.0 |
 
 ---

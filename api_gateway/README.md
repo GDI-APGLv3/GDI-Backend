@@ -24,13 +24,6 @@ GDI-MCP Server (Starlette) - Puerto 8005
     └── /system/*
 ```
 
-## Modos de Ejecución
-
-| Archivo | Transport | Uso |
-|---------|-----------|-----|
-| `server.py` | stdio | Claude Desktop, desarrollo local |
-| `http_server.py` | HTTP | Railway, REST API, deployments remotos |
-
 ---
 
 ## REST API v1
@@ -265,7 +258,6 @@ python api_gateway/http_server.py
 | Archivo | Propósito |
 |---------|-----------|
 | `http_server.py` | Server HTTP (MCP + REST API) |
-| `server.py` | Server stdio (MCP puro) |
 | `auth.py` | Validación API Key MCP (legacy) |
 | `auth_mcp.py` | Validación JWT Auth0 para MCP |
 | `auth_rest.py` | Validación API Key REST (tabla) |

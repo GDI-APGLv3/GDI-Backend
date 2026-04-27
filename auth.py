@@ -4,10 +4,15 @@ Este módulo contiene la lógica para validar tokens JWT y obtener información 
 """
 
 import os
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
 from fastapi import HTTPException, Depends, status, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt as jose_jwt
+import jwt as pyjwt
+from jwt.algorithms import RSAAlgorithm
+from jwt.exceptions import PyJWTError, ExpiredSignatureError, InvalidAudienceError, InvalidIssuerError
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from database import AUTH0_DOMAIN, AUTH0_AUDIENCE, AUTH0_ALGORITHMS, TESTING_MODE
@@ -64,7 +69,7 @@ def get_rsa_key(token: str) -> Optional[Dict[str, Any]]:
     """
     try:
         # Decodificar el header del JWT sin verificar
-        unverified_header = jose_jwt.get_unverified_header(token)
+        unverified_header = pyjwt.get_unverified_header(token)
         
         # Obtener las claves JWKS
         jwks = get_jwks()
@@ -72,17 +77,18 @@ def get_rsa_key(token: str) -> Optional[Dict[str, Any]]:
         # Buscar la clave correspondiente al kid del token
         for key in jwks.get("keys", []):
             if key.get("kid") == unverified_header.get("kid"):
-                return {
+                jwk_dict = {
                     "kty": key.get("kty"),
                     "kid": key.get("kid"),
                     "use": key.get("use"),
                     "n": key.get("n"),
                     "e": key.get("e")
                 }
+                return RSAAlgorithm.from_jwk(jwk_dict)
         
         return None
         
-    except JWTError:
+    except PyJWTError:
         return None
 
 def verify_token(token: str) -> Dict[str, Any]:
@@ -110,7 +116,7 @@ def verify_token(token: str) -> Dict[str, Any]:
             )
         
         # Verificar y decodificar el token
-        payload = jose_jwt.decode(
+        payload = pyjwt.decode(
             token,
             rsa_key,
             algorithms=AUTH0_ALGORITHMS,
@@ -120,19 +126,19 @@ def verify_token(token: str) -> Dict[str, Any]:
         
         return payload
         
-    except jose_jwt.ExpiredSignatureError:
+    except ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expirado",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except jose_jwt.JWTClaimsError:
+    except (InvalidAudienceError, InvalidIssuerError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Claims del token incorrectos. Verifica audience e issuer.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except JWTError:
+    except PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No se pudo validar el token",
@@ -345,23 +351,24 @@ def get_current_user(
         permissions=user_permissions
     )
 
-def get_optional_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[AuthenticatedUser]:
+def get_optional_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+) -> Optional[AuthenticatedUser]:
     """
     Dependency para obtener el usuario autenticado actual de forma opcional.
     No falla si no hay token, retorna None.
-
-    Args:
-        credentials: Credenciales de autorización HTTP Bearer (opcional)
-
-    Returns:
-        Usuario autenticado o None si no hay token válido
     """
-    if not credentials:
+    if not credentials and not x_user_id:
         return None
 
     try:
-        return get_current_user(credentials)
+        return get_current_user(request, credentials, x_user_id)
     except HTTPException:
+        return None
+    except Exception as e:
+        logger.warning(f"Unexpected error in get_optional_current_user: {e}")
         return None
 
 def decode_jwt_from_request(request) -> Dict[str, Any]:

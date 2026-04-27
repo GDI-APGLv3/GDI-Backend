@@ -47,7 +47,8 @@ def transfer_case(
     assigned_user_id: Optional[str] = None,
     supporting_document_id: Optional[str] = None,
     *,
-    schema_name: str
+    schema_name: str,
+    auth_source: str = "jwt"
 ) -> Dict[str, Any]:
     """
     Transferir expediente a otro sector o asignar tarea.
@@ -167,16 +168,17 @@ def transfer_case(
             assigned_user_id=assigned_user_id,
             reason=reason.strip(),
             supporting_document_id=supporting_document_id,
-            schema_name=schema_name
+            schema_name=schema_name,
+            auth_source=auth_source
         )
 
         # 8. Si es transferencia de propiedad, cerrar movimiento y actualizar expediente
         if transfer_ownership:
-            execute_update(close_movement_query(), (TRANSFER_CLOSING_REASON, movement_id), schema_name=schema_name)
+            execute_update(close_movement_query(), (TRANSFER_CLOSING_REASON, user_id, movement_id), schema_name=schema_name, user_id=user_id, auth_source=auth_source)
             execute_update(
                 update_case_ownership_query(),
                 (target_sector_id, case_data['target_department_id'], case_id),
-                schema_name=schema_name
+                schema_name=schema_name, user_id=user_id, auth_source=auth_source
             )
             logger.info(f"Transfer completed: movement closed and ownership updated")
 
@@ -207,7 +209,8 @@ def close_assignment(
     reason: str,
     user_id: str,
     *,
-    schema_name: str
+    schema_name: str,
+    auth_source: str = "jwt"
 ) -> Dict[str, Any]:
     """
     Cerrar asignación de expediente.
@@ -283,7 +286,7 @@ def close_assignment(
             raise AuthorizationError(CLOSE_ASSIGNMENT_PERMISSION_DENIED)
 
         # 7. Cerrar el movimiento
-        execute_update(close_movement_query(), (reason.strip(), user_id, movement_id), schema_name=schema_name)
+        execute_update(close_movement_query(), (reason.strip(), user_id, movement_id), schema_name=schema_name, user_id=user_id, auth_source=auth_source)
 
         logger.info(f"Assignment closed successfully: movement_id={movement_id}")
 
@@ -314,7 +317,7 @@ def close_assignment(
                 closer_sector_id, admin_sector_id,
                 assigned_sector_id, reason.strip(),
                 reason.strip()
-            ), schema_name=schema_name)
+            ), schema_name=schema_name, user_id=user_id, auth_source=auth_source)
             logger.info(f"Assignment close history recorded for case {case_id}")
         except Exception as hist_error:
             logger.warning(f"Error recording close history for case {case_id}: {hist_error}")

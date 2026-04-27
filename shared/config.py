@@ -5,6 +5,9 @@ Este módulo contiene todas las configuraciones y constantes del sistema
 organizadas por dominios para facilitar el mantenimiento y la escalabilidad.
 """
 
+import os
+
+
 class PaginationConfig:
     """Configuraciones relacionadas con paginación de endpoints."""
     
@@ -68,33 +71,3 @@ class ValidationConfig:
     
     MAX_SEARCH_TERM_LENGTH = 100
     """Longitud máxima de términos de búsqueda"""
-
-
-class ExternalAPIConfig:
-    """Configuraciones para APIs externas."""
-    
-    # Legal Orchestrator API
-    LEGAL_ORCHESTRATOR_BASE_URL = "http://localhost:8006"
-    """URL base de la API Legal Orchestrator"""
-    
-    LEGAL_ORCHESTRATOR_TIMEOUT = 60
-    """Timeout para requests a Legal Orchestrator en segundos"""
-    
-    # Variables de entorno requeridas
-    REQUIRED_ENV_VARS = [
-        "LEGAL_ORCHESTRATOR_API_KEY"  # X-API-Key para autenticación
-    ]
-    """Variables de entorno requeridas para APIs externas"""
-
-
-def get_external_api_config():
-    """
-    Retorna una instancia de configuración para APIs externas.
-    
-    Returns:
-        ExternalAPIConfig: Configuración con base_url y timeout
-    """
-    config = ExternalAPIConfig()
-    config.base_url = ExternalAPIConfig.LEGAL_ORCHESTRATOR_BASE_URL
-    config.timeout = ExternalAPIConfig.LEGAL_ORCHESTRATOR_TIMEOUT
-    return config

@@ -14,7 +14,7 @@ Uso:
     from services.documents.lifecycle.creation import create_document
     from services.documents.lifecycle.rejection import reject_document
     from services.documents.signing.signing import sign_document
-    from services.documents.signing.numerator import numerate_document
+    from services.documents.signing.numerator import sign_document_as_numerator
     from services.documents.catalog.states import get_all_display_states
     from services.documents.catalog.types import get_all_document_types
     from services.documents.importing import create_imported_document
@@ -48,8 +48,6 @@ from .signing import (
     start_document_signing_process,
     get_document_signature_details,
     sign_document,
-    numerate_document,
-    numerate_and_reserve_document,
     sign_document_as_numerator,
     get_numerator_documents,
     super_sign_document,
@@ -107,8 +105,6 @@ __all__ = [
     "generate_document_preview",
 
     # Numerator
-    "numerate_document",
-    "numerate_and_reserve_document",
     "sign_document_as_numerator",
     "get_numerator_documents",
     

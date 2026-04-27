@@ -240,7 +240,8 @@ def search_users_by_name_query() -> str:
             u.profile_picture_url,
             u.estado as is_active,
             cs.name as seal_name,
-            d.acronym as department_acronym
+            d.acronym as department_acronym,
+            s.acronym as sector_acronym
         FROM users u
         LEFT JOIN user_seals us ON u.id = us.user_id
         LEFT JOIN city_seals cs ON us.city_seal_id = cs.id

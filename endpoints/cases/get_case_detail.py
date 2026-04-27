@@ -81,10 +81,10 @@ async def get_case_detail(
         db_user_id = get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
         # Obtener detalle del expediente
-        case_detail = CaseService.get_case_detail(case_id, db_user_id, skip_permission_check=True, schema_name=schema_name)
+        case_detail = CaseService.get_case_detail(case_id, db_user_id, schema_name=schema_name)
 
         if not case_detail:
-            logger.warning(f"Case not found: {case_id[:8]}")
+            logger.warning(f"Case not found or access denied: {case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
         
         logger.info(f"Case detail retrieved successfully - {case_detail['case_number']}")
@@ -161,10 +161,10 @@ async def get_case_movements(
 
         logger.info(f"User {db_user_id} requesting movements for case {case_id}")
 
-        # Verificar permisos
+        # Verificar permisos (404 para no revelar existencia del expediente)
         if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
-            raise PermissionError(MOVEMENTS_ACCESS_DENIED)
+            raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener movimientos
         movements = CaseService.get_case_movements(case_id, schema_name=schema_name)
@@ -194,6 +194,9 @@ class OfficialDocumentItem(BaseModel):
     linked_date: Optional[str] = Field(None, example="2024-01-15T10:30:00")
     is_active: bool = Field(..., example=True)
     pdf_url: Optional[str] = Field(None, example="https://r2.example.com/OF-2024-001.pdf")
+    short_resume: Optional[str] = Field(None, example="Resumen del documento")
+    linked_by: Optional[str] = Field(None, example="Juan Pérez")
+    linked_sector: Optional[str] = Field(None, example="GOB#SGOB")
 
 class ProposedDocumentItem(BaseModel):
     id: str = Field(..., example="123e4567-e89b-12d3-a456-426614174002")
@@ -206,6 +209,7 @@ class ProposedDocumentItem(BaseModel):
     can_link: bool = Field(False, example=True, description="true si el documento está firmado (oficial)")
     proposed_date: Optional[str] = Field(None, example="2024-01-15T10:30:00")
     proposed_by: Optional[str] = Field(None, example="Juan Pérez")
+    short_resume: Optional[str] = Field(None, example="Resumen del documento propuesto")
 
 class DocumentsData(BaseModel):
     official: List[OfficialDocumentItem]
@@ -248,10 +252,10 @@ async def get_case_documents(
 
         logger.info(f"User {db_user_id} requesting documents for case {case_id}")
 
-        # Verificar permisos
+        # Verificar permisos (404 para no revelar existencia del expediente)
         if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
-            raise PermissionError(DOCUMENTS_ACCESS_DENIED)
+            raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener documentos (incluye URLs de PDFs)
         documents = CaseService.get_case_documents(case_id, schema_name=schema_name)
@@ -325,10 +329,10 @@ async def get_user_case_permissions(
 
         logger.info(f"User {db_user_id} requesting permissions for case {case_id}")
 
-        # Verificar si puede ver el expediente
+        # Verificar permisos (404 para no revelar existencia del expediente)
         if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
-            raise PermissionError(PERMISSIONS_ACCESS_DENIED)
+            raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener permisos calculados
         permissions = CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
@@ -365,6 +369,7 @@ class CaseHistoryData(BaseModel):
     case_number: str = Field(..., example="EXP-2024-001-SMG")
     ai_summary: Optional[str] = Field(None, description="Resumen IA del expediente")
     ai_summary_updated_at: Optional[str] = Field(None, description="Timestamp de actualización del resumen")
+    short_ai_summary: Optional[str] = Field(None, description="Resumen corto del expediente generado por IA (1-2 oraciones)")
     movements: List[HistoryMovementItem]
 
 class CaseHistoryResponse(BaseModel):
@@ -398,6 +403,11 @@ async def get_case_history(
         db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting history for case {case_id}")
+
+        # Verificar permisos (404 para no revelar existencia del expediente)
+        if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
+            logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
+            raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener historial del expediente
         history = CaseService.get_case_history(case_id, schema_name=schema_name)
