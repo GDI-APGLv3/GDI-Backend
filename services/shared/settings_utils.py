@@ -21,7 +21,7 @@ _settings_cache: Dict[str, Tuple[dict, datetime]] = {}  # schema -> (settings, t
 CACHE_TTL_SECONDS = 300  # 5 minutos
 
 
-def get_tenant_settings(schema_name: str) -> dict:
+async def get_tenant_settings(schema_name: str) -> dict:
     """
     Obtener settings del tenant con caché de 5 minutos.
 
@@ -33,38 +33,34 @@ def get_tenant_settings(schema_name: str) -> dict:
     """
     now = datetime.now()
 
-    # Verificar caché
     if schema_name in _settings_cache:
         settings, cached_at = _settings_cache[schema_name]
         if now - cached_at < timedelta(seconds=CACHE_TTL_SECONDS):
             return settings
 
-    # Query a BD (import local para evitar circular imports)
-    from database import execute_query
+    from database import fetch_one
 
     try:
-        results = execute_query(
+        result = await fetch_one(
             "SELECT logo_url, isologo_url, city, annual_slogan FROM settings LIMIT 1",
-            schema_name=schema_name
+            schema_name=schema_name,
         )
 
-        if results and len(results) > 0:
-            result = results[0]
+        if result:
             settings = {
-                "logo_url": result.get('logo_url'),
-                "isologo_url": result.get('isologo_url'),
-                "city": result.get('city') or DEFAULT_CITY,
-                "annual_slogan": result.get('annual_slogan') or ""
+                "logo_url": result["logo_url"],
+                "isologo_url": result["isologo_url"],
+                "city": result["city"] or DEFAULT_CITY,
+                "annual_slogan": result["annual_slogan"] or "",
             }
         else:
             settings = {
                 "logo_url": None,
                 "isologo_url": None,
                 "city": DEFAULT_CITY,
-                "annual_slogan": ""
+                "annual_slogan": "",
             }
 
-        # Guardar en caché
         _settings_cache[schema_name] = (settings, now)
         return settings
 
@@ -74,11 +70,11 @@ def get_tenant_settings(schema_name: str) -> dict:
             "logo_url": None,
             "isologo_url": None,
             "city": DEFAULT_CITY,
-            "annual_slogan": ""
+            "annual_slogan": "",
         }
 
 
-def get_logo_url(*, schema_name: str) -> str:
+async def get_logo_url(*, schema_name: str) -> str:
     """
     Obtener logo_url del tenant con fallback a DEFAULT_LOGO_URL.
 
@@ -88,7 +84,7 @@ def get_logo_url(*, schema_name: str) -> str:
     Returns:
         str: URL del logo (BD primero, R2 fallback)
     """
-    settings = get_tenant_settings(schema_name)
+    settings = await get_tenant_settings(schema_name)
     return settings.get("logo_url") or DEFAULT_LOGO_URL
 
 
@@ -112,7 +108,7 @@ def invalidate_settings_cache(*, schema_name: Optional[str] = None):
 # FUNCIÓN LEGACY (mantener compatibilidad)
 # ============================================================================
 
-def get_city_from_settings(cursor=None, *, schema_name: Optional[str] = None) -> str:
+async def get_city_from_settings(conn=None, *, schema_name: Optional[str] = None) -> str:
     """
     Obtiene el campo city desde la tabla settings del tenant.
 
@@ -131,21 +127,15 @@ def get_city_from_settings(cursor=None, *, schema_name: Optional[str] = None) ->
         >>> city = get_city_from_settings(schema_name="100_test")
     """
     try:
-        if cursor:
-            # Usar cursor existente (dentro de transacción) - NO usar caché
-            cursor.execute("SELECT city FROM settings LIMIT 1")
-            result = cursor.fetchone()
-
-            if result:
-                city = result.get('city') if isinstance(result, dict) else result[0]
-                if city:
-                    return city
-
+        if conn:
+            # Usar conexión existente (dentro de transacción) - NO usar caché
+            result = await conn.fetchrow("SELECT city FROM settings LIMIT 1")
+            if result and result["city"]:
+                return result["city"]
             return DEFAULT_CITY
-
         else:
-            # Sin cursor - USAR CACHÉ
-            settings = get_tenant_settings(schema_name)
+            # Sin conexión - USAR CACHÉ
+            settings = await get_tenant_settings(schema_name)
             return settings.get("city", DEFAULT_CITY)
 
     except Exception as e:

@@ -57,7 +57,7 @@ async def get_document_states(
     try:
         logger.info("Obteniendo estados de documentos desde cache")
 
-        states = get_cached(
+        states = await get_cached(
             cache_key=f"document_states:all:{schema_name}",
             fetch_func=lambda: get_all_display_states(schema_name=schema_name),
             ttl=3600  # 1 hora - los estados raramente cambian

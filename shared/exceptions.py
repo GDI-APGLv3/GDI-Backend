@@ -279,34 +279,34 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
 def handle_database_error(error: Exception, operation: str) -> DatabaseError:
     """
     Maneja errores de base de datos y los convierte a excepciones personalizadas.
-    
+
     Args:
         error: Error original de la base de datos
         operation: Descripción de la operación que falló
-        
+
     Returns:
         DatabaseError con información del error
     """
-    import psycopg2
-    
-    if isinstance(error, psycopg2.IntegrityError):
+    import asyncpg
+
+    if isinstance(error, asyncpg.IntegrityConstraintViolationError):
         return DatabaseError(
             f"Error de integridad en {operation}",
             details={"original_error": str(error), "type": "IntegrityError"}
         )
-    
-    elif isinstance(error, psycopg2.OperationalError):
+
+    elif isinstance(error, (asyncpg.PostgresConnectionError, asyncpg.TooManyConnectionsError)):
         return DatabaseError(
             f"Error de conexión en {operation}",
             details={"original_error": str(error), "type": "OperationalError"}
         )
-    
-    elif isinstance(error, psycopg2.ProgrammingError):
+
+    elif isinstance(error, (asyncpg.PostgresSyntaxError, asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError)):
         return DatabaseError(
             f"Error de programación en {operation}",
             details={"original_error": str(error), "type": "ProgrammingError"}
         )
-    
+
     else:
         return DatabaseError(
             f"Error de base de datos en {operation}",

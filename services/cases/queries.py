@@ -17,7 +17,7 @@ def get_department_and_municipality_query() -> str:
         SELECT d.acronym as dept_acronym, d.name as dept_name,
                m.acronym as municipality_acronym, m.name as municipality_name
         FROM departments d, public.municipalities m
-        WHERE d.id = %s AND m.schema_name = %s
+        WHERE d.id = $1 AND m.schema_name = $2
     """
 
 def get_advisory_lock_query() -> str:
@@ -31,7 +31,7 @@ def get_next_case_sequence_query() -> str:
             CAST(SUBSTRING(case_number FROM '\\d{4}-(\\d+)-') AS INTEGER)
         ), 0) + 1 as next_sequence
         FROM cases
-        WHERE EXTRACT(YEAR FROM created_at) = %s
+        WHERE EXTRACT(YEAR FROM created_at) = $1
     """
 
 def insert_new_case_query() -> str:
@@ -40,7 +40,7 @@ def insert_new_case_query() -> str:
         INSERT INTO cases (
             case_template_id, case_number, reference, created_by_user_id,
             filing_department_id, creator_sector_id, owner_sector_id, created_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id, case_number, created_at
     """
 
@@ -48,8 +48,8 @@ def check_case_movement_exists_query() -> str:
     """Query para verificar si existe un movimiento de caso específico."""
     return """
         SELECT 1 FROM case_movements cm
-        WHERE cm.case_id = %s AND cm.movement_type = %s
-        AND cm.origin_sector_id = %s AND cm.destination_sector_id = %s
+        WHERE cm.case_id = $1 AND cm.movement_type = $2
+        AND cm.origin_sector_id = $3 AND cm.destination_sector_id = $4
         LIMIT 1
     """
 
@@ -58,7 +58,7 @@ def get_max_case_movement_date_query() -> str:
     return """
         SELECT MAX(cm2.closed_at)
         FROM case_movements cm2
-        WHERE cm2.case_id = %s AND cm2.closed_at IS NOT NULL
+        WHERE cm2.case_id = $1 AND cm2.closed_at IS NOT NULL
     """
 
 
@@ -66,7 +66,7 @@ def get_max_case_movement_date_query() -> str:
 # FUNCIONES DE CONSULTA INDIVIDUAL
 # =============================================================================
 
-def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
+async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
     """Obtener detalles completos de un expediente."""
     from services.case_queries import (
         get_case_basic_info_query,
@@ -74,7 +74,7 @@ def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
         get_admin_sector_for_case_query,
         get_assigned_sectors_for_case_query
     )
-    from database import execute_query
+    from database import fetch_all, fetch_one
     from shared.exceptions import BusinessLogicError
 
     try:
@@ -82,24 +82,23 @@ def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
 
         # SIEMPRE verificar permisos (skip_permission_check eliminado)
         from services.case_service import CaseService
-        if not CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name):
+        if not await CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name):
             logger.warning(f"User {user_id[:8]} denied access to case {case_id[:8]}")
             return None
 
         # Obtener información básica del expediente
-        case_result = execute_query(get_case_basic_info_query(), (case_id,), schema_name=schema_name)
+        case_result = await fetch_all(get_case_basic_info_query(), case_id, schema_name=schema_name)
         if not case_result:
             logger.warning(f"Case not found: {case_id[:8]}")
             return None
 
         case_data = case_result[0]
 
-        # Obtener sectores del usuario (2 params por UNION)
-        sectors_result = execute_query(get_user_sectors_for_case_query(), (user_id, user_id), schema_name=schema_name)
+        sectors_result = await fetch_all(get_user_sectors_for_case_query(), user_id, schema_name=schema_name)
         user_sector_ids = [row['sector_id'] for row in sectors_result if row['sector_id']]
 
         # Obtener sector administrador del caso
-        admin_sector_result = execute_query(get_admin_sector_for_case_query(), (case_id,), schema_name=schema_name)
+        admin_sector_result = await fetch_all(get_admin_sector_for_case_query(), case_id, schema_name=schema_name)
         admin_sector = None
         admin_sector_id = None
         if admin_sector_result:
@@ -112,7 +111,7 @@ def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
             admin_sector_id = admin_data['sector_id']
 
         # Obtener sectores asignados (movimientos activos)
-        assigned_sectors_result = execute_query(get_assigned_sectors_for_case_query(), (case_id,), schema_name=schema_name)
+        assigned_sectors_result = await fetch_all(get_assigned_sectors_for_case_query(), case_id, schema_name=schema_name)
         assigned_sectors = []
         assigned_sector_ids = []
         for row in assigned_sectors_result:
@@ -151,14 +150,14 @@ def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
         raise BusinessLogicError(f"Error obteniendo detalle del expediente: {str(e)}")
 
 
-def get_available_templates(user_id: str, *, schema_name: str):
+async def get_available_templates(user_id: str, *, schema_name: str):
     """Obtener plantillas de expedientes disponibles."""
     from services.case_queries import get_available_templates_query
-    from database import execute_query
+    from database import fetch_all
     from shared.exceptions import BusinessLogicError
 
     try:
-        results = execute_query(get_available_templates_query(), schema_name=schema_name)
+        results = await fetch_all(get_available_templates_query(), schema_name=schema_name)
 
         return [
             {
@@ -178,27 +177,15 @@ def get_available_templates(user_id: str, *, schema_name: str):
         raise BusinessLogicError(f"Error obteniendo plantillas: {str(e)}")
 
 
-def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str):
+async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str):
     """
     Buscar un expediente por número exacto.
     Devuelve exactamente los mismos datos que get_cases_by_user pero para un expediente específico.
-
-    Args:
-        case_number: Número exacto del expediente (ej: "EXP-2025-001")
-        user_id: ID del usuario que busca
-        schema_name: Nombre del schema (obligatorio, keyword-only)
-
-    Returns:
-        Dict con el expediente encontrado en el mismo formato que get_cases_by_user
-        o None si no se encuentra o no tiene permisos
-
-    Raises:
-        Exception: En caso de error en la consulta
     """
-    from database import execute_query
+    from database import fetch_all
 
     try:
-        # Obtener sectores del usuario (misma lógica que get_cases_by_user)
+        # Obtener sectores del usuario
         user_sectors_query = """
             SELECT DISTINCT
                 COALESCE(s.id, s2.id) as sector_id
@@ -206,21 +193,20 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
             LEFT JOIN sectors s ON u.sector_id = s.id
             LEFT JOIN user_sector_permissions usp ON u.id = usp.user_id
             LEFT JOIN sectors s2 ON usp.sector_id = s2.id
-            WHERE u.id = %s
+            WHERE u.id = $1
             AND (s.is_active = true OR s2.is_active = true)
         """
 
-        sectors_result = execute_query(user_sectors_query, (user_id,), schema_name=schema_name)
+        sectors_result = await fetch_all(user_sectors_query, user_id, schema_name=schema_name)
         user_sector_ids = [row['sector_id'] for row in sectors_result if row['sector_id']]
 
         if not user_sector_ids:
             return None
 
         # Construir placeholders para sectores del usuario
-        sector_placeholders = ",".join(["%s"] * len(user_sector_ids))
+        sector_placeholders = ",".join([f"${i+2}" for i in range(len(user_sector_ids))])
 
         # Consulta para buscar el expediente por número exacto
-        # Usa la misma lógica de permisos que get_cases_by_user
         case_query = f"""
             SELECT
                 c.id,
@@ -282,7 +268,7 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
                     WHERE cm.case_id = c.id
                     AND cm.type = 'transfer'
                     AND cm.is_active = false
-                    AND cm.admin_sector_id IN ({sector_placeholders})
+                    AND cm.admin_sector_id = ANY(ARRAY[{sector_placeholders}]::uuid[])
                     AND cm.closed_at = (
                         SELECT MAX(cm2.closed_at)
                         FROM case_movements cm2
@@ -297,7 +283,7 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
                         SELECT 1 FROM case_movements cm
                         WHERE cm.case_id = c.id
                         AND cm.type = 'creation'
-                        AND cm.admin_sector_id IN ({sector_placeholders})
+                        AND cm.admin_sector_id = ANY(ARRAY[{sector_placeholders}]::uuid[])
                     )
                     AND NOT EXISTS (
                         SELECT 1 FROM case_movements cm
@@ -308,14 +294,14 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
             FROM cases c
             JOIN case_templates ct ON c.case_template_id = ct.id
             WHERE
-                c.case_number = %s
+                c.case_number = ${len(user_sector_ids) * 2 + 2}
                 AND c.status = 'active'
                 AND (
                     -- Condición 1: ASIGNADO (asignación activa)
                     EXISTS (
                         SELECT 1 FROM case_movements cm
                         WHERE cm.case_id = c.id
-                        AND cm.assigned_sector_id IN ({sector_placeholders})
+                        AND cm.assigned_sector_id = ANY(ARRAY[{sector_placeholders}]::uuid[])
                         AND cm.is_active = true
                     )
                     OR
@@ -325,7 +311,7 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
                         WHERE cm.case_id = c.id
                         AND cm.type = 'transfer'
                         AND cm.is_active = false
-                        AND cm.admin_sector_id IN ({sector_placeholders})
+                        AND cm.admin_sector_id = ANY(ARRAY[{sector_placeholders}]::uuid[])
                         AND cm.closed_at = (
                             SELECT MAX(cm2.closed_at)
                             FROM case_movements cm2
@@ -341,7 +327,7 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
                             SELECT 1 FROM case_movements cm
                             WHERE cm.case_id = c.id
                             AND cm.type = 'creation'
-                            AND cm.admin_sector_id IN ({sector_placeholders})
+                            AND cm.admin_sector_id = ANY(ARRAY[{sector_placeholders}]::uuid[])
                         )
                         AND NOT EXISTS (
                             SELECT 1 FROM case_movements cm
@@ -352,10 +338,11 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
                 )
         """
 
-        # Parámetros: UUIDs para SELECT + UUIDs para WHERE + case_number
-        params = (user_sector_ids * 2) + (user_sector_ids * 3) + [case_number]
+        # Parámetros: 2 copias para SELECT (is_admin_by_transfer, is_admin_by_creation)
+        # + 3 copias para WHERE (assigned, transfer, creation) + case_number
+        params = list(user_sector_ids) * 5 + [case_number]
 
-        results = execute_query(case_query, tuple(params), schema_name=schema_name)
+        results = await fetch_all(case_query, *params, schema_name=schema_name)
 
         if not results:
             return None
@@ -386,12 +373,12 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
             FROM case_movements cm
             JOIN sectors s ON cm.assigned_sector_id = s.id
             JOIN departments d ON s.department_id = d.id
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $1
               AND cm.is_active = true
               AND cm.assigned_sector_id IS NOT NULL
             ORDER BY sector_acronym
         """
-        assigned_result = execute_query(assigned_sectors_query, (row['id'],), schema_name=schema_name)
+        assigned_result = await fetch_all(assigned_sectors_query, row['id'], schema_name=schema_name)
 
         assigned_sectors = [
             {
@@ -426,22 +413,11 @@ def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str
         raise Exception(f"Error buscando expediente por número: {str(e)}")
 
 
-def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = None, schema_name: str):
+async def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = None, schema_name: str):
     """
-    Buscar un expediente por número exacto.
-    Si user_id es None: búsqueda global sin restricciones.
-    Si user_id se proporciona: filtra por sectores del usuario (admin o asignado).
-
-    Args:
-        case_number: Número exacto del expediente
-        user_id: ID del usuario para filtrar por sectores (opcional)
-        schema_name: Nombre del schema (obligatorio, keyword-only)
-
-    Returns:
-        Dict con los datos del expediente en el mismo formato que list_cases o None si no existe
+    Buscar un expediente por número exacto sin restricciones (o con filtro de sector).
     """
-    from database import execute_query
-    from typing import Optional, Dict, Any
+    from database import fetch_all
 
     try:
         # Query caso + flag global en 1 sola query con LEFT JOIN users
@@ -456,12 +432,12 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
                 u.can_global_search_cases
             FROM cases c
             JOIN case_templates ct ON c.case_template_id = ct.id
-            LEFT JOIN users u ON u.id = %s
-            WHERE c.case_number = %s
+            LEFT JOIN users u ON u.id = $1
+            WHERE c.case_number = $2
             LIMIT 1
         """
 
-        results = execute_query(case_query, (user_id, case_number), schema_name=schema_name)
+        results = await fetch_all(case_query, user_id, case_number, schema_name=schema_name)
 
         if not results:
             return None
@@ -473,24 +449,23 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
         # Si user_id proporcionado y sin flag global, verificar sectores
         if user_id and not has_global:
             from services.cases.permissions import get_user_viewable_sector_ids
-            user_sector_ids = get_user_viewable_sector_ids(user_id, schema_name=schema_name)
+            user_sector_ids = await get_user_viewable_sector_ids(user_id, schema_name=schema_name)
 
             if user_sector_ids:
-                # Verificar si admin_sector o algun assigned_sector pertenece al usuario
                 sector_check_query = """
                     SELECT EXISTS(
                         SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = %s
+                        WHERE cm.case_id = $1
                           AND cm.is_active = true
                           AND (
-                            cm.admin_sector_id = ANY(%s::uuid[])
-                            OR cm.assigned_sector_id = ANY(%s::uuid[])
+                            cm.admin_sector_id = ANY($2::uuid[])
+                            OR cm.assigned_sector_id = ANY($2::uuid[])
                           )
                     ) as has_access
                 """
-                access_result = execute_query(
+                access_result = await fetch_all(
                     sector_check_query,
-                    (case_id, user_sector_ids, user_sector_ids),
+                    case_id, user_sector_ids,
                     schema_name=schema_name
                 )
                 if not access_result or not access_result[0].get('has_access', False):
@@ -508,12 +483,12 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
             FROM case_movements cm
             JOIN sectors s ON cm.admin_sector_id = s.id
             JOIN departments d ON s.department_id = d.id
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $1
               AND cm.admin_sector_id IS NOT NULL
             ORDER BY cm.created_at DESC
             LIMIT 1
         """
-        admin_result = execute_query(admin_sector_query, (case_id,), schema_name=schema_name)
+        admin_result = await fetch_all(admin_sector_query, case_id, schema_name=schema_name)
 
         admin_sector = None
         if admin_result:
@@ -533,12 +508,12 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
             FROM case_movements cm
             JOIN sectors s ON cm.assigned_sector_id = s.id
             JOIN departments d ON s.department_id = d.id
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $1
               AND cm.is_active = true
               AND cm.assigned_sector_id IS NOT NULL
             ORDER BY sector_acronym
         """
-        assigned_result = execute_query(assigned_sectors_query, (case_id,), schema_name=schema_name)
+        assigned_result = await fetch_all(assigned_sectors_query, case_id, schema_name=schema_name)
 
         assigned_sectors = [
             {
@@ -549,7 +524,6 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
             for asg in (assigned_result or [])
         ]
 
-        # Construir response con mismo formato que list_cases
         case_data = {
             "id": row['id'],
             "case_number": row['case_number'],
@@ -559,7 +533,7 @@ def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = No
                 "name": row['type_name'],
                 "acronym": row['case_type']
             },
-            "access_reason": "PUBLIC_SEARCH",  # Indicar que es búsqueda pública
+            "access_reason": "PUBLIC_SEARCH",
             "admin_sector": admin_sector,
             "assigned_sectors": assigned_sectors
         }

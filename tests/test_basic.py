@@ -20,11 +20,17 @@ class TestBasicFunctionality:
 
     @pytest.mark.asyncio
     async def test_system_health(self, client, test_headers):
-        """GET /api/v1/system/health debe responder 200 o 500 (depende de BD)."""
+        """GET /api/v1/system/health debe responder 200 con BD sana.
+
+        Solo se acepta 503 (BD inalcanzable, condición operativa esperada).
+        Un 500 indica un bug real y debe hacer fallar el test — no enmascararlo.
+        """
         response = await client.get("/api/v1/system/health", headers=test_headers)
 
-        # El health check puede dar 200 (BD ok), 500 o 503 (BD inalcanzable)
-        assert response.status_code in (200, 500, 503)
+        assert response.status_code in (200, 503), (
+            f"/api/v1/system/health devolvió {response.status_code}. "
+            f"500 = bug interno (no debe aceptarse). Respuesta: {response.text[:200]}"
+        )
         print(f"[PASS] /api/v1/system/health responde {response.status_code}")
 
     @pytest.mark.asyncio

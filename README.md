@@ -360,8 +360,8 @@ POST /documents/{doc_id}/start-signing
 
 **Variables de entorno:**
 ```bash
-EMAIL_SERVICE_URL=https://<your-email-service-url>
-EMAIL_API_KEY=miapikey
+EMAIL_SERVICE_URL=https://<your-email-service>.fly.dev
+EMAIL_API_KEY=your-api-key-here
 ```
 
 **Archivo clave:**
@@ -468,7 +468,7 @@ POST /api/v1/cases/{case_id}/transfer
 El sistema usa PostgreSQL en Railway (producción) con configuración en `database.py`:
 - Host: `shortline.proxy.rlwy.net:41254`
 - Base de datos: `municipios_test`
-- Pool de conexiones con `psycopg2`
+- Pool de conexiones con `asyncpg` (lifespan, codecs json/jsonb globales)
 
 ---
 
@@ -496,7 +496,7 @@ El backend tiene configurado CORS para permitir peticiones desde el frontend:
 Cuando el backend está en Railway y necesitas acceder desde el frontend en producción, configura la variable de entorno:
 
 ```bash
-FRONTEND_URL=https://<your-frontend-url>
+FRONTEND_URL=https://tu-frontend.fly.dev
 ```
 
 Esto agregará automáticamente tu frontend de Railway a los orígenes permitidos.
@@ -615,7 +615,7 @@ python run_tests.py
 | **FastAPI** | Framework web moderno |
 | **Pydantic** | Validación de datos y serialización |
 | **PostgreSQL** | Base de datos relacional |
-| **psycopg2** | Driver PostgreSQL |
+| **asyncpg** | Driver PostgreSQL async (pool + lifespan) |
 | **httpx** | Cliente HTTP para APIs externas |
 | **boto3** | AWS SDK para Cloudflare R2 (S3-compatible) |
 | **pypdf** | Manipulación de PDFs (FULLPAGE handling) |
@@ -706,7 +706,7 @@ Configura estas variables en Railway Dashboard → Variables:
 
 **Base de Datos (Crítico):**
 ```bash
-DB_HOST=<your-db-host>
+DB_HOST=your-db-host.example.com
 DB_PORT=5432
 DB_USER=postgres
 DB_PASSWORD=your-railway-db-password
@@ -716,11 +716,11 @@ DB_NAME=railway
 **APIs Externas:**
 ```bash
 # PDFComposer (Phase 2, 5, 6)
-PDFCOMPOSER_URL=https://<your-pdfcomposer-url>
+PDFCOMPOSER_URL=https://<your-pdfcomposer-app>.fly.dev
 PDFCOMPOSER_API_KEY=your-api-key
 
 # Notary API (Phase 3, 4, 5, 6)
-NOTARY_URL=https://<your-notary-url>
+NOTARY_URL=https://<your-notary-app>.fly.dev
 NOTARY_API_KEY=your-api-key
 ```
 
@@ -736,7 +736,7 @@ CF_R2_SIGN_EXPIRATION=600
 
 **CORS (si frontend en Railway):**
 ```bash
-FRONTEND_URL=https://<your-frontend-url>
+FRONTEND_URL=https://your-frontend.fly.dev
 ```
 
 **Opcional:**
@@ -771,7 +771,7 @@ reload = False if is_production else True
 #### 4. Checklist para Deploy
 
 - [ ] Crear proyecto en Railway
-- [ ] Conectar repositorio GitHub (rama `dev`)
+- [ ] Conectar repositorio GitHub (rama `main`)
 - [ ] Configurar todas las variables de entorno
 - [ ] Agregar PostgreSQL database (Railway add-on)
 - [ ] Verificar que el build es exitoso
@@ -809,13 +809,8 @@ Para reportar bugs o solicitar features:
 
 ## Licencia
 
-Este proyecto está licenciado bajo la **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-
-Ver el archivo [LICENSE](LICENSE) para los términos completos.
-
-> **Nota**: la AGPL-3.0 requiere que cualquier modificación desplegada como servicio
-> de red sea publicada bajo la misma licencia. Si fork-eás este proyecto y lo
-> ofrecés como SaaS, debés publicar tu código.
+Este proyecto se distribuye bajo licencia **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+Ver el archivo [LICENSE](./LICENSE) para el texto completo.
 
 ---
 
@@ -834,3 +829,4 @@ Ver el archivo [LICENSE](LICENSE) para los términos completos.
 - ✅ Eliminada dependencia de Legal Orchestrator (solo usado en preview)
 - ✅ Router unificado en _document_creator_base.py para CAEX y PV
 
+Ver `.claude/PHASES_2_TO_6_DOCUMENTATION.md` para documentación completa de cambios.

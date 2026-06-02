@@ -17,7 +17,7 @@ def check_memo_document_type_query() -> str:
     """Verifica si un document_type_id corresponde a MEMO."""
     return """
         SELECT id FROM document_types
-        WHERE id = %s AND acronym = 'MEMO'
+        WHERE id = $1 AND acronym = 'MEMO'
     """
 
 
@@ -33,7 +33,7 @@ def validate_users_exist_query() -> str:
     """Valida que los user_ids existan y esten activos."""
     return """
         SELECT id FROM users
-        WHERE id::text = ANY(%s) AND estado = 1
+        WHERE id::text = ANY($1) AND estado = 1
     """
 
 
@@ -43,7 +43,7 @@ def insert_memo_recipient_query() -> str:
         INSERT INTO memo_recipients
             (document_id, recipient_user_id, sender_user_id, recipient_type,
              recipient_sector_id, sender_sector_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
     """
 
@@ -51,7 +51,7 @@ def insert_memo_recipient_query() -> str:
 def get_user_sector_id_query() -> str:
     """Obtiene el sector_id actual de un usuario (para snapshot)."""
     return """
-        SELECT sector_id FROM users WHERE id = %s
+        SELECT sector_id FROM users WHERE id = $1
     """
 
 
@@ -71,7 +71,7 @@ def get_recipients_by_document_query() -> str:
         FROM memo_recipients mr
         JOIN users u ON u.id = mr.recipient_user_id
         LEFT JOIN sectors s ON s.id = mr.recipient_sector_id
-        WHERE mr.document_id = %s
+        WHERE mr.document_id = $1
         ORDER BY
             CASE mr.recipient_type
                 WHEN 'TO' THEN 1
@@ -87,7 +87,7 @@ def get_sender_user_query() -> str:
     return """
         SELECT DISTINCT sender_user_id
         FROM memo_recipients
-        WHERE document_id = %s
+        WHERE document_id = $1
         LIMIT 1
     """
 
@@ -97,7 +97,7 @@ def check_user_is_recipient_query() -> str:
     return """
         SELECT recipient_type
         FROM memo_recipients
-        WHERE document_id = %s AND recipient_user_id = %s
+        WHERE document_id = $1 AND recipient_user_id = $2
     """
 
 
@@ -106,7 +106,7 @@ def check_user_is_sender_query() -> str:
     return """
         SELECT EXISTS(
             SELECT 1 FROM memo_recipients
-            WHERE document_id = %s AND sender_user_id = %s
+            WHERE document_id = $1 AND sender_user_id = $2
         ) as is_sender
     """
 
@@ -116,7 +116,7 @@ def record_memo_opening_query() -> str:
     return """
         UPDATE memo_recipients
         SET opened_at = NOW()
-        WHERE document_id = %s AND recipient_user_id = %s AND opened_at IS NULL
+        WHERE document_id = $1 AND recipient_user_id = $2 AND opened_at IS NULL
         RETURNING id, opened_at
     """
 
@@ -126,7 +126,7 @@ def get_memo_opening_query() -> str:
     return """
         SELECT opened_at
         FROM memo_recipients
-        WHERE document_id = %s AND recipient_user_id = %s
+        WHERE document_id = $1 AND recipient_user_id = $2
     """
 
 
@@ -142,7 +142,7 @@ def get_openings_by_document_query() -> str:
         FROM memo_recipients mr
         JOIN users u ON u.id = mr.recipient_user_id
         LEFT JOIN sectors s ON s.id = mr.recipient_sector_id
-        WHERE mr.document_id = %s
+        WHERE mr.document_id = $1
         ORDER BY
             CASE mr.recipient_type
                 WHEN 'TO' THEN 1
@@ -170,7 +170,7 @@ def get_memo_detail_query() -> str:
         FROM official_documents od
         JOIN document_types dt ON dt.id = od.document_type_id
         JOIN departments d ON d.id = od.department_id
-        WHERE od.id = %s
+        WHERE od.id = $1
           AND od.signed_at IS NOT NULL
     """
 
@@ -183,8 +183,7 @@ def get_memo_detail_query() -> str:
 def get_received_memos_query(date_where: str = "") -> str:
     """
     Obtiene memos recibidos por un usuario (solo oficializados, NO archivados).
-    El document_id en memo_recipients referencia document_draft.id,
-    official_documents.id ES el mismo UUID que document_draft.id.
+    Params posicionales: $1=user_id, $2=limit, $3=offset [+ date params si hay]
     """
     return f"""
         SELECT
@@ -205,27 +204,31 @@ def get_received_memos_query(date_where: str = "") -> str:
         JOIN users u_sender ON u_sender.id = mr.sender_user_id
         LEFT JOIN sectors s_sender ON s_sender.id = mr.sender_sector_id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = false
+        AND mr.recipient_user_id = $1 AND mr.is_archived = false
         {date_where}
         ORDER BY od.signed_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $2 OFFSET $3
     """
 
 
 def get_received_memos_count_query(date_where: str = "") -> str:
-    """Cuenta memos recibidos por un usuario (NO archivados)."""
+    """Cuenta memos recibidos por un usuario (NO archivados). Params: $1=user_id."""
     return f"""
         SELECT COUNT(*)::int as total
         FROM official_documents od
         JOIN memo_recipients mr ON mr.document_id = od.id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = false
+        AND mr.recipient_user_id = $1 AND mr.is_archived = false
         {date_where}
     """
 
 
 def get_received_memos_search_query(date_where: str = "") -> str:
-    """Obtiene memos recibidos con filtro de busqueda ILIKE (NO archivados)."""
+    """
+    Obtiene memos recibidos con filtro de busqueda ILIKE (NO archivados).
+    Params: $1=user_id, $2=search_pattern, $3=search_pattern, $4=search_pattern,
+            $5=search_term, [date params...], $N=limit, $N+1=offset
+    """
     return f"""
         SELECT
             od.id,
@@ -245,16 +248,16 @@ def get_received_memos_search_query(date_where: str = "") -> str:
         JOIN users u_sender ON u_sender.id = mr.sender_user_id
         LEFT JOIN sectors s_sender ON s_sender.id = mr.sender_sector_id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = false
+        AND mr.recipient_user_id = $1 AND mr.is_archived = false
         AND (
-            od.official_number ILIKE %s
-            OR od.reference ILIKE %s
-            OR od.content->>'html' ILIKE %s
-            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%s)) > 0.3
+            od.official_number ILIKE $2
+            OR od.reference ILIKE $3
+            OR od.content->>'html' ILIKE $4
+            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($5)) > 0.3
         )
         {date_where}
         ORDER BY od.signed_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $6 OFFSET $7
     """
 
 
@@ -265,12 +268,12 @@ def get_received_memos_search_count_query(date_where: str = "") -> str:
         FROM official_documents od
         JOIN memo_recipients mr ON mr.document_id = od.id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = false
+        AND mr.recipient_user_id = $1 AND mr.is_archived = false
         AND (
-            od.official_number ILIKE %s
-            OR od.reference ILIKE %s
-            OR od.content->>'html' ILIKE %s
-            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%s)) > 0.3
+            od.official_number ILIKE $2
+            OR od.reference ILIKE $3
+            OR od.content->>'html' ILIKE $4
+            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($5)) > 0.3
         )
         {date_where}
     """
@@ -284,7 +287,7 @@ def get_received_memos_search_count_query(date_where: str = "") -> str:
 def get_sent_memos_query(date_where: str = "") -> str:
     """
     Obtiene memos enviados por un usuario (solo oficializados).
-    Usa DISTINCT ON para evitar duplicados por multiples recipients.
+    Params: $1=sender_user_id, [date params...], $N=limit, $N+1=offset
     """
     return f"""
         SELECT * FROM (
@@ -316,29 +319,32 @@ def get_sent_memos_query(date_where: str = "") -> str:
             JOIN memo_recipients mr ON mr.document_id = od.id
             JOIN document_types dt ON dt.id = od.document_type_id
             WHERE od.signed_at IS NOT NULL
-            AND mr.sender_user_id = %s
+            AND mr.sender_user_id = $1
             {date_where}
             ORDER BY od.id, od.signed_at DESC
         ) sub
         ORDER BY sub.signed_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $2 OFFSET $3
     """
 
 
 def get_sent_memos_count_query(date_where: str = "") -> str:
-    """Cuenta memos enviados por un usuario."""
+    """Cuenta memos enviados por un usuario. Params: $1=sender_user_id."""
     return f"""
         SELECT COUNT(DISTINCT od.id)::int as total
         FROM official_documents od
         JOIN memo_recipients mr ON mr.document_id = od.id
         WHERE od.signed_at IS NOT NULL
-        AND mr.sender_user_id = %s
+        AND mr.sender_user_id = $1
         {date_where}
     """
 
 
 def get_sent_memos_search_query(date_where: str = "") -> str:
-    """Obtiene memos enviados con filtro de busqueda ILIKE."""
+    """
+    Obtiene memos enviados con filtro de busqueda ILIKE.
+    Params: $1=sender_user_id, $2-$5=search params, [date params...], $N=limit, $N+1=offset
+    """
     return f"""
         SELECT * FROM (
             SELECT DISTINCT ON (od.id)
@@ -369,18 +375,18 @@ def get_sent_memos_search_query(date_where: str = "") -> str:
             JOIN memo_recipients mr ON mr.document_id = od.id
             JOIN document_types dt ON dt.id = od.document_type_id
             WHERE od.signed_at IS NOT NULL
-            AND mr.sender_user_id = %s
+            AND mr.sender_user_id = $1
             AND (
-                od.official_number ILIKE %s
-                OR od.reference ILIKE %s
-                OR od.content->>'html' ILIKE %s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%s)) > 0.3
+                od.official_number ILIKE $2
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $4
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($5)) > 0.3
             )
             {date_where}
             ORDER BY od.id, od.signed_at DESC
         ) sub
         ORDER BY sub.signed_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $6 OFFSET $7
     """
 
 
@@ -391,12 +397,12 @@ def get_sent_memos_search_count_query(date_where: str = "") -> str:
         FROM official_documents od
         JOIN memo_recipients mr ON mr.document_id = od.id
         WHERE od.signed_at IS NOT NULL
-        AND mr.sender_user_id = %s
+        AND mr.sender_user_id = $1
         AND (
-            od.official_number ILIKE %s
-            OR od.reference ILIKE %s
-            OR od.content->>'html' ILIKE %s
-            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%s)) > 0.3
+            od.official_number ILIKE $2
+            OR od.reference ILIKE $3
+            OR od.content->>'html' ILIKE $4
+            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($5)) > 0.3
         )
         {date_where}
     """
@@ -411,9 +417,9 @@ def update_memo_archived_status_query() -> str:
     """Actualiza el estado de archivado de un memo para un usuario especifico."""
     return """
         UPDATE memo_recipients
-        SET is_archived = %s,
-            archived_at = CASE WHEN %s = true THEN NOW() ELSE NULL END
-        WHERE document_id = %s AND recipient_user_id = %s
+        SET is_archived = $1,
+            archived_at = CASE WHEN $2 = true THEN NOW() ELSE NULL END
+        WHERE document_id = $3 AND recipient_user_id = $4
         RETURNING id, is_archived, archived_at
     """
 
@@ -431,12 +437,12 @@ def get_memo_recipient_info_query() -> str:
             mr.archived_at,
             mr.opened_at
         FROM memo_recipients mr
-        WHERE mr.document_id = %s AND mr.recipient_user_id = %s
+        WHERE mr.document_id = $1 AND mr.recipient_user_id = $2
     """
 
 
 def get_archived_memos_query() -> str:
-    """Obtiene memos ARCHIVADOS de un usuario, con paginacion."""
+    """Obtiene memos ARCHIVADOS de un usuario, con paginacion. Params: $1=user_id, $2=limit, $3=offset"""
     return """
         SELECT
             od.id,
@@ -458,25 +464,28 @@ def get_archived_memos_query() -> str:
         JOIN users u_sender ON u_sender.id = mr.sender_user_id
         LEFT JOIN sectors s_sender ON s_sender.id = mr.sender_sector_id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = true
+        AND mr.recipient_user_id = $1 AND mr.is_archived = true
         ORDER BY mr.archived_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $2 OFFSET $3
     """
 
 
 def get_archived_memos_count_query() -> str:
-    """Cuenta memos ARCHIVADOS de un usuario."""
+    """Cuenta memos ARCHIVADOS de un usuario. Params: $1=user_id"""
     return """
         SELECT COUNT(*)::int as total
         FROM official_documents od
         JOIN memo_recipients mr ON mr.document_id = od.id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = true
+        AND mr.recipient_user_id = $1 AND mr.is_archived = true
     """
 
 
 def get_archived_memos_search_query() -> str:
-    """Obtiene memos ARCHIVADOS con filtro de busqueda ILIKE."""
+    """
+    Obtiene memos ARCHIVADOS con filtro de busqueda ILIKE.
+    Params: $1=user_id, $2-$5=search params, $6=limit, $7=offset
+    """
     return """
         SELECT
             od.id,
@@ -498,31 +507,31 @@ def get_archived_memos_search_query() -> str:
         JOIN users u_sender ON u_sender.id = mr.sender_user_id
         LEFT JOIN sectors s_sender ON s_sender.id = mr.sender_sector_id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = true
+        AND mr.recipient_user_id = $1 AND mr.is_archived = true
         AND (
-            od.official_number ILIKE %s
-            OR od.reference ILIKE %s
-            OR od.content->>'html' ILIKE %s
-            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%s)) > 0.3
+            od.official_number ILIKE $2
+            OR od.reference ILIKE $3
+            OR od.content->>'html' ILIKE $4
+            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($5)) > 0.3
         )
         ORDER BY mr.archived_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $6 OFFSET $7
     """
 
 
 def get_archived_memos_search_count_query() -> str:
-    """Cuenta memos ARCHIVADOS con filtro de busqueda ILIKE."""
+    """Cuenta memos ARCHIVADOS con filtro de busqueda ILIKE. Params: $1=user_id, $2-$5=search params"""
     return """
         SELECT COUNT(*)::int as total
         FROM official_documents od
         JOIN memo_recipients mr ON mr.document_id = od.id
         WHERE od.signed_at IS NOT NULL
-        AND mr.recipient_user_id = %s AND mr.is_archived = true
+        AND mr.recipient_user_id = $1 AND mr.is_archived = true
         AND (
-            od.official_number ILIKE %s
-            OR od.reference ILIKE %s
-            OR od.content->>'html' ILIKE %s
-            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%s)) > 0.3
+            od.official_number ILIKE $2
+            OR od.reference ILIKE $3
+            OR od.content->>'html' ILIKE $4
+            OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($5)) > 0.3
         )
     """
 
@@ -533,10 +542,10 @@ def get_archived_memos_search_count_query() -> str:
 
 
 def get_unread_memo_count_query() -> str:
-    """Cuenta memos no leidos de un usuario (para badge)."""
+    """Cuenta memos no leidos de un usuario (para badge). Params: $1=user_id"""
     return """
         SELECT COUNT(*)::int as unread_count
         FROM memo_recipients mr
         JOIN official_documents od ON od.id = mr.document_id AND od.signed_at IS NOT NULL
-        WHERE mr.recipient_user_id = %s AND mr.is_archived = false AND mr.opened_at IS NULL
+        WHERE mr.recipient_user_id = $1 AND mr.is_archived = false AND mr.opened_at IS NULL
     """

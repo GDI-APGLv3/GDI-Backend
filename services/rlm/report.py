@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from shared.logging import get_logger
-from database import execute_query, execute_transaction
+from database import fetch_all, fetch_one, transaction
 from shared.exceptions import ValidationError, NotFoundError, ExternalServiceError, AuthorizationError
 from services.rlm.permissions import check_permission
 from services.rlm.queries import (
@@ -76,40 +76,38 @@ async def generate_ifrlm(
     logger.info(f"Generando IFRLM para record {record_id[:8]} por user {user_id[:8]}")
 
     # 1. Obtener datos completos del legajo
-    record = execute_query(
+    record = await fetch_one(
         get_record_detail_query(),
-        (record_id,),
+        record_id,
         schema_name=schema_name,
-        fetch_one=True
     )
 
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
     # 1b. Verificar permisos del usuario sobre este legajo
-    if not check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
+    if not await check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para generar informes de este legajo")
 
     # 2. Obtener documentos vinculados (hasta 100 para el snapshot)
-    linked_docs = execute_query(
+    linked_docs = await fetch_all(
         get_record_documents_query(),
-        (record_id, 100, 0),
-        schema_name=schema_name
+        record_id, 100, 0,
+        schema_name=schema_name,
     ) or []
 
     # 3. Obtener expedientes vinculados (hasta 100 para el snapshot)
-    linked_cases = execute_query(
+    linked_cases = await fetch_all(
         get_record_cases_query(),
-        (record_id, 100, 0),
-        schema_name=schema_name
+        record_id, 100, 0,
+        schema_name=schema_name,
     ) or []
 
     # 4. Obtener info del usuario generador
-    user_info = execute_query(
+    user_info = await fetch_one(
         get_user_sector_info_query(),
-        (user_id,),
+        user_id,
         schema_name=schema_name,
-        fetch_one=True
     )
 
     # 5. Construir snapshot
@@ -128,9 +126,9 @@ async def generate_ifrlm(
     from services.shared.settings_utils import get_city_from_settings, get_logo_url
     from config.constants import DEFAULT_LOGO_URL
 
-    signer_data = get_signer_data(user_id, schema_name=schema_name)
-    city = get_city_from_settings(schema_name=schema_name)
-    logo_url = get_logo_url(schema_name=schema_name)
+    signer_data = await get_signer_data(user_id, schema_name=schema_name)
+    city = await get_city_from_settings(schema_name=schema_name)
+    logo_url = await get_logo_url(schema_name=schema_name)
 
     # 7. Definir builders para create_and_sign_case_document
     def html_builder():
@@ -171,25 +169,24 @@ async def generate_ifrlm(
     document_id = result["document_id"]
 
     # 9-10. Vincular IFRLM + registrar historial (atómico)
-    import json
     from services.rlm.queries import insert_document_link_query, insert_history_query
 
-    after_json = json.dumps({
+    after_data = {
         "document_id": document_id,
         "official_number": result.get("official_number"),
         "is_initial": is_initial,
         "notes": link_notes,
-    })
+    }
     sector_id = user_info.get("sector_id") if user_info else None
 
-    with execute_transaction(schema_name=schema_name, user_id=user_id) as (conn, cursor):
-        cursor.execute(
+    async with transaction(schema_name=schema_name, user_id=user_id) as conn:
+        await conn.execute(
             insert_document_link_query(),
-            (record_id, document_id, None, link_notes, user_id)
+            record_id, document_id, None, link_notes, user_id,
         )
-        cursor.execute(
+        await conn.execute(
             insert_history_query(),
-            (record_id, "ifrlm_generated", None, None, after_json, user_id, sector_id)
+            record_id, "ifrlm_generated", None, None, after_data, user_id, sector_id,
         )
 
     logger.info(
@@ -443,5 +440,3 @@ def _format_field_value(value: Any) -> str:
         return ", ".join(html.escape(str(v)) for v in value) if value else "-"
 
     return html.escape(str(value))
-
-

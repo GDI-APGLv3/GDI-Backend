@@ -54,7 +54,7 @@ async def list_archived_memos(
             f"{' search=' + search if search else ''}"
         )
 
-        result = get_archived_memos(
+        result = await get_archived_memos(
             current_user.user_id,
             schema_name=schema_name,
             page=page,

@@ -22,7 +22,7 @@
 - **Python 3.11**: Lenguaje de programación
 - **Gunicorn**: Servidor WSGI con 3 workers para producción
 - **Uvicorn**: Servidor ASGI para desarrollo y como worker class
-- **PyPDF2**: Biblioteca para manipulación de documentos PDF
+- **pypdf**: Biblioteca para manipulación de documentos PDF
 - **PyMuPDF (fitz)**: Análisis y búsqueda de texto en PDFs
 - **ReportLab**: Generación de contenido PDF y overlays
 
@@ -88,7 +88,7 @@ Página PDF (612x792 puntos)
 
 ```bash
 # API Key para autenticación
-API_KEY=miapikey
+API_KEY=your-api-key-here
 
 # Configuración de archivos
 MAX_PDF_SIZE_MB=10

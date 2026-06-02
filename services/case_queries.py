@@ -14,7 +14,9 @@ def get_user_sectors_with_permissions_query() -> str:
     - Sector principal (users.sector_id): siempre can_view=true, can_edit=true
     - Sectores adicionales (user_sector_permissions): respeta can_view y can_edit
 
-    IMPORTANTE: Requiere 2 parametros (%s, %s) por el UNION.
+    NOTA: Esta query se embebe como subquery en can_user_view_case via f-string.
+    Los placeholders $N son globales a la query externa ($1=user_id, $2=case_id),
+    por eso ambos branches deben usar $1 para filtrar por user_id.
 
     Returns:
         str: Query SQL que retorna sector_id, can_view, can_edit
@@ -27,7 +29,7 @@ def get_user_sectors_with_permissions_query() -> str:
             true as can_edit
         FROM users u
         JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s AND s.is_active = true
+        WHERE u.id = $1 AND s.is_active = true
 
         UNION
 
@@ -39,21 +41,23 @@ def get_user_sectors_with_permissions_query() -> str:
         FROM users u
         JOIN user_sector_permissions usp ON u.id = usp.user_id
         JOIN sectors s2 ON usp.sector_id = s2.id
-        WHERE u.id = %s AND s2.is_active = true
+        WHERE u.id = $1 AND s2.is_active = true
     """
 
 
 def get_cases_count_query(
-    sector_placeholders: str,
-    where_conditions: str
+    where_conditions: str,
+    view_join: str = ""
 ) -> str:
     """
     Query separada para contar expedientes (sin subqueries de SELECT ni ORDER BY).
     Mucho más rápida que COUNT(*) OVER() porque no evalúa datos por fila.
 
+    Params: ($1=sector_ids::uuid[], $2+=dynamic WHERE params)
+
     Args:
-        sector_placeholders: Placeholders para sectores del usuario
-        where_conditions: Condiciones WHERE completas
+        where_conditions: Condiciones WHERE completas (con $N ya numerados)
+        view_join: JOIN adicional para filtrar por vista (asignado/admin/actuante/favoritos)
 
     Returns:
         str: Query SQL que retorna solo el conteo
@@ -62,27 +66,30 @@ def get_cases_count_query(
         SELECT COUNT(*) as total_count
         FROM cases c
         JOIN case_templates ct ON c.case_template_id = ct.id
+        {view_join}
         {where_conditions}
     """
 
 
 def get_cases_list_query(
-    sector_placeholders: str,
     where_conditions: str,
-    has_search: bool = False,
-    has_sector_filter: bool = False,
-    has_trata_filter: bool = False
+    view_join: str = "",
+    sort_dir: str = "DESC",
+    limit_param_idx: int = 0,
+    offset_param_idx: int = 0,
 ) -> str:
     """
     Query principal para listar casos/expedientes con filtros.
     Optimizada: LATERAL JOINs en vez de subqueries repetidas, sin COUNT(*) OVER().
 
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3+=dynamic WHERE, $N-1=limit, $N=offset)
+
     Args:
-        sector_placeholders: Placeholders para sectores del usuario (ej: "%s, %s, %s")
-        where_conditions: Condiciones WHERE completas
-        has_search: Si incluye filtro de búsqueda
-        has_sector_filter: Si incluye filtro por sector asignado
-        has_trata_filter: Si incluye filtro por sector administrativo
+        where_conditions: Condiciones WHERE completas (con $N ya numerados)
+        view_join: JOIN adicional para filtrar por vista
+        sort_dir: Dirección de ordenamiento ("ASC" o "DESC"). Default: "DESC"
+        limit_param_idx: Índice $N para LIMIT (calculado por el caller)
+        offset_param_idx: Índice $N para OFFSET (calculado por el caller)
 
     Returns:
         str: Query SQL completo
@@ -90,25 +97,15 @@ def get_cases_list_query(
     return f"""
         SELECT
             c.id,
+            c.short_ai_summary,
+            c.ai_summary,
             c.case_number,
             c.reference,
             ct.type_name,
             ct.acronym as case_type,
-            -- Calcular last_modified_at (GREATEST de movements y document links)
-            GREATEST(
-                COALESCE(
-                    (SELECT MAX(cm.created_at)
-                     FROM case_movements cm
-                     WHERE cm.case_id = c.id),
-                    c.created_at
-                ),
-                COALESCE(
-                    (SELECT MAX(cod.linking_date)
-                     FROM case_official_documents cod
-                     WHERE cod.case_id = c.id AND cod.is_active = true),
-                    c.created_at
-                )
-            ) as last_modified_at,
+            -- BACKEND-04: last_modified_at calculado UNA SOLA VEZ via LATERAL JOIN
+            -- y reutilizado tanto en SELECT como en ORDER BY (antes se duplicaba la subquery).
+            lm.last_modified_at,
             -- Admin sector via LATERAL JOIN (1 query en vez de 3 subqueries)
             admin.acronym as admin_sector_acronym,
             admin.department as admin_sector_department,
@@ -124,7 +121,7 @@ def get_cases_list_query(
                 WHERE cm.case_id = c.id
                 AND cm.type = 'transfer'
                 AND cm.is_active = false
-                AND cm.admin_sector_id IN ({sector_placeholders})
+                AND cm.admin_sector_id = ANY($1::uuid[])
                 AND cm.closed_at = (
                     SELECT MAX(cm2.closed_at)
                     FROM case_movements cm2
@@ -139,7 +136,7 @@ def get_cases_list_query(
                     SELECT 1 FROM case_movements cm
                     WHERE cm.case_id = c.id
                     AND cm.type = 'creation'
-                    AND cm.admin_sector_id IN ({sector_placeholders})
+                    AND cm.admin_sector_id = ANY($1::uuid[])
                 )
                 AND NOT EXISTS (
                     SELECT 1 FROM case_movements cm
@@ -147,6 +144,11 @@ def get_cases_list_query(
                     AND cm.type = 'transfer'
                 )
             ) as is_admin_by_creation,
+            -- Favorito del usuario actual
+            EXISTS (
+                SELECT 1 FROM case_favorites cf
+                WHERE cf.case_id = c.id AND cf.user_id = $2
+            ) as is_favorite,
             -- assigned_sectors en una sola query (optimización N+1)
             (SELECT COALESCE(
                 json_agg(sub.sector_info ORDER BY sub.sort_key),
@@ -170,6 +172,23 @@ def get_cases_list_query(
             ) as assigned_sectors_json
         FROM cases c
         JOIN case_templates ct ON c.case_template_id = ct.id
+        -- LATERAL JOIN: calcular last_modified_at una sola vez (reutilizado en SELECT y ORDER BY)
+        LEFT JOIN LATERAL (
+            SELECT GREATEST(
+                COALESCE(
+                    (SELECT MAX(cm_lm.created_at)
+                     FROM case_movements cm_lm
+                     WHERE cm_lm.case_id = c.id),
+                    c.created_at
+                ),
+                COALESCE(
+                    (SELECT MAX(cod_lm.linking_date)
+                     FROM case_official_documents cod_lm
+                     WHERE cod_lm.case_id = c.id AND cod_lm.is_active = true),
+                    c.created_at
+                )
+            ) AS last_modified_at
+        ) lm ON true
         -- LATERAL JOIN: obtener admin_sector en 1 sola pasada (reemplaza 3 subqueries)
         LEFT JOIN LATERAL (
             SELECT
@@ -185,22 +204,10 @@ def get_cases_list_query(
             ORDER BY cm.closed_at DESC
             LIMIT 1
         ) admin ON true
+        {view_join}
         {where_conditions}
-        ORDER BY GREATEST(
-            COALESCE(
-                (SELECT MAX(cm.created_at)
-                 FROM case_movements cm
-                 WHERE cm.case_id = c.id),
-                c.created_at
-            ),
-            COALESCE(
-                (SELECT MAX(cod.linking_date)
-                 FROM case_official_documents cod
-                 WHERE cod.case_id = c.id AND cod.is_active = true),
-                c.created_at
-            )
-        ) DESC
-        LIMIT %s OFFSET %s
+        ORDER BY lm.last_modified_at {sort_dir}
+        LIMIT ${limit_param_idx} OFFSET ${offset_param_idx}
     """
 
 
@@ -219,7 +226,7 @@ def get_assigned_sectors_query() -> str:
         FROM case_movements cm
         JOIN sectors s ON cm.assigned_sector_id = s.id
         JOIN departments d ON s.department_id = d.id
-        WHERE cm.case_id = %s
+        WHERE cm.case_id = $1
           AND cm.is_active = true
           AND cm.assigned_sector_id IS NOT NULL
         ORDER BY sector_acronym
@@ -242,7 +249,7 @@ def get_case_basic_info_query() -> str:
             ct.acronym as template_acronym
         FROM cases c
         JOIN case_templates ct ON c.case_template_id = ct.id
-        WHERE c.id = %s
+        WHERE c.id = $1
     """
 
 
@@ -250,7 +257,10 @@ def get_user_sectors_for_case_query() -> str:
     """
     Query para obtener sectores donde el usuario puede VER (para case detail).
 
-    IMPORTANTE: Requiere 2 parametros (%s, %s) por el UNION.
+    IMPORTANTE: Usa solo $1 (user_id) en ambos branches del UNION.
+    Cuando esta query se embebe como subquery en can_user_view_case, $1 referencia
+    el user_id del scope externo. NO usar $2 aqui porque en ese contexto $2 apunta
+    a case_id (no a user_id), lo que causaria que el segundo branch nunca retorne filas.
 
     Returns:
         str: Query SQL que retorna sector_ids del usuario
@@ -260,7 +270,7 @@ def get_user_sectors_for_case_query() -> str:
         SELECT s.id as sector_id
         FROM users u
         JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s AND s.is_active = true
+        WHERE u.id = $1 AND s.is_active = true
 
         UNION
 
@@ -269,7 +279,7 @@ def get_user_sectors_for_case_query() -> str:
         FROM users u
         JOIN user_sector_permissions usp ON u.id = usp.user_id
         JOIN sectors s2 ON usp.sector_id = s2.id
-        WHERE u.id = %s AND s2.is_active = true AND usp.can_view = true
+        WHERE u.id = $1 AND s2.is_active = true AND usp.can_view = true
     """
 
 
@@ -290,7 +300,7 @@ def get_admin_sector_for_case_query() -> str:
         FROM case_movements cm
         JOIN sectors s ON cm.admin_sector_id = s.id
         JOIN departments d ON s.department_id = d.id
-        WHERE cm.case_id = %s
+        WHERE cm.case_id = $1
           AND cm.is_active = false
           AND cm.type IN ('creation', 'transfer')
         ORDER BY cm.closed_at DESC
@@ -315,7 +325,7 @@ def get_assigned_sectors_for_case_query() -> str:
         FROM case_movements cm
         JOIN sectors s ON cm.assigned_sector_id = s.id
         JOIN departments d ON s.department_id = d.id
-        WHERE cm.case_id = %s
+        WHERE cm.case_id = $1
           AND cm.is_active = true
           AND cm.assigned_sector_id IS NOT NULL
         ORDER BY sector_acronym
@@ -363,31 +373,7 @@ def get_case_detail_query() -> str:
             ct.acronym as template_acronym
         FROM cases c
         JOIN case_templates ct ON c.case_template_id = ct.id
-        WHERE c.id = %s
-    """
-
-
-def get_admin_sector_query() -> str:
-    """
-    Query para obtener el sector administrador de un caso.
-
-    Returns:
-        str: Query SQL que retorna sector admin
-    """
-    return """
-        SELECT
-            d.acronym || '#' || s.acronym as sector_acronym,
-            d.name as department_name,
-            s.id as sector_id,
-            s.primary_color as sector_color
-        FROM case_movements cm
-        JOIN sectors s ON cm.admin_sector_id = s.id
-        JOIN departments d ON s.department_id = d.id
-        WHERE cm.case_id = %s
-          AND cm.is_active = false
-          AND cm.type IN ('creation', 'transfer')
-        ORDER BY cm.closed_at DESC
-        LIMIT 1
+        WHERE c.id = $1
     """
 
 
@@ -407,7 +393,7 @@ def get_assigned_sectors_with_id_query() -> str:
         FROM case_movements cm
         JOIN sectors s ON cm.assigned_sector_id = s.id
         JOIN departments d ON s.department_id = d.id
-        WHERE cm.case_id = %s
+        WHERE cm.case_id = $1
           AND cm.is_active = true
           AND cm.assigned_sector_id IS NOT NULL
         ORDER BY sector_acronym
@@ -428,7 +414,7 @@ def get_user_validation_query() -> str:
             s.department_id
         FROM users u
         LEFT JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s AND u.estado = 1
+        WHERE u.id = $1 AND u.estado = 1
     """
 
 
@@ -442,7 +428,7 @@ def get_template_validation_query() -> str:
             ct.acronym,
             ct.is_active
         FROM case_templates ct
-        WHERE ct.id = %s
+        WHERE ct.id = $1
     """
 
 
@@ -452,12 +438,12 @@ def get_department_permissions_query() -> str:
         SELECT 1
         FROM users u
         LEFT JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s
+        WHERE u.id = $1
         AND (
-            s.department_id = %s
+            s.department_id = $2
             OR EXISTS (
                 SELECT 1 FROM user_departments
-                WHERE user_id = u.id AND department_id = %s
+                WHERE user_id = u.id AND department_id = $3
             )
         )
     """
@@ -468,7 +454,7 @@ def get_sector_validation_query() -> str:
     return """
         SELECT id as sector_id, acronym as name
         FROM sectors
-        WHERE id = %s AND is_active = true
+        WHERE id = $1 AND is_active = true
     """
 
 def get_case_movements_query() -> str:
@@ -508,7 +494,7 @@ def get_case_movements_query() -> str:
         LEFT JOIN sectors asn ON cm.assigned_sector_id = asn.id
         LEFT JOIN departments d3 ON asn.department_id = d3.id
         LEFT JOIN official_documents sd ON cm.supporting_document_id = sd.id AND sd.signed_at IS NOT NULL
-        WHERE cm.case_id = %s
+        WHERE cm.case_id = $1
         ORDER BY cm.created_at DESC
     """
 
@@ -533,7 +519,7 @@ def get_official_documents_query() -> str:
         LEFT JOIN users u ON cod.linking_user_id = u.id
         LEFT JOIN sectors s ON u.sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
-        WHERE cod.case_id = %s
+        WHERE cod.case_id = $1
         ORDER BY cod.order_number ASC
     """
 
@@ -558,7 +544,7 @@ def get_proposed_documents_query() -> str:
         JOIN document_draft dd ON cpd.document_draft_id = dd.id
         LEFT JOIN document_types dt ON dd.document_type_id = dt.id
         LEFT JOIN users u ON cpd.proposing_user_id = u.id
-        WHERE cpd.case_id = %s AND cpd.is_active = true
+        WHERE cpd.case_id = $1 AND cpd.is_active = true
         ORDER BY cpd.proposing_date ASC
     """
 
@@ -572,7 +558,7 @@ def get_proposed_document_by_id_query() -> str:
                dd.reference, dd.status, dd.document_number
         FROM case_proposed_documents cpd
         JOIN document_draft dd ON cpd.document_draft_id = dd.id
-        WHERE cpd.id = %s AND cpd.case_id = %s
+        WHERE cpd.id = $1 AND cpd.case_id = $2
     """
 
 
@@ -581,7 +567,7 @@ def deactivate_proposed_document_query() -> str:
     Query para desactivar un documento propuesto.
     """
     return """
-        UPDATE case_proposed_documents SET is_active = false WHERE id = %s RETURNING id
+        UPDATE case_proposed_documents SET is_active = false WHERE id = $1 RETURNING id
     """
 
 
@@ -598,7 +584,7 @@ def get_case_permissions_data_query() -> str:
             s.department_id as owner_department_id
         FROM cases c
         LEFT JOIN sectors s ON c.owner_sector_id = s.id
-        WHERE c.id = %s
+        WHERE c.id = $1
     """
 
 def get_user_sector_info_query() -> str:
@@ -609,7 +595,7 @@ def get_user_sector_info_query() -> str:
         SELECT u.id as user_id, s.id as sector_id, s.department_id
         FROM users u
         LEFT JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s
+        WHERE u.id = $1
     """
 
 def get_case_number_query() -> str:
@@ -619,7 +605,7 @@ def get_case_number_query() -> str:
     return """
         SELECT case_number, ai_summary, ai_summary_updated_at, short_ai_summary
         FROM cases
-        WHERE id = %s
+        WHERE id = $1
     """
 
 
@@ -632,7 +618,7 @@ def get_document_type_id_query() -> str:
     return """
         SELECT id as document_type_id
         FROM document_types
-        WHERE acronym = %s
+        WHERE acronym = $1
     """
 
 
@@ -641,7 +627,7 @@ def get_document_reference_query() -> str:
     return """
         SELECT reference
         FROM document_draft
-        WHERE id = %s
+        WHERE id = $1
     """
 
 
@@ -660,7 +646,7 @@ def get_document_signers_query() -> str:
         ) as signers
         FROM document_signers ds
         JOIN users u ON ds.user_id = u.id
-        WHERE ds.document_id = %s
+        WHERE ds.document_id = $1
     """
 
 
@@ -668,22 +654,22 @@ def update_document_content_query() -> str:
     """Query para actualizar contenido del documento"""
     return """
         UPDATE document_draft
-        SET content = %s::jsonb,
+        SET content = $1::jsonb,
             last_modified_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        WHERE id = $2
     """
 
 
 def delete_document_chunks_by_official_query() -> str:
     """Query para eliminar chunks de un documento oficial (antes del rollback de official_documents por FK)"""
-    return "DELETE FROM document_chunks WHERE official_document_id = %s"
+    return "DELETE FROM document_chunks WHERE official_document_id = $1"
 
 
 def delete_official_document_query() -> str:
     """Query para eliminar documento oficial (rollback)"""
     return """
         DELETE FROM official_documents
-        WHERE id = %s
+        WHERE id = $1
     """
 
 
@@ -692,7 +678,7 @@ def update_document_status_signed_query() -> str:
     return """
         UPDATE document_draft
         SET status = 'signed'
-        WHERE id = %s
+        WHERE id = $1
     """
 
 
@@ -701,7 +687,7 @@ def update_signer_status_signed_query() -> str:
     return """
         UPDATE document_signers
         SET status = 'signed', signed_at = CURRENT_TIMESTAMP
-        WHERE document_id = %s AND user_id = %s
+        WHERE document_id = $1 AND user_id = $2
     """
 
 
@@ -711,18 +697,18 @@ def insert_case_official_document_query() -> str:
         INSERT INTO case_official_documents (
             case_id, official_document_id, linking_user_id, order_number,
             linking_date, is_active
-        ) VALUES (%s, %s, %s, 1, CURRENT_TIMESTAMP, true)
+        ) VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP, true)
     """
 
 
 def delete_document_signers_query() -> str:
     """Query para eliminar firmantes del documento (cleanup)"""
-    return "DELETE FROM document_signers WHERE document_id = %s"
+    return "DELETE FROM document_signers WHERE document_id = $1"
 
 
 def delete_document_draft_query() -> str:
     """Query para eliminar documento borrador (cleanup)"""
-    return "DELETE FROM document_draft WHERE id = %s"
+    return "DELETE FROM document_draft WHERE id = $1"
 
 
 # ============================================================================
@@ -735,7 +721,7 @@ def get_user_with_sector_query() -> str:
         SELECT u.id as user_id, u.full_name, u.sector_id, s.department_id
         FROM users u
         LEFT JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s
+        WHERE u.id = $1
     """
 
 def get_case_with_target_sector_query() -> str:
@@ -750,9 +736,9 @@ def get_case_with_target_sector_query() -> str:
             d_target.acronym as target_department_acronym
         FROM cases c
         LEFT JOIN sectors s_owner ON c.owner_sector_id = s_owner.id
-        LEFT JOIN sectors s_target ON s_target.id = %s
+        LEFT JOIN sectors s_target ON s_target.id = $1
         LEFT JOIN departments d_target ON s_target.department_id = d_target.id
-        WHERE c.id = %s
+        WHERE c.id = $2
     """
 
 def get_admin_sector_query() -> str:
@@ -760,7 +746,7 @@ def get_admin_sector_query() -> str:
     return """
         SELECT admin_sector_id
         FROM case_movements
-        WHERE case_id = %s
+        WHERE case_id = $1
           AND is_active = false
           AND type IN ('creation', 'transfer')
         ORDER BY closed_at DESC
@@ -774,7 +760,7 @@ def get_target_sector_query() -> str:
                d.name as department_name, d.acronym as department_acronym
         FROM sectors s
         JOIN departments d ON s.department_id = d.id
-        WHERE s.id = %s AND s.is_active = true
+        WHERE s.id = $1 AND s.is_active = true
     """
 
 def get_assigned_user_query() -> str:
@@ -782,23 +768,23 @@ def get_assigned_user_query() -> str:
     return """
         SELECT u.id as user_id, u.full_name, u.sector_id
         FROM users u
-        WHERE u.id = %s AND u.sector_id = %s
+        WHERE u.id = $1 AND u.sector_id = $2
     """
 
 def update_case_ownership_query() -> str:
     """Query para actualizar el propietario del expediente"""
     return """
-        UPDATE cases 
-        SET owner_sector_id = %s, owner_department_id = %s
-        WHERE id = %s
+        UPDATE cases
+        SET owner_sector_id = $1, owner_department_id = $2
+        WHERE id = $3
     """
 
 def close_movement_query() -> str:
     """Query para cerrar un movimiento"""
     return """
         UPDATE case_movements
-        SET closed_at = NOW(), closing_reason = %s, closed_by = %s, is_active = false
-        WHERE id = %s
+        SET closed_at = NOW(), closing_reason = $1, closed_by = $2, is_active = false
+        WHERE id = $3
     """
 
 def get_movement_for_closing_query() -> str:
@@ -806,7 +792,7 @@ def get_movement_for_closing_query() -> str:
     return """
         SELECT id, type, is_active, closed_at, assigned_sector_id, supporting_document_id
         FROM case_movements
-        WHERE id = %s AND case_id = %s
+        WHERE id = $1 AND case_id = $2
     """
 
 def get_available_sectors_for_transfer_query() -> str:
@@ -827,10 +813,10 @@ def get_available_sectors_for_transfer_query() -> str:
         LEFT JOIN users u ON u.sector_id = s.id AND u.estado = 1
         WHERE s.is_active = true
         AND d.is_active = true
-        AND s.id != (SELECT owner_sector_id FROM cases WHERE id = %s)
+        AND s.id != (SELECT owner_sector_id FROM cases WHERE id = $1)
         AND NOT EXISTS (
             SELECT 1 FROM case_movements cm
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $2
               AND cm.assigned_sector_id = s.id
               AND cm.is_active = true
               AND cm.type = 'assignment'
@@ -844,7 +830,7 @@ def get_sector_users_query() -> str:
     return """
         SELECT u.id as user_id, u.full_name
         FROM users u
-        WHERE u.sector_id = %s
+        WHERE u.sector_id = $1
         AND u.estado = 1
         ORDER BY u.full_name
     """
@@ -854,8 +840,8 @@ def check_duplicate_assignment_query() -> str:
     """Query para verificar si ya existe una asignación activa al sector"""
     return """
         SELECT id FROM case_movements
-        WHERE case_id = %s
-          AND assigned_sector_id = %s
+        WHERE case_id = $1
+          AND assigned_sector_id = $2
           AND is_active = true
           AND type = 'assignment'
         LIMIT 1
@@ -873,16 +859,16 @@ def get_cases_summary_query() -> str:
     return """
         WITH user_sectors AS (
             SELECT sector_id FROM user_sector_permissions
-            WHERE user_id = %s AND can_view = true
+            WHERE user_id = $1 AND can_view = true
             UNION
-            SELECT sector_id FROM users WHERE id = %s
+            SELECT sector_id FROM users WHERE id = $2
         )
         SELECT
             COUNT(*) as total_cases,
             COUNT(*) FILTER (WHERE c.status = 'active') as active_cases,
             COUNT(*) FILTER (WHERE c.status = 'inactive') as inactive_cases,
             COUNT(*) FILTER (WHERE c.status = 'archived') as archived_cases,
-            COUNT(*) FILTER (WHERE c.created_by_user_id = %s) as created_by_me,
+            COUNT(*) FILTER (WHERE c.created_by_user_id = $3) as created_by_me,
             COUNT(DISTINCT c.owner_department_id) as departments_involved
         FROM cases c
         WHERE EXISTS (

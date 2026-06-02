@@ -22,8 +22,8 @@ logger = get_logger(__name__)
 AuthSource = Literal["jwt", "api_key", "mcp_oauth", "testing", "system"]
 
 
-def set_audit_context(
-    cursor,
+async def set_audit_context(
+    conn,
     user_id: Optional[str] = None,
     auth_source: Optional[AuthSource] = None
 ) -> None:
@@ -37,31 +37,31 @@ def set_audit_context(
     automáticamente al finalizar la transacción (compatible con PgBouncer).
 
     Args:
-        cursor: Cursor de psycopg2 con transacción activa
+        conn: Conexión asyncpg con transacción activa
         user_id: UUID del usuario que realiza la acción (opcional)
         auth_source: Origen de la autenticación (opcional)
 
     Example:
-        with get_db_cursor(commit=True, schema_name=schema_name) as cursor:
-            set_audit_context(cursor, user_id=creator_id, auth_source="jwt")
-            cursor.execute("INSERT INTO documents ...")
+        async with transaction(schema_name=schema_name) as conn:
+            await set_audit_context(conn, user_id=creator_id, auth_source="jwt")
+            await conn.execute("INSERT INTO documents ...")
     """
     if user_id:
-        cursor.execute(
-            "SELECT set_config('app.user_id', %s, true)",
-            (str(user_id),)
+        await conn.execute(
+            "SELECT set_config('app.user_id', $1, true)",
+            str(user_id)
         )
         logger.debug(f"[AUDIT] app.user_id={user_id}")
 
     if auth_source:
-        cursor.execute(
-            "SELECT set_config('app.auth_source', %s, true)",
-            (auth_source,)
+        await conn.execute(
+            "SELECT set_config('app.auth_source', $1, true)",
+            auth_source
         )
         logger.debug(f"[AUDIT] app.auth_source={auth_source}")
 
 
-def clear_audit_context(cursor) -> None:
+async def clear_audit_context(conn) -> None:
     """
     Limpia el contexto de auditoría explícitamente.
 
@@ -70,8 +70,8 @@ def clear_audit_context(cursor) -> None:
     para limpiar en medio de una transacción larga.
 
     Args:
-        cursor: Cursor de psycopg2
+        conn: Conexión asyncpg
     """
-    cursor.execute("SELECT set_config('app.user_id', '', true)")
-    cursor.execute("SELECT set_config('app.auth_source', '', true)")
+    await conn.execute("SELECT set_config('app.user_id', '', true)")
+    await conn.execute("SELECT set_config('app.auth_source', '', true)")
     logger.debug("[AUDIT] Contexto limpiado")

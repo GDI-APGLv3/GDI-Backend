@@ -56,7 +56,7 @@ def _format_user_response(user_data: Dict[str, Any]) -> Dict[str, Any]:
                         "auth_id": "auth0|123456789",
                         "full_name": "Juan Pérez",
                         "email": "juan.perez@example.com",
-                        "cuit": "20-12345678-9",
+                        "country_id": "20-12345678-9",
                         "profile_picture_url": "https://cloudflare.com/photo.jpg",
                         "sector_id": "660e8400-e29b-41d4-a716-446655440001",
                         "sector_acronym": "RRHH",
@@ -100,7 +100,7 @@ async def get_user_profile(request: Request, current_user: schemas.Authenticated
         logger.info(f"Obteniendo perfil para user_id {request.state.tenant_user_id} en schema {schema_name}")
 
         # Obtener datos completos del usuario desde la base de datos
-        user_data = profile_service.get_user_profile(
+        user_data = await profile_service.get_user_profile(
             request.state.tenant_user_id,
             schema_name=schema_name
         )
@@ -114,9 +114,8 @@ async def get_user_profile(request: Request, current_user: schemas.Authenticated
     except GDIBaseException as e:
         raise exception_to_http_exception(e)
     except Exception as e:
-        error_msg = PROFILE_GET_ERROR.format(error=str(e))
-        logger.error(error_msg, exc_info=True)
-        raise ExternalServiceError(error_msg)
+        logger.error(f"Error inesperado al obtener perfil de usuario: {str(e)}", exc_info=True)
+        raise ExternalServiceError("Error al obtener el perfil del usuario")
 
 @router.put(
     "/users/profile",
@@ -133,7 +132,7 @@ async def get_user_profile(request: Request, current_user: schemas.Authenticated
                         "auth_id": "auth0|123456789",
                         "full_name": "Juan Pérez Actualizado",
                         "email": "juan.perez@example.com",
-                        "cuit": "20-98765432-1",
+                        "country_id": "20-98765432-1",
                         "profile_picture_url": "https://cloudflare.com/new_photo.jpg",
                         "sector_id": "660e8400-e29b-41d4-a716-446655440003",
                         "sector_acronym": "IT",
@@ -175,7 +174,7 @@ async def update_user_profile(
     ## Parámetros (todos opcionales):
     
     - **full_name**: Nuevo nombre completo del usuario
-    - **cuit**: Nuevo CUIT del usuario
+    - **country_id**: Nuevo identificador nacional (CountryID en BD). En Argentina es el CUIT
     - **profile_picture_url**: URL de la nueva foto de perfil
     - **sector_id**: UUID del nuevo sector
     
@@ -192,10 +191,10 @@ async def update_user_profile(
         logger.info(f"Actualizando perfil para user_id {request.state.tenant_user_id} en schema {schema_name}")
 
         # Llamar al servicio para actualizar el perfil
-        updated_user = profile_service.update_user_profile(
+        updated_user = await profile_service.update_user_profile(
             user_id=request.state.tenant_user_id,
             full_name=body.full_name,
-            cuit=body.cuit,
+            country_id=body.country_id,
             profile_picture_url=body.profile_picture_url,
             sector_id=body.sector_id,
             schema_name=schema_name
@@ -210,6 +209,5 @@ async def update_user_profile(
     except GDIBaseException as e:
         raise exception_to_http_exception(e)
     except Exception as e:
-        error_msg = PROFILE_GET_ERROR.format(error=str(e))
-        logger.error(error_msg, exc_info=True)
-        raise ExternalServiceError(error_msg)
+        logger.error(f"Error inesperado al actualizar perfil de usuario: {str(e)}", exc_info=True)
+        raise ExternalServiceError("Error al actualizar el perfil del usuario")

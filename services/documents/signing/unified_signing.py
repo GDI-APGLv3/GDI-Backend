@@ -7,7 +7,7 @@ Optimizado siguiendo principios de Clean Code.
 
 from shared.logging import get_logger
 from typing import Dict, Any
-from database import get_db_connection
+from database import fetch_one
 from shared.exceptions import (
     DocumentNotFoundError, ValidationError, DocumentStateError,
     AuthorizationError
@@ -57,19 +57,19 @@ async def super_sign_document(document_id: str, user_id: str, *, schema_name: st
     # PASO 1: QUERY INICIAL - Obtener toda la información necesaria
     # ========================================================================
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                get_signer_role_and_document_status_query(),
-                (document_id, document_id, user_id)
-            )
-            result = cursor.fetchone()
+    result = await fetch_one(
+        get_signer_role_and_document_status_query(),
+        document_id,
+        document_id,
+        user_id,
+        schema_name=schema_name,
+    )
 
-            if not result:
-                logger.warning(f"Usuario {user_id[:8]}... no es firmante del documento {document_id[:8]}...")
-                raise AuthorizationError(
-                    f"Usuario '{user_id}' no está registrado como firmante del documento '{document_id}'"
-                )
+    if not result:
+        logger.warning(f"Usuario {user_id[:8]}... no es firmante del documento {document_id[:8]}...")
+        raise AuthorizationError(
+            f"Usuario '{user_id}' no está registrado como firmante del documento '{document_id}'"
+        )
 
     # ========================================================================
     # PASO 2: VALIDACIONES COMUNES
@@ -113,7 +113,6 @@ async def super_sign_document(document_id: str, user_id: str, *, schema_name: st
         # ====================================================================
         logger.info("Ejecutando lógica de firmante común")
 
-        # Llamar al servicio existente de firmante común
         result = await sign_document(document_id, user_id, schema_name=schema_name)
 
         logger.info(f"Firmante común - Resultado: {result.get('success')}")
@@ -147,14 +146,12 @@ async def super_sign_document(document_id: str, user_id: str, *, schema_name: st
 
         logger.info("Todos los firmantes comunes han firmado, procediendo con numerador")
 
-        # Llamar al servicio existente de numerador
         result = await sign_document_as_numerator(document_id, user_id, schema_name=schema_name)
 
         logger.info(f"Numerador - Resultado: {result.get('success')}")
         logger.info(f"Numerador - Official number: {result.get('official_number')}")
 
         # Adaptar respuesta al formato SuperSignResponse
-        # Extraer signed_pdf_url de la estructura anidada de api_result
         signed_pdf_url = None
         if result.get("api_result"):
             signed_pdf_url = (

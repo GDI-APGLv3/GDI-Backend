@@ -2,30 +2,31 @@
 Módulo shared - Componentes reutilizables y utilidades comunes.
 
 Este módulo contiene:
-- database: Operaciones y conexiones de base de datos
+- database: Operaciones y conexiones de base de datos (asyncpg)
 - validation: Funciones de validación compartidas
 - utils: Utilidades generales
 - exceptions: Excepciones personalizadas y manejo de errores
 - config: Configuraciones centralizadas del sistema
 
 Uso:
-    from database import get_db_connection, execute_query
+    from database import fetch_all, fetch_one, execute, transaction, get_conn
     from shared.validation import validate_uuid, validate_user_id
     from shared.utils import generate_uuid, format_datetime
     from shared.exceptions import DocumentNotFoundError, ValidationError
     from shared.config import PaginationConfig, APIConfig
 """
 
-# Importaciones principales de database
+# Importaciones principales de database (asyncpg)
 from database import (
-    get_db_connection,
-    execute_query,
-    execute_transaction,
-    execute_single_update,
+    get_conn,
+    fetch_all,
+    fetch_one,
+    fetch_val,
+    execute,
+    transaction,
     check_user_exists,
     check_document_exists,
-    get_user_basic_info,
-    get_document_basic_info
+    get_document_basic_info,
 )
 
 # Importaciones principales de validation
@@ -86,16 +87,17 @@ from .exceptions import (
 )
 
 __all__ = [
-    # Database
-    "get_db_connection",
-    "execute_query", 
-    "execute_transaction",
-    "execute_single_update",
+    # Database (asyncpg)
+    "get_conn",
+    "fetch_all",
+    "fetch_one",
+    "fetch_val",
+    "execute",
+    "transaction",
     "check_user_exists",
     "check_document_exists",
-    "get_user_basic_info",
     "get_document_basic_info",
-    
+
     # Validation
     "validate_uuid",
     "validate_required_string",
@@ -107,12 +109,12 @@ __all__ = [
     "validate_email",
     "validate_pagination_params",
     "validate_document_signers",
-    
+
     # Utils
     "generate_uuid",
     "generate_document_number",
     "format_datetime",
-    "format_date", 
+    "format_date",
     "parse_datetime",
     "safe_json_loads",
     "safe_json_dumps",
@@ -122,11 +124,11 @@ __all__ = [
     "calculate_total_pages",
     "truncate_text",
     "CustomJSONEncoder",
-    
+
     # Exceptions
     "GDIBaseException",
     "ValidationError",
-    "BusinessLogicError", 
+    "BusinessLogicError",
     "DatabaseError",
     "AuthorizationError",
     "NotFoundError",
@@ -137,7 +139,7 @@ __all__ = [
     "DocumentPermissionError",
     "DocumentAlreadySignedError",
     "DocumentAlreadyRejectedError",
-    "InvalidSignatureOrderError", 
+    "InvalidSignatureOrderError",
     "NumeratorRequiredError",
     "UserNotFoundError",
     "UserInactiveError",

@@ -9,6 +9,7 @@ IMPORTANTE: Preview soporta tres tipos de documentos:
 
 from shared.logging import get_logger
 from typing import Dict, Any
+from fastapi.concurrency import run_in_threadpool
 from shared.exceptions import DocumentStateError
 from services.shared.pdfcomposer_api import (
     call_pdfcomposer_preview_pdf,
@@ -50,10 +51,10 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
 
         # 2. Obtener datos completos del documento
         data_fetcher = PreviewDataFetcher(schema_name=schema_name)
-        document_data = data_fetcher.get_complete_document_data(document_id)
+        document_data = await data_fetcher.get_complete_document_data(document_id)
 
         # 3. Obtener datos RAW del documento para determinar tipo
-        raw_document_data = data_fetcher._fetch_document_basic_info(document_id)
+        raw_document_data = await data_fetcher._fetch_document_basic_info(document_id)
 
         # 4. Determinar tipo de documento y generar preview
         source_type = raw_document_data.get('source_type', 'HTML')
@@ -65,8 +66,8 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
             document_id_no_hyphens = document_id.replace('-', '')
             r2_filename = f"{document_id_no_hyphens}.pdf"
 
-            r2_client = get_tenant_r2_client(schema_name=schema_name)
-            pdf_url = r2_client.get_tosign_url(r2_filename)
+            r2_client = await get_tenant_r2_client(schema_name=schema_name)
+            pdf_url = await run_in_threadpool(r2_client.get_tosign_url, r2_filename)
 
             if not pdf_url:
                 raise DocumentStateError(
@@ -97,7 +98,7 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
                 logger.info(f"Documento {document_id} es NOTA, usando /note-preview/")
 
                 from services.notes.recipients import format_recipients_for_pdf
-                recipients = format_recipients_for_pdf(document_id, schema_name=schema_name)
+                recipients = await format_recipients_for_pdf(document_id, schema_name=schema_name)
 
                 pdf_bytes = await call_pdfcomposer_note_preview(
                     raw_document_data,
@@ -110,7 +111,7 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
                 logger.info(f"Documento {document_id} es MEMO, usando /note-preview/")
 
                 from services.memos.recipients import format_memo_recipients_for_pdf
-                recipients = format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
+                recipients = await format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
 
                 pdf_bytes = await call_pdfcomposer_note_preview(
                     raw_document_data,

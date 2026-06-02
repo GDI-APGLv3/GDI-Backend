@@ -3,13 +3,14 @@ Servicio de edicion de documentos - REFACTORIZADO
 Aplica principios Clean Code y SOLID para mantener codigo legible y mantenible.
 
 Ubicacion real: services/documents/lifecycle/editing.py
+MIGRADO: Fase 6 asyncpg
 """
 
-import json
 import uuid
 from typing import Dict, Any, List, Optional, Tuple
+from fastapi.concurrency import run_in_threadpool
 from shared.logging import get_logger
-from database import get_db_connection, get_db_cursor, execute_transaction
+from database import fetch_one, fetch_all, fetch_val, execute, transaction, get_conn
 from shared.exceptions import DocumentNotFoundError, ValidationError, DocumentStateError
 from shared.validation import validate_document_id, validate_required_string, validate_document_signers, sanitize_html
 from config.constants import EDITABLE_DOCUMENT_STATES, SAVE_SUCCESS_MESSAGE, SAVE_NO_CHANGES_ERROR
@@ -32,29 +33,26 @@ from ..core.queries import (
 logger = get_logger(__name__)
 
 
-def _validate_document_can_be_edited(document_id: str, *, schema_name: str) -> None:
+async def _validate_document_can_be_edited(document_id: str, *, schema_name: str) -> None:
     """Valida que un documento pueda ser editado."""
-    validation_error = validate_document_id(document_id, schema_name=schema_name)
+    validation_error = await validate_document_id(document_id, schema_name=schema_name)
     if validation_error:
         raise ValidationError(validation_error)
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_document_status_query(), (document_id,))
-            document = cursor.fetchone()
+    document = await fetch_one(get_document_status_query(), document_id, schema_name=schema_name)
 
-            if not document:
-                raise DocumentNotFoundError(document_id)
+    if not document:
+        raise DocumentNotFoundError(document_id)
 
-            if document['status'] not in EDITABLE_DOCUMENT_STATES:
-                raise DocumentStateError(
-                    f"Documento en estado '{document['status']}' no puede editarse",
-                    current_state=document['status'],
-                    required_state=" o ".join(EDITABLE_DOCUMENT_STATES)
-                )
+    if document['status'] not in EDITABLE_DOCUMENT_STATES:
+        raise DocumentStateError(
+            f"Documento en estado '{document['status']}' no puede editarse",
+            current_state=document['status'],
+            required_state=" o ".join(EDITABLE_DOCUMENT_STATES)
+        )
 
 
-def _validate_document_update_data(reference: Optional[str], content: Optional[str], signers: Optional[List], *, schema_name: str) -> None:
+async def _validate_document_update_data(reference: Optional[str], content: Optional[str], signers: Optional[List], *, schema_name: str) -> None:
     """Valida los datos de actualizacion del documento."""
     if reference is not None:
         ref_error = validate_required_string(reference, "reference", min_length=1, max_length=250)
@@ -68,68 +66,59 @@ def _validate_document_update_data(reference: Optional[str], content: Optional[s
             raise ValidationError(content_error)
 
     if signers is not None:
-        signers_error = validate_document_signers(signers, schema_name=schema_name)
+        signers_error = await validate_document_signers(signers, schema_name=schema_name)
         if signers_error:
             raise ValidationError(signers_error)
 
 
-def _fetch_document_basic_details(document_id: str, *, schema_name: str) -> Dict[str, Any]:
+async def _fetch_document_basic_details(document_id: str, *, schema_name: str) -> Dict[str, Any]:
     """Obtiene los datos basicos del documento desde la base de datos."""
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_document_details_for_editing_query(), (document_id,))
-            document = cursor.fetchone()
+    document = await fetch_one(get_document_details_for_editing_query(), document_id, schema_name=schema_name)
 
-            if not document:
-                raise DocumentNotFoundError(document_id)
+    if not document:
+        raise DocumentNotFoundError(document_id)
 
-            return document
+    return dict(document)
 
 
-def _fetch_document_signers(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
+async def _fetch_document_signers(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
     """Obtiene la lista de firmantes del documento."""
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_document_signers_query(), (document_id,))
-            signers_data = cursor.fetchall()
+    signers_data = await fetch_all(get_document_signers_query(), document_id, schema_name=schema_name)
 
-            result = []
-            for signer in signers_data:
-                dept_acronym = signer.get('department_acronym')
-                sector_acronym = signer.get('sector_acronym')
-                department_sector = None
-                if dept_acronym or sector_acronym:
-                    department_sector = f"{dept_acronym or ''}#{sector_acronym or ''}"
+    result = []
+    for signer in signers_data:
+        dept_acronym = signer.get('department_acronym')
+        sector_acronym = signer.get('sector_acronym')
+        department_sector = None
+        if dept_acronym or sector_acronym:
+            department_sector = f"{dept_acronym or ''}#{sector_acronym or ''}"
 
-                result.append({
-                    "user_id": signer['user_id'],
-                    "user_name": signer['user_name'] or "",
-                    "email": signer['email'],
-                    "signing_order": signer['signing_order'],
-                    "is_numerator": signer['is_numerator'],
-                    "profile_picture_url": signer['profile_picture_url'],
-                    "department_sector": department_sector
-                })
+        result.append({
+            "user_id": signer['user_id'],
+            "user_name": signer['user_name'] or "",
+            "email": signer['email'],
+            "signing_order": signer['signing_order'],
+            "is_numerator": signer['is_numerator'],
+            "profile_picture_url": signer['profile_picture_url'],
+            "department_sector": department_sector
+        })
 
-            return result
+    return result
 
 
-def _fetch_document_rejection_info(document_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
+async def _fetch_document_rejection_info(document_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
     """Obtiene informacion del ultimo rechazo del documento (si existe)."""
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_document_rejection_info_query(), (document_id,))
-            rejection = cursor.fetchone()
+    rejection = await fetch_one(get_document_rejection_info_query(), document_id, schema_name=schema_name)
 
-            if rejection:
-                return {
-                    "reason": rejection['reason'],
-                    "rejected_at": rejection['created_at'].isoformat() if rejection['created_at'] else None,
-                    "rejected_by": str(rejection['rejected_by']),
-                    "rejected_by_name": rejection['rejected_by_name']
-                }
+    if rejection:
+        return {
+            "reason": rejection['reason'],
+            "rejected_at": rejection['created_at'].isoformat() if rejection['created_at'] else None,
+            "rejected_by": str(rejection['rejected_by']),
+            "rejected_by_name": rejection['rejected_by_name']
+        }
 
-            return None
+    return None
 
 
 def _extract_html_content_from_document_json(content_json: Optional[Dict]) -> str:
@@ -140,7 +129,7 @@ def _extract_html_content_from_document_json(content_json: Optional[Dict]) -> st
     return content_json.get('html') or content_json.get('detalle', '')
 
 
-def _fetch_document_recipients(document_id: str, document_type_source: str = None, *, schema_name: str) -> Optional[Dict[str, List]]:
+async def _fetch_document_recipients(document_id: str, document_type_source: str = None, *, schema_name: str) -> Optional[Dict[str, List]]:
     """Obtiene los recipients de un documento NOTA o MEMO para edición.
 
     El creador siempre ve todos los recipients (TO, CC, BCC) en modo edición.
@@ -153,63 +142,57 @@ def _fetch_document_recipients(document_id: str, document_type_source: str = Non
     if document_type_source == 'MEMO':
         from services.memos.queries import get_recipients_by_document_query as get_memo_recipients_query
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(get_memo_recipients_query(), (document_id,))
-                all_recipients = cursor.fetchall()
+        all_recipients = await fetch_all(get_memo_recipients_query(), document_id, schema_name=schema_name)
 
-                if not all_recipients:
-                    return None
+        if not all_recipients:
+            return None
 
-                result = {'to': [], 'cc': [], 'bcc': []}
+        result = {'to': [], 'cc': [], 'bcc': []}
 
-                for r in all_recipients:
-                    recipient_data = {
-                        'user_id': str(r['recipient_user_id']),
-                        'name': r['recipient_name'],
-                        'sector_acronym': r['recipient_sector_acronym'] or ''
-                    }
+        for r in all_recipients:
+            recipient_data = {
+                'user_id': str(r['recipient_user_id']),
+                'name': r['recipient_name'],
+                'sector_acronym': r['recipient_sector_acronym'] or ''
+            }
 
-                    if r['recipient_type'] == 'TO':
-                        result['to'].append(recipient_data)
-                    elif r['recipient_type'] == 'CC':
-                        result['cc'].append(recipient_data)
-                    elif r['recipient_type'] == 'BCC':
-                        result['bcc'].append(recipient_data)
+            if r['recipient_type'] == 'TO':
+                result['to'].append(recipient_data)
+            elif r['recipient_type'] == 'CC':
+                result['cc'].append(recipient_data)
+            elif r['recipient_type'] == 'BCC':
+                result['bcc'].append(recipient_data)
 
-                return result
+        return result
     else:
         # Default: NOTA recipients (sector-based)
         from services.notes.queries import get_recipients_by_document_query
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(get_recipients_by_document_query(), (document_id,))
-                all_recipients = cursor.fetchall()
+        all_recipients = await fetch_all(get_recipients_by_document_query(), document_id, schema_name=schema_name)
 
-                if not all_recipients:
-                    return None
+        if not all_recipients:
+            return None
 
-                result = {'to': [], 'cc': [], 'bcc': []}
+        result = {'to': [], 'cc': [], 'bcc': []}
 
-                for r in all_recipients:
-                    recipient_data = {
-                        'sector_id': str(r['sector_id']),
-                        'acronym': r['sector_acronym'],
-                        'department_name': r['department_name']
-                    }
+        for r in all_recipients:
+            recipient_data = {
+                'sector_id': str(r['sector_id']),
+                'acronym': r['sector_acronym'],
+                'department_name': r['department_name']
+            }
 
-                    if r['recipient_type'] == 'TO':
-                        result['to'].append(recipient_data)
-                    elif r['recipient_type'] == 'CC':
-                        result['cc'].append(recipient_data)
-                    elif r['recipient_type'] == 'BCC':
-                        result['bcc'].append(recipient_data)
+            if r['recipient_type'] == 'TO':
+                result['to'].append(recipient_data)
+            elif r['recipient_type'] == 'CC':
+                result['cc'].append(recipient_data)
+            elif r['recipient_type'] == 'BCC':
+                result['bcc'].append(recipient_data)
 
-                return result
+        return result
 
 
-def _fetch_proposed_cases(document_id: str, *, schema_name: str) -> List[Dict]:
+async def _fetch_proposed_cases(document_id: str, *, schema_name: str) -> List[Dict]:
     """Obtiene los expedientes propuestos para un documento.
 
     Args:
@@ -219,24 +202,21 @@ def _fetch_proposed_cases(document_id: str, *, schema_name: str) -> List[Dict]:
     Returns:
         Lista de diccionarios con case_id, case_number, reference, proposing_date
     """
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_proposed_cases_for_document_query(), (document_id,))
-            proposed_cases = cursor.fetchall()
+    proposed_cases = await fetch_all(get_proposed_cases_for_document_query(), document_id, schema_name=schema_name)
 
-            result = []
-            for case in proposed_cases:
-                result.append({
-                    "case_id": str(case['case_id']),
-                    "case_number": case['case_number'],
-                    "reference": case.get('reference'),
-                    "proposing_date": case['proposing_date'].isoformat() if case.get('proposing_date') else None
-                })
+    result = []
+    for case in proposed_cases:
+        result.append({
+            "case_id": str(case['case_id']),
+            "case_number": case['case_number'],
+            "reference": case.get('reference'),
+            "proposing_date": case['proposing_date'].isoformat() if case.get('proposing_date') else None
+        })
 
-            return result
+    return result
 
 
-def _validate_case_ids(case_ids: List[str], *, schema_name: str) -> None:
+async def _validate_case_ids(case_ids: List[str], *, schema_name: str) -> None:
     """Valida que todos los expedientes existan y no estén archivados.
 
     Args:
@@ -249,14 +229,11 @@ def _validate_case_ids(case_ids: List[str], *, schema_name: str) -> None:
     if not case_ids:
         return
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            for case_id in case_ids:
-                cursor.execute(validate_case_exists_query(), (case_id,))
-                result = cursor.fetchone()
+    for case_id in case_ids:
+        result = await fetch_one(validate_case_exists_query(), case_id, schema_name=schema_name)
 
-                if not result:
-                    raise ValidationError(f"El expediente '{case_id}' no existe o está archivado")
+        if not result:
+            raise ValidationError(f"El expediente '{case_id}' no existe o está archivado")
 
 
 def _build_proposed_cases_update_operations(
@@ -275,7 +252,7 @@ def _build_proposed_cases_update_operations(
         user_id: UUID del usuario que propone
 
     Returns:
-        Lista de tuplas (query, params) para execute_transaction
+        Lista de tuplas (query, params) para ejecutar en transaccion
     """
     operations = []
 
@@ -384,13 +361,13 @@ def _build_document_update_operations(
 
     # Seleccionar query apropiada segun que campos se actualizan
     if reference is not None and effective_content is not None:
-        content_json = json.dumps({"html": effective_content})
-        return [(update_document_reference_and_content_query(), [reference, content_json, document_id])]
+        content_dict = {"html": effective_content}
+        return [(update_document_reference_and_content_query(), (reference, content_dict, document_id))]
     elif reference is not None:
-        return [(update_document_reference_query(), [reference, document_id])]
+        return [(update_document_reference_query(), (reference, document_id))]
     else:  # effective_content is not None
-        content_json = json.dumps({"html": effective_content})
-        return [(update_document_content_query(), [content_json, document_id])]
+        content_dict = {"html": effective_content}
+        return [(update_document_content_query(), (content_dict, document_id))]
 
 
 def _build_signers_update_operations(
@@ -402,20 +379,20 @@ def _build_signers_update_operations(
 
     operations.append((
         delete_document_signers_query(),
-        [document_id]
+        (document_id,)
     ))
 
     for order, signer in enumerate(signers, 1):
         operations.append((
             insert_document_signer_ordered_query(),
-            [document_id, signer.get('user_id'), order, signer.get('is_numerator', False)]
+            (document_id, signer.get('user_id'), order, signer.get('is_numerator', False))
         ))
 
     return operations
 
 
-def _process_recipients_update(
-    cursor,
+async def _process_recipients_update(
+    conn,
     document_id: str,
     recipients: Dict,
     sender_sector_id: Optional[str],
@@ -429,7 +406,7 @@ def _process_recipients_update(
     Solo procesa si el documento es tipo NOTA o MEMO. Para otros tipos, ignora silenciosamente.
 
     Args:
-        cursor: Cursor de la transacción padre
+        conn: Conexion asyncpg de la transacción padre
         document_id: UUID del documento
         recipients: Dict con {to: [], cc: [], bcc: []}
         sender_sector_id: UUID del sector emisor (para NOTA)
@@ -450,7 +427,7 @@ def _process_recipients_update(
     from services.memos.save_recipients import save_memo_recipients, delete_memo_recipients
 
     # Verificar si es NOTA
-    if is_nota_document_type_by_id(document_id, cursor, schema_name=schema_name):
+    if await is_nota_document_type_by_id(document_id, conn, schema_name=schema_name):
         # Validar y normalizar formato (incluye deduplicación)
         normalized = validate_recipients_input(recipients)
 
@@ -459,19 +436,19 @@ def _process_recipients_update(
         if has_recipients:
             if not sender_sector_id:
                 raise ValidationError("Se requiere sender_sector_id para guardar recipients en NOTA")
-            validate_recipients_exist(cursor, normalized, sender_sector_id, schema_name=schema_name)
+            await validate_recipients_exist(conn, normalized, sender_sector_id, schema_name=schema_name)
 
         # Borrar existentes y guardar nuevos
-        deleted_count = delete_recipients(cursor, document_id)
+        deleted_count = await delete_recipients(conn, document_id)
         if has_recipients:
-            saved_count = save_recipients(cursor, document_id, sender_sector_id, normalized, schema_name=schema_name)
+            saved_count = await save_recipients(conn, document_id, sender_sector_id, normalized, schema_name=schema_name)
             logger.info(f"NOTA recipients actualizados: {deleted_count} eliminados, {saved_count} guardados")
         else:
             logger.info(f"NOTA recipients eliminados: {deleted_count} (lista vacía)")
         return
 
     # Verificar si es MEMO
-    if is_memo_document_type_by_id(document_id, cursor, schema_name=schema_name):
+    if await is_memo_document_type_by_id(document_id, conn, schema_name=schema_name):
         # Validar y normalizar formato (incluye deduplicación)
         normalized = validate_memo_recipients_input(recipients)
 
@@ -480,12 +457,12 @@ def _process_recipients_update(
         if has_recipients:
             if not sender_user_id:
                 raise ValidationError("Se requiere sender_user_id para guardar recipients en MEMO")
-            validate_memo_recipients_exist(cursor, normalized, sender_user_id, schema_name=schema_name)
+            await validate_memo_recipients_exist(conn, normalized, sender_user_id, schema_name=schema_name)
 
         # Borrar existentes y guardar nuevos
-        deleted_count = delete_memo_recipients(cursor, document_id, schema_name=schema_name)
+        deleted_count = await delete_memo_recipients(conn, document_id, schema_name=schema_name)
         if has_recipients:
-            saved_count = save_memo_recipients(cursor, document_id, sender_user_id, normalized, schema_name=schema_name)
+            saved_count = await save_memo_recipients(conn, document_id, sender_user_id, normalized, schema_name=schema_name)
             logger.info(f"MEMO recipients actualizados: {deleted_count} eliminados, {saved_count} guardados")
         else:
             logger.info(f"MEMO recipients eliminados: {deleted_count} (lista vacía)")
@@ -494,30 +471,30 @@ def _process_recipients_update(
     logger.debug(f"Documento {document_id} no es NOTA ni MEMO, ignorando recipients")
 
 
-def get_document_details_for_editing(document_id: str, *, schema_name: str) -> Dict[str, Any]:
+async def get_document_details_for_editing(document_id: str, *, schema_name: str) -> Dict[str, Any]:
     """Obtiene los detalles completos de un documento para edicion."""
     logger.info(f"Obteniendo detalles de documento {document_id} para edicion")
 
-    _validate_document_can_be_edited(document_id, schema_name=schema_name)
+    await _validate_document_can_be_edited(document_id, schema_name=schema_name)
 
-    document = _fetch_document_basic_details(document_id, schema_name=schema_name)
-    signers = _fetch_document_signers(document_id, schema_name=schema_name)
+    document = await _fetch_document_basic_details(document_id, schema_name=schema_name)
+    signers = await _fetch_document_signers(document_id, schema_name=schema_name)
 
     rejection_info = None
     if document['status'] == 'rejected':
-        rejection_info = _fetch_document_rejection_info(document_id, schema_name=schema_name)
+        rejection_info = await _fetch_document_rejection_info(document_id, schema_name=schema_name)
 
     # Obtener pdf_url si es documento importado Y el PDF existe
     pdf_url = None
     if document.get('document_type_source') == 'Importado':
         try:
             from services.storage.cloudflare import get_tenant_r2_client
-            r2_client = get_tenant_r2_client(schema_name=schema_name)
+            r2_client = await get_tenant_r2_client(schema_name=schema_name)
             document_id_no_hyphens = document_id.replace('-', '')
             r2_filename = f"{document_id_no_hyphens}.pdf"
             # Verificar si el PDF existe antes de generar URL
-            if r2_client.exists_tosign(r2_filename):
-                pdf_url = r2_client.get_tosign_url(r2_filename)
+            if await run_in_threadpool(r2_client.exists_tosign, r2_filename):
+                pdf_url = await run_in_threadpool(r2_client.get_tosign_url, r2_filename)
                 logger.debug(f"PDF URL generada para documento importado: {pdf_url[:50]}...")
             else:
                 logger.debug(f"PDF no existe aun para documento importado {document_id}")
@@ -529,23 +506,21 @@ def get_document_details_for_editing(document_id: str, *, schema_name: str) -> D
     document_type_source = document.get('document_type_source')
     if document_type_source in ('NOTA', 'MEMO'):
         logger.info(f"Documento {document_id} es {document_type_source}, obteniendo recipients...")
-        recipients = _fetch_document_recipients(document_id, document_type_source=document_type_source, schema_name=schema_name)
+        recipients = await _fetch_document_recipients(document_id, document_type_source=document_type_source, schema_name=schema_name)
         if recipients:
             logger.info(f"Recipients cargados: TO={len(recipients.get('to', []))}, CC={len(recipients.get('cc', []))}, BCC={len(recipients.get('bcc', []))}")
         else:
             logger.info(f"No se encontraron recipients para documento {document_id}")
 
     # Obtener expedientes propuestos
-    proposed_cases = _fetch_proposed_cases(document_id, schema_name=schema_name)
+    proposed_cases = await _fetch_proposed_cases(document_id, schema_name=schema_name)
     if proposed_cases:
         logger.info(f"Expedientes propuestos cargados: {len(proposed_cases)} expedientes")
 
     return _build_complete_document_response(document, signers, rejection_info, pdf_url, recipients, proposed_cases)
 
 
-
-
-def save_document_changes(
+async def save_document_changes(
     document_id: str,
     reference: Optional[str] = None,
     content: Optional[str] = None,
@@ -575,8 +550,8 @@ def save_document_changes(
     """
     logger.info(f"Guardando cambios en documento {document_id} en schema {schema_name}")
 
-    _validate_document_can_be_edited(document_id, schema_name=schema_name)
-    _validate_document_update_data(reference, content, signers, schema_name=schema_name)
+    await _validate_document_can_be_edited(document_id, schema_name=schema_name)
+    await _validate_document_update_data(reference, content, signers, schema_name=schema_name)
 
     # Sanitizar HTML para prevenir XSS stored
     if content:
@@ -591,7 +566,7 @@ def save_document_changes(
     if proposed_case_ids is not None:
         if not user_id:
             raise ValidationError("Se requiere user_id para proponer vinculación a expedientes")
-        _validate_case_ids(proposed_case_ids, schema_name=schema_name)
+        await _validate_case_ids(proposed_case_ids, schema_name=schema_name)
 
     operations = []
     operations.extend(_build_document_update_operations(document_id, reference, content))
@@ -602,38 +577,38 @@ def save_document_changes(
     # Detectar propuestas NUEVAS antes de construir operaciones
     new_case_ids = set()
     if proposed_case_ids is not None:
-        from database import execute_query
-        existing_proposals = execute_query(
-            "SELECT case_id::text FROM case_proposed_documents WHERE document_draft_id = %s AND is_active = true",
-            (document_id,), schema_name=schema_name
+        existing_rows = await fetch_all(
+            "SELECT case_id::text FROM case_proposed_documents WHERE document_draft_id = $1 AND is_active = true",
+            document_id,
+            schema_name=schema_name
         )
-        existing_case_ids = {row['case_id'] for row in existing_proposals}
+        existing_case_ids = {row['case_id'] for row in existing_rows}
         new_case_ids = set(proposed_case_ids) - existing_case_ids
 
         operations.extend(_build_proposed_cases_update_operations(
             document_id, proposed_case_ids, user_id
         ))
 
-    with execute_transaction(schema_name=schema_name) as (conn, cursor):
+    async with transaction(schema_name=schema_name) as conn:
         for query, params in operations:
-            cursor.execute(query, params)
+            await conn.execute(query, *params)
 
         # Procesar recipients si se enviaron (para NOTA o MEMO)
         if recipients is not None:
-            _process_recipients_update(
-                cursor, document_id, recipients, sender_sector_id,
+            await _process_recipients_update(
+                conn, document_id, recipients, sender_sector_id,
                 sender_user_id=user_id,
                 schema_name=schema_name
             )
 
     # Registrar historial para propuestas NUEVAS (después de la transacción)
     if proposed_case_ids is not None and new_case_ids:
-        _register_proposal_history(
+        await _register_proposal_history(
             document_id, list(new_case_ids), user_id, sender_sector_id,
             schema_name=schema_name
         )
 
-    updated_document = get_document_details_for_editing(document_id, schema_name=schema_name)
+    updated_document = await get_document_details_for_editing(document_id, schema_name=schema_name)
 
     logger.info(f"Documento {document_id} actualizado exitosamente")
 
@@ -645,7 +620,7 @@ def save_document_changes(
     }
 
 
-def _register_proposal_history(
+async def _register_proposal_history(
     document_id: str,
     new_case_ids: List[str],
     user_id: str,
@@ -656,23 +631,24 @@ def _register_proposal_history(
     """Registrar en case_history cuando se propone vincular documento a expedientes nuevos."""
     from services.cases.history import create_movement
     from config.constants import MOVEMENT_TYPE_DOCUMENT_PROPOSAL
-    from database import execute_query
 
     # Obtener referencia y numero del documento
-    doc_info = execute_query(
-        "SELECT reference, document_number FROM document_draft WHERE id = %s",
-        (document_id,), schema_name=schema_name
+    doc_row = await fetch_one(
+        "SELECT reference, document_number FROM document_draft WHERE id = $1",
+        document_id,
+        schema_name=schema_name
     )
-    reference = doc_info[0]['reference'] if doc_info else 'Sin referencia'
-    doc_number = doc_info[0].get('document_number') if doc_info else None
+    reference = doc_row['reference'] if doc_row else 'Sin referencia'
+    doc_number = doc_row.get('document_number') if doc_row else None
 
     # Si no tenemos sector del usuario, obtenerlo
     if not sender_sector_id:
-        user_result = execute_query(
-            "SELECT sector_id FROM users WHERE id = %s",
-            (user_id,), schema_name=schema_name
+        user_row = await fetch_one(
+            "SELECT sector_id FROM users WHERE id = $1",
+            user_id,
+            schema_name=schema_name
         )
-        sender_sector_id = str(user_result[0]['sector_id']) if user_result else None
+        sender_sector_id = str(user_row['sector_id']) if user_row else None
 
     # Construir mensaje
     reason = f"Propuso vincular documento: {reference}"
@@ -682,15 +658,16 @@ def _register_proposal_history(
     for case_id in new_case_ids:
         try:
             # Obtener admin_sector_id del expediente
-            admin_result = execute_query(
+            admin_row = await fetch_one(
                 """SELECT admin_sector_id FROM case_movements
-                   WHERE case_id = %s AND type IN ('creation', 'transfer')
+                   WHERE case_id = $1 AND type IN ('creation', 'transfer')
                    ORDER BY created_at DESC LIMIT 1""",
-                (case_id,), schema_name=schema_name
+                case_id,
+                schema_name=schema_name
             )
-            admin_sector_id = str(admin_result[0]['admin_sector_id']) if admin_result else sender_sector_id
+            admin_sector_id = str(admin_row['admin_sector_id']) if admin_row else sender_sector_id
 
-            create_movement(
+            await create_movement(
                 case_id=case_id,
                 movement_type=MOVEMENT_TYPE_DOCUMENT_PROPOSAL,
                 user_id=user_id,
@@ -703,20 +680,17 @@ def _register_proposal_history(
             logger.warning(f"Error registrando propuesta en historial case {case_id}: {e}")
 
 
-def check_document_can_be_edited(document_id: str, *, schema_name: str) -> Dict[str, Any]:
+async def check_document_can_be_edited(document_id: str, *, schema_name: str) -> Dict[str, Any]:
     """Verifica si un documento puede ser editado sin lanzar excepciones."""
     try:
-        _validate_document_can_be_edited(document_id, schema_name=schema_name)
+        await _validate_document_can_be_edited(document_id, schema_name=schema_name)
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(get_document_status_query(), (document_id,))
-                document = cursor.fetchone()
+        document = await fetch_one(get_document_status_query(), document_id, schema_name=schema_name)
 
-                return {
-                    "can_edit": True,
-                    "document_status": document['status'] if document else None
-                }
+        return {
+            "can_edit": True,
+            "document_status": document['status'] if document else None
+        }
 
     except ValidationError as e:
         return {

@@ -38,7 +38,7 @@ from database import validate_schema_name
 logger = logging.getLogger(__name__)
 
 
-def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MCPContext:
+async def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MCPContext:
     """
     Valida API Key y retorna contexto MCP con user_id.
 
@@ -61,7 +61,7 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
     Raises:
         ValueError: Si API Key inválida, inactiva, expirada, o user_id no autorizado
     """
-    from database import execute_query
+    from database import fetch_one, execute
 
     if not api_key:
         raise ValueError("X-API-Key header requerido")
@@ -89,14 +89,13 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
 
         # c) Validar que el schema existe y esta activo en municipalities.
         try:
-            row = execute_query(
+            row = await fetch_one(
                 """
                 SELECT id
                 FROM public.municipalities
-                WHERE schema_name = %s AND is_active = true
+                WHERE schema_name = $1 AND is_active = true
                 """,
-                (schema_name,),
-                fetch_one=True,
+                schema_name,
                 schema_name="public"
             )
         except Exception as e:
@@ -129,7 +128,7 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
 
     # Buscar API Key en tabla public.api_keys por hash
     try:
-        result = execute_query(
+        result = await fetch_one(
             """
             SELECT
                 ak.id,
@@ -144,10 +143,9 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
                 m.is_active as muni_active
             FROM public.api_keys ak
             JOIN public.municipalities m ON ak.municipality_id = m.id
-            WHERE ak.api_key_hash = %s
+            WHERE ak.api_key_hash = $1
             """,
-            (api_key_hash,),
-            fetch_one=True,
+            api_key_hash,
             schema_name="public"
         )
     except Exception as e:
@@ -180,13 +178,12 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
     validate_schema_name(schema_name)  # Defense in depth
 
     try:
-        user_allowed = execute_query(
+        user_allowed = await fetch_one(
             """
             SELECT user_id FROM public.api_key_users
-            WHERE api_key_id = %s AND user_id = %s AND schema_name = %s
+            WHERE api_key_id = $1 AND user_id = $2 AND schema_name = $3
             """,
-            (api_key_id, user_id, schema_name),
-            fetch_one=True,
+            api_key_id, user_id, schema_name,
             schema_name="public"
         )
     except Exception as e:
@@ -204,7 +201,7 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
         rate_limiter.check(f"rest_key:{api_key_id}", rate_limit_per_minute)
 
     # Actualizar last_used_at (async, no bloquea si falla)
-    _update_last_used(api_key_id)
+    await _update_last_used(api_key_id)
 
     ctx = MCPContext(
         api_key=api_key,
@@ -218,17 +215,17 @@ def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MC
     return ctx
 
 
-def _update_last_used(api_key_id: str) -> None:
+async def _update_last_used(api_key_id: str) -> None:
     """
     Actualiza el timestamp de último uso de la API Key.
     No falla si hay error (operación no crítica).
     """
-    from database import execute_query
+    from database import execute
 
     try:
-        execute_query(
-            "UPDATE public.api_keys SET last_used_at = NOW() WHERE id = %s",
-            (api_key_id,),
+        await execute(
+            "UPDATE public.api_keys SET last_used_at = NOW() WHERE id = $1",
+            api_key_id,
             schema_name="public"
         )
     except Exception as e:
@@ -236,7 +233,7 @@ def _update_last_used(api_key_id: str) -> None:
         logger.debug(f"[REST Auth] Error actualizando last_used_at: {e}")
 
 
-def get_api_key_info(api_key: str) -> Optional[dict]:
+async def get_api_key_info(api_key: str) -> Optional[dict]:
     """
     Obtiene información completa de una API Key (para debugging/admin).
 
@@ -246,12 +243,12 @@ def get_api_key_info(api_key: str) -> Optional[dict]:
     Returns:
         Dict con toda la información de la key, o None si no existe
     """
-    from database import execute_query
+    from database import fetch_one
 
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     try:
-        result = execute_query(
+        result = await fetch_one(
             """
             SELECT
                 ak.id,
@@ -269,10 +266,9 @@ def get_api_key_info(api_key: str) -> Optional[dict]:
                 m.name as municipality_name
             FROM public.api_keys ak
             JOIN public.municipalities m ON ak.municipality_id = m.id
-            WHERE ak.api_key_hash = %s
+            WHERE ak.api_key_hash = $1
             """,
-            (api_key_hash,),
-            fetch_one=True,
+            api_key_hash,
             schema_name="public"
         )
 
@@ -360,7 +356,7 @@ def _check_origin(client_ip: str, allowed_origins: list) -> bool:
     return False
 
 
-def validate_backup_api_key(request) -> dict:
+async def validate_backup_api_key(request) -> dict:
     """
     Valida Backup API Key con 2 capas de seguridad.
 
@@ -378,7 +374,7 @@ def validate_backup_api_key(request) -> dict:
     Raises:
         BackupAuthError: Con status_code apropiado (401, 403)
     """
-    from database import execute_query
+    from database import fetch_one
 
     # Guardia: X-User-ID PROHIBIDO para backup keys
     if request.headers.get("X-User-ID"):
@@ -394,7 +390,7 @@ def validate_backup_api_key(request) -> dict:
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     try:
-        result = execute_query(
+        result = await fetch_one(
             """
             SELECT
                 ak.id,
@@ -411,10 +407,9 @@ def validate_backup_api_key(request) -> dict:
                 m.is_active as muni_active
             FROM public.api_keys ak
             JOIN public.municipalities m ON ak.municipality_id = m.id
-            WHERE ak.api_key_hash = %s
+            WHERE ak.api_key_hash = $1
             """,
-            (api_key_hash,),
-            fetch_one=True,
+            api_key_hash,
             schema_name="public"
         )
     except Exception as e:
@@ -456,7 +451,7 @@ def validate_backup_api_key(request) -> dict:
         raise BackupAuthError("Acceso denegado", 403)
 
     # Actualizar last_used_at
-    _update_last_used(api_key_id)
+    await _update_last_used(api_key_id)
 
     logger.info(f"[Backup Auth] Acceso autorizado: key={result['key_name']}, schema={schema_name}, ip={client_ip}")
 
@@ -468,7 +463,7 @@ def validate_backup_api_key(request) -> dict:
     }
 
 
-def check_and_log_sync_access(
+async def check_and_log_sync_access(
     api_key_id: str,
     schema_name: str,
     action: str,
@@ -493,27 +488,26 @@ def check_and_log_sync_access(
     Returns:
         None si acceso permitido (ya logueado), int retry_after si rate-limited
     """
-    from database import execute_query
+    from database import fetch_one
 
     interval_seconds = 60 / max(rate_limit_per_minute, 1)
 
     try:
         # INSERT atómico: solo inserta si no hay acceso reciente
-        result = execute_query(
+        result = await fetch_one(
             """
             INSERT INTO public.backup_access_log
                 (api_key_id, schema_name, action, ip_address, user_agent)
-            SELECT %s, %s, %s, %s, %s
+            SELECT $1, $2, $3, $4, $5
             WHERE NOT EXISTS (
                 SELECT 1 FROM public.backup_access_log
-                WHERE api_key_id = %s AND action = %s
-                AND created_at > NOW() - make_interval(secs => %s)
+                WHERE api_key_id = $6 AND action = $7
+                AND created_at > NOW() - make_interval(secs => $8)
             )
             RETURNING id
             """,
-            (api_key_id, schema_name, action, ip, user_agent,
-             api_key_id, action, int(interval_seconds)),
-            fetch_one=True,
+            api_key_id, schema_name, action, ip, user_agent,
+            api_key_id, action, int(interval_seconds),
             schema_name="public"
         )
     except Exception as e:
@@ -528,14 +522,13 @@ def check_and_log_sync_access(
 
     # Rate limited — calcular retry_after
     try:
-        last_access = execute_query(
+        last_access = await fetch_one(
             """
             SELECT created_at FROM public.backup_access_log
-            WHERE api_key_id = %s AND action = %s
+            WHERE api_key_id = $1 AND action = $2
             ORDER BY created_at DESC LIMIT 1
             """,
-            (api_key_id, action),
-            fetch_one=True,
+            api_key_id, action,
             schema_name="public"
         )
     except Exception:

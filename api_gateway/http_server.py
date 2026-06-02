@@ -46,7 +46,6 @@ from api_gateway.gateway_middleware import GatewayMiddleware
 from api_gateway.auth_mcp import (
     validate_mcp_jwt,
     verify_mcp_token,
-    get_email_from_userinfo,
     extract_email_from_token,
     find_user_all_tenants,
     MultiTenantSelectionRequired
@@ -97,6 +96,7 @@ from api_gateway.rest_api import (
     # Backup Sync
     api_sync_schema,
     api_sync_data,
+    api_sync_documents,
     # Busqueda semantica
     api_semantic_search,
     # Legajos (RLM)
@@ -119,6 +119,14 @@ from api_gateway.rest_api import (
     api_get_record_documents,
     api_link_record_document,
     api_unlink_record_document,
+    # Responsables de expediente
+    api_get_case_responsibles,
+    api_add_case_responsible,
+    api_remove_case_responsible,
+    # Subsanacion de expediente (S8-011)
+    api_subsanar_document,
+    # Movimientos de expediente (S8-014)
+    api_get_case_movements,
 )
 
 # Configurar logging (stderr para no interferir con stdout)
@@ -139,7 +147,12 @@ MCP_USER_LIMIT = 30       # tool calls/min per user
 
 @asynccontextmanager
 async def lifespan(app):
-    """Lifespan: cleanup rate limiter every 5 min."""
+    """Lifespan: init asyncpg pool + cleanup rate limiter every 5 min."""
+    from database import init_pool, close_pool
+
+    await init_pool()
+    logger.info("Gateway: asyncpg pool inicializado")
+
     async def _cleanup_loop():
         while True:
             await asyncio.sleep(300)
@@ -148,6 +161,8 @@ async def lifespan(app):
     task = asyncio.create_task(_cleanup_loop())
     yield
     task.cancel()
+    await close_pool()
+    logger.info("Gateway: asyncpg pool cerrado")
 
 # Store de sesiones activas (en producción usar Redis)
 sessions: Dict[str, Dict[str, Any]] = {}
@@ -227,6 +242,31 @@ Para ver historial completo → get_case_history con el case_id.""",
                     "sector_filter": {"type": "string", "description": "Filtrar por sector (usar acronym del sector, ej: HAC, LEGAL)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "cases": {
+                        "type": "array",
+                        "description": "Lista de expedientes encontrados",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "case_id": {"type": "string"},
+                                "case_number": {"type": "string"},
+                                "reference": {"type": "string"},
+                                "status": {"type": "string"},
+                                "ai_summary": {"type": "string"},
+                                "short_ai_summary": {"type": "string"},
+                                "created_at": {"type": "string"}
+                            }
+                        }
+                    },
+                    "total": {"type": "integer", "description": "Total de expedientes encontrados"},
+                    "page": {"type": "integer"},
+                    "page_size": {"type": "integer"},
+                    "total_pages": {"type": "integer"}
+                }
             }
         },
         {
@@ -245,9 +285,27 @@ RESPUESTA: case_number, reference (asunto), template (tipo de expediente), admin
                 "properties": {
                     "case_id": {"type": "string", "description": "UUID del expediente (obtenido de search_cases)"},
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"},
-                    "include_documents": {"type": "boolean", "description": "true para incluir lista de documentos oficiales y propuestos", "default": False}
+                    "include_documents": {"type": "boolean", "description": "true para incluir lista de documentos oficiales y propuestos", "default": False},
+                    "include_movements": {"type": "boolean", "description": "true para incluir lista plana de movimientos (sin ai_summary, distinto de get_case_history)", "default": False}
                 },
                 "required": ["case_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string"},
+                    "case_number": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "status": {"type": "string"},
+                    "template": {"type": "object", "description": "Tipo/template del expediente"},
+                    "admin_sector": {"type": "object", "description": "Sector administrador actual"},
+                    "assigned_sectors": {"type": "array", "items": {"type": "object"}, "description": "Sectores con acceso"},
+                    "ai_summary": {"type": "string"},
+                    "short_ai_summary": {"type": "string"},
+                    "created_at": {"type": "string"},
+                    "documents": {"type": "object", "description": "Documentos vinculados (solo si include_documents=true)"},
+                    "movements": {"type": "object", "description": "Movimientos del expediente (solo si include_movements=true)"}
+                }
             }
         },
         {
@@ -288,6 +346,29 @@ Se realizó inspección que verificó: matafuegos vigentes, salida de emergencia
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["case_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string"},
+                    "case_number": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "ai_summary": {"type": "string", "description": "Resumen inteligente del expediente"},
+                    "short_ai_summary": {"type": "string"},
+                    "movements": {
+                        "type": "array",
+                        "description": "Historial cronológico de movimientos",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "created_at": {"type": "string"},
+                                "message": {"type": "string"},
+                                "resume": {"type": "string", "description": "Resumen IA del documento asociado"}
+                            }
+                        }
+                    },
+                    "documents": {"type": "array", "items": {"type": "object"}}
+                }
             }
         },
         {
@@ -310,6 +391,23 @@ NOTA: Para ver el contenido de un documento específico, usa get_document con el
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["case_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "official": {
+                        "type": "array",
+                        "description": "Documentos oficiales firmados",
+                        "items": {"type": "object"}
+                    },
+                    "proposed": {
+                        "type": "array",
+                        "description": "Documentos propuestos (borradores)",
+                        "items": {"type": "object"}
+                    },
+                    "total_official": {"type": "integer"},
+                    "total_proposed": {"type": "integer"}
+                }
             }
         },
         {
@@ -334,6 +432,19 @@ RESPUESTA (booleanos):
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["case_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "can_view": {"type": "boolean"},
+                    "can_transfer": {"type": "boolean"},
+                    "can_assign": {"type": "boolean"},
+                    "can_archive": {"type": "boolean"},
+                    "can_link_documents": {"type": "boolean"},
+                    "can_create_movements": {"type": "boolean"},
+                    "can_subsanar": {"type": "boolean"},
+                    "ownership_level": {"type": "string", "description": "owner, creator, participant o viewer"}
+                }
             }
         },
         # ===== DOCUMENTS (Documentos) =====
@@ -354,7 +465,7 @@ EJEMPLOS DE BÚSQUEDA:
 - "¿Dónde mencionamos calle Belgrano?" → search="Belgrano"
 
 FILTROS:
-- status: pending (borrador), sent_to_sign (en firma), signed (oficial), rejected
+- status: "En edición" (borrador/rechazado), "Firmar ahora" (te toca firmar), "En proceso de firma" (esperando otros), "Firmado" (oficial)
 - document_type: INF, DICT, CAEX, etc.
 
 EJEMPLO DE RESPUESTA AL USUARIO para "¿Qué tengo en mi buzón?":
@@ -372,11 +483,37 @@ Para contenido completo → get_document_content.""",
                     "page": {"type": "integer", "description": "Página (default 1)", "default": 1},
                     "page_size": {"type": "integer", "description": "Resultados por página (default 20, max 100)", "default": 20},
                     "search": {"type": "string", "description": "Buscar por número de documento (ej: INF-2026-00001234)"},
-                    "status": {"type": "string", "description": "Filtrar por estado", "enum": ["pending", "sent_to_sign", "signed", "rejected"]},
+                    "status": {"type": "string", "description": "Filtrar por estado visual. Valores: \"En edición\" (borradores y rechazados), \"Firmar ahora\" (te toca firmar), \"En proceso de firma\" (esperando otros firmantes), \"Firmado\" (documentos oficiales).", "enum": ["En edición", "Firmar ahora", "En proceso de firma", "Firmado"]},
                     "document_type": {"type": "string", "description": "Filtrar por tipo de documento (acronym, ej: INF, DICT, CAEX). Usa get_document_types para ver tipos disponibles."},
-                    "case_id": {"type": "string", "description": "Filtrar documentos vinculados a un expediente específico"}
+                    "case_id": {"type": "string", "description": "Filtrar documentos vinculados a un expediente específico"},
+                    "min_signers": {"type": "integer", "description": "Filtrar documentos con mínimo N firmantes (ej: 2 para docs con 2 o más firmas)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "documents": {
+                        "type": "array",
+                        "description": "Lista de documentos",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string"},
+                                "reference": {"type": "string"},
+                                "display_status": {"type": "string"},
+                                "last_modified_at": {"type": "string", "format": "date-time"},
+                                "acronym": {"type": "string"},
+                                "official_number": {"type": "string"},
+                                "signers": {"type": "array"}
+                            }
+                        }
+                    },
+                    "pagination": {
+                        "type": "object",
+                        "description": "Info de paginación: total, page, page_size, total_pages, has_next, has_previous"
+                    }
+                }
             }
         },
         {
@@ -410,6 +547,23 @@ FLUJO RECOMENDADO:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["document_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "state_category": {"type": "string", "description": "editing o signing"},
+                    "status": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "document_type": {"type": "object"},
+                    "ai_summary": {"type": "string", "description": "Resumen IA del contenido"},
+                    "short_resume": {"type": "string"},
+                    "details": {"type": "object", "description": "Firmantes, fechas, etc."},
+                    "linked_case": {"type": "object", "description": "Expediente vinculado (o null)"},
+                    "official_number": {"type": "string", "description": "Número oficial (si está firmado)"},
+                    "created_at": {"type": "string"},
+                    "signed_at": {"type": "string"}
+                }
             }
         },
         # ===== SYSTEM (Catálogos del sistema) =====
@@ -434,6 +588,24 @@ Usa el acronym para filtrar en search_documents.""",
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_types": {
+                        "type": "array",
+                        "description": "Lista de tipos de documentos",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "acronym": {"type": "string"}
+                            }
+                        }
+                    },
+                    "total": {"type": "integer"}
+                }
             }
         },
         {
@@ -455,6 +627,19 @@ RESPUESTA:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "full_name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "profile_picture_url": {"type": "string"},
+                    "estado": {"type": "string"},
+                    "sector": {"type": "object", "description": "Sector actual con id, acronym, department_name"},
+                    "roles": {"type": "array", "items": {"type": "string"}},
+                    "additional_sectors": {"type": "array", "items": {"type": "object"}}
+                }
             }
         },
         {
@@ -488,6 +673,29 @@ RESPUESTA: Lista con:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "pending_signatures": {
+                        "type": "array",
+                        "description": "Documentos pendientes de firma",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string"},
+                                "reference": {"type": "string"},
+                                "document_number": {"type": "string"},
+                                "document_type": {"type": "object"},
+                                "signer_role": {"type": "string", "description": "signer o numerator"},
+                                "signing_order": {"type": "integer"},
+                                "sent_to_sign_at": {"type": "string"},
+                                "creator": {"type": "object"}
+                            }
+                        }
+                    },
+                    "total": {"type": "integer"}
+                }
             }
         },
         {
@@ -524,6 +732,23 @@ FLUJO RECOMENDADO:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["document_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "official_number": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "signed_at": {"type": "string"},
+                    "content": {
+                        "type": "object",
+                        "description": "Contenido del documento",
+                        "properties": {
+                            "html": {"type": "string", "description": "Texto HTML completo del documento"}
+                        }
+                    },
+                    "document_type": {"type": "object"}
+                }
             }
         },
         # ===== GUÍA PARA AGENTES =====
@@ -546,6 +771,15 @@ NO REQUIERE PARÁMETROS - funciona sin autenticación.""",
                 "type": "object",
                 "properties": {},
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "guide": {"type": "string", "description": "Texto completo de la guía en Markdown"},
+                    "version": {"type": "string"},
+                    "tools_count": {"type": "integer"},
+                    "last_updated": {"type": "string"}
+                }
             }
         },
         # ===== MULTI-TENANT =====
@@ -575,6 +809,24 @@ NO REQUIERE tenant_id - funciona solo con OAuth.""",
                 "type": "object",
                 "properties": {},
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenants": {
+                        "type": "array",
+                        "description": "Lista de municipalidades disponibles",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tenant_id": {"type": "string"},
+                                "name": {"type": "string"}
+                            }
+                        }
+                    },
+                    "total": {"type": "integer"},
+                    "hint": {"type": "string"}
+                }
             }
         },
         # ===== NUEVOS TOOLS DE OPERACIONES =====
@@ -625,6 +877,16 @@ FLUJO TÍPICO:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["document_type_acronym", "reference"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "document_id": {"type": "string"},
+                    "status": {"type": "string", "description": "Estado del documento (draft)"},
+                    "message": {"type": "string"},
+                    "linked_to_case": {"type": "string", "description": "UUID del expediente vinculado (si se proporcionó case_id)"}
+                }
             }
         },
         {
@@ -683,6 +945,15 @@ RESPUESTA:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["document_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "document_id": {"type": "string"},
+                    "message": {"type": "string"},
+                    "last_modified_at": {"type": "string"}
+                }
             }
         },
         {
@@ -711,6 +982,13 @@ IMPORTANTE: Una vez iniciada la firma, el documento no puede editarse.""",
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["document_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string", "description": "Mensaje de confirmación"}
+                }
             }
         },
         # ===== EXPEDIENTES (Operaciones) =====
@@ -731,6 +1009,19 @@ Retorna null si no existe.""",
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["case_number"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string"},
+                    "case_number": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "status": {"type": "string"},
+                    "template": {"type": "object"},
+                    "admin_sector": {"type": "object"},
+                    "ai_summary": {"type": "string"},
+                    "created_at": {"type": "string"}
+                }
             }
         },
         {
@@ -751,6 +1042,25 @@ RESPUESTA:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["case_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "status": {"type": "string", "description": "OK o NOT_ALLOWED"},
+                    "user_sectors_in_case": {
+                        "type": "array",
+                        "description": "Sectores del usuario en el expediente",
+                        "items": {"type": "object"}
+                    },
+                    "available_sectors": {
+                        "type": "array",
+                        "description": "Sectores disponibles como destino",
+                        "items": {"type": "object"}
+                    },
+                    "total": {"type": "integer"},
+                    "total_available_sectors": {"type": "integer"}
+                }
             }
         },
         {
@@ -780,6 +1090,18 @@ IMPORTANTE: La asignación NO transfiere propiedad. El sector original mantiene 
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["case_id", "target_sector_id", "reason"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "movement_id": {"type": "string"},
+                    "case_number": {"type": "string"},
+                    "action_type": {"type": "string", "description": "asignado"},
+                    "target_sector": {"type": "string"},
+                    "target_department": {"type": "string"},
+                    "official_document": {"type": "object", "description": "Info del PV generado (si create_official_doc=true)"}
+                }
             }
         },
         # ===== SISTEMA (Catálogos adicionales) =====
@@ -807,6 +1129,18 @@ ESTADOS COMUNES:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "states": {
+                        "type": "array",
+                        "description": "Lista de estados con display_state y code",
+                        "items": {"type": "object"}
+                    },
+                    "mappings": {"type": "object", "description": "Diccionario código → nombre"},
+                    "total": {"type": "integer"}
+                }
             }
         },
         # ===== NUEVOS TOOLS - FASE 2 =====
@@ -833,6 +1167,13 @@ IMPORTANTE: El documento vuelve a estado 'rejected' y el creador puede corregirl
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
                 },
                 "required": ["document_id", "reason"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string", "description": "Mensaje de confirmación"}
+                }
             }
         },
         # ===== EXPEDIENTES (Operaciones nuevas) =====
@@ -853,6 +1194,15 @@ NOTA: A diferencia de link_document_to_case, esto propone un BORRADOR que luego 
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
                 },
                 "required": ["case_id", "document_draft_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "case_id": {"type": "string"},
+                    "document_draft_id": {"type": "string"},
+                    "message": {"type": "string", "description": "Mensaje de confirmación"}
+                }
             }
         },
         {
@@ -868,6 +1218,13 @@ Desactiva la propuesta. El documento no se elimina.""",
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
                 },
                 "required": ["case_id", "proposed_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string", "description": "Mensaje de confirmación"}
+                }
             }
         },
         # ===== SISTEMA (Catalogos nuevos) =====
@@ -884,6 +1241,25 @@ USA ESTA TOOL PARA:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "templates": {
+                        "type": "array",
+                        "description": "Lista de plantillas de expedientes",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "acronym": {"type": "string"},
+                                "description": {"type": "string"}
+                            }
+                        }
+                    },
+                    "total": {"type": "integer"}
+                }
             }
         },
         {
@@ -905,6 +1281,23 @@ PARAMETROS:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
                 },
                 "required": ["search"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "users": {
+                        "type": "array",
+                        "description": "Lista de usuarios encontrados",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "full_name": {"type": "string"},
+                                "sector": {"type": "string", "description": "Sector en formato DEPT#SECTOR"}
+                            }
+                        }
+                    },
+                    "total_found": {"type": "integer"}
+                }
             }
         },
         # ===== NOTAS =====
@@ -930,6 +1323,30 @@ PARAMETROS:
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a multiples organizaciones)"}
                 },
                 "required": []
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "notes": {
+                        "type": "array",
+                        "description": "Lista de notas recibidas",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string"},
+                                "official_number": {"type": "string"},
+                                "reference": {"type": "string"},
+                                "sender": {"type": "object"},
+                                "is_read": {"type": "boolean"},
+                                "signed_at": {"type": "string"}
+                            }
+                        }
+                    },
+                    "pagination": {
+                        "type": "object",
+                        "description": "Info de paginacion: page, page_size, total, total_pages"
+                    }
+                }
             }
         },
         # ===== NUEVOS TOOLS - FASE 3 =====
@@ -943,6 +1360,24 @@ PARAMETROS:
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 },
                 "required": ["doc_number"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "found": {"type": "boolean", "description": "Si el documento fue encontrado"},
+                    "document": {
+                        "type": "object",
+                        "description": "Datos del documento oficial (o null si no encontrado)",
+                        "properties": {
+                            "document_id": {"type": "string"},
+                            "official_number": {"type": "string"},
+                            "reference": {"type": "string"},
+                            "document_type": {"type": "object"},
+                            "signed_at": {"type": "string"}
+                        }
+                    },
+                    "search_term": {"type": "string"}
+                }
             }
         },
         {
@@ -955,6 +1390,23 @@ PARAMETROS:
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 },
                 "required": ["document_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "document": {"type": "object", "description": "Info del documento"},
+                    "current_signer": {"type": "object", "description": "Firmante actual (o null)"},
+                    "signature_progress": {
+                        "type": "object",
+                        "description": "Progreso de la firma",
+                        "properties": {
+                            "signed_count": {"type": "integer"},
+                            "total_count": {"type": "integer"},
+                            "signers": {"type": "array", "items": {"type": "object"}}
+                        }
+                    },
+                    "can_sign": {"type": "boolean", "description": "Si el usuario actual puede firmar"}
+                }
             }
         },
         {
@@ -967,6 +1419,29 @@ PARAMETROS:
                     "page_size": {"type": "integer", "default": 20, "description": "Resultados por pagina (max 100)"},
                     "search": {"type": "string", "description": "Buscar en contenido de notas"},
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
+                }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "notes": {
+                        "type": "array",
+                        "description": "Lista de notas enviadas",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string"},
+                                "official_number": {"type": "string"},
+                                "reference": {"type": "string"},
+                                "recipients": {"type": "array", "items": {"type": "object"}},
+                                "signed_at": {"type": "string"}
+                            }
+                        }
+                    },
+                    "pagination": {
+                        "type": "object",
+                        "description": "Info de paginacion: page, page_size, total, total_pages"
+                    }
                 }
             }
         },
@@ -981,6 +1456,13 @@ PARAMETROS:
                     "search": {"type": "string", "description": "Buscar en contenido de notas"},
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "notes": {"type": "array", "description": "Lista de notas archivadas", "items": {"type": "object"}},
+                    "pagination": {"type": "object", "description": "page, page_size, total, total_pages"}
+                }
             }
         },
         {
@@ -993,6 +1475,23 @@ PARAMETROS:
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 },
                 "required": ["note_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "official_number": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "content": {"type": "string"},
+                    "signed_at": {"type": "string"},
+                    "ai_summary": {"type": "string"},
+                    "signers": {"type": "array"},
+                    "document_type": {"type": "object", "description": "name, acronym"},
+                    "department_name": {"type": "string"},
+                    "recipients": {"type": "object"},
+                    "my_access": {"type": "object", "description": "is_sender, recipient_type, is_archived, opened_at"},
+                    "openings": {"type": "array", "description": "Solo si el usuario es el remitente"}
+                }
             }
         },
         # ===== MEMOS =====
@@ -1007,6 +1506,13 @@ PARAMETROS:
                     "search": {"type": "string", "description": "Buscar en contenido de memos"},
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "memos": {"type": "array", "description": "Lista de memos recibidos", "items": {"type": "object"}},
+                    "pagination": {"type": "object", "description": "page, page_size, total, total_pages"}
+                }
             }
         },
         {
@@ -1019,6 +1525,13 @@ PARAMETROS:
                     "page_size": {"type": "integer", "default": 20, "description": "Resultados por pagina (max 100)"},
                     "search": {"type": "string", "description": "Buscar en contenido de memos"},
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
+                }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "memos": {"type": "array", "description": "Lista de memos enviados", "items": {"type": "object"}},
+                    "pagination": {"type": "object", "description": "page, page_size, total, total_pages"}
                 }
             }
         },
@@ -1033,6 +1546,13 @@ PARAMETROS:
                     "search": {"type": "string", "description": "Buscar en contenido de memos"},
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "memos": {"type": "array", "description": "Lista de memos archivados", "items": {"type": "object"}},
+                    "pagination": {"type": "object", "description": "page, page_size, total, total_pages"}
+                }
             }
         },
         {
@@ -1045,6 +1565,23 @@ PARAMETROS:
                     "tenant_id": {"type": "string", "description": "ID del tenant (opcional si solo tienes uno)"}
                 },
                 "required": ["memo_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "official_number": {"type": "string"},
+                    "reference": {"type": "string"},
+                    "content": {"type": "string"},
+                    "signed_at": {"type": "string"},
+                    "ai_summary": {"type": "string"},
+                    "signers": {"type": "array"},
+                    "document_type": {"type": "object", "description": "name, acronym"},
+                    "department_name": {"type": "string"},
+                    "recipients": {"type": "object"},
+                    "my_access": {"type": "object", "description": "is_sender, recipient_type, is_archived, opened_at"},
+                    "openings": {"type": "array", "description": "Solo si el usuario es el remitente"}
+                }
             }
         },
         # ===== LEGAJOS (RLM) =====
@@ -1074,6 +1611,16 @@ RESPUESTA: Lista de legajos con número, estado, registro, creador, resume (resu
                     "page_size": {"type": "integer", "default": 20, "description": "Resultados por página (max 100)"},
                     "tenant_id": {"type": "string", "description": "UUID del tenant (opcional si solo tienes uno)"}
                 }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "records": {"type": "array", "description": "Lista de legajos", "items": {"type": "object"}},
+                    "total": {"type": "integer"},
+                    "page": {"type": "integer"},
+                    "page_size": {"type": "integer"},
+                    "total_pages": {"type": "integer"}
+                }
             }
         },
         {
@@ -1092,6 +1639,23 @@ RESPUESTA: Detalle con datos enriquecidos, estado, registro, permisos del usuari
                     "tenant_id": {"type": "string", "description": "UUID del tenant (opcional si solo tienes uno)"}
                 },
                 "required": ["record_id"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "record_number": {"type": "string"},
+                    "display_name": {"type": "string"},
+                    "state": {"type": "string"},
+                    "data": {"type": "object", "description": "Campos del legajo según data_schema de la familia"},
+                    "resume": {"type": "string", "description": "Resumen IA del legajo"},
+                    "next_expiration": {"type": "string"},
+                    "created_at": {"type": "string"},
+                    "updated_at": {"type": "string"},
+                    "registry": {"type": "object", "description": "id, code, name, data_schema, allowed_states"},
+                    "created_by": {"type": "object", "description": "user_id, name, sector, department"},
+                    "permissions": {"type": "object", "description": "can_view, can_edit, can_delete"}
+                }
             }
         },
         {
@@ -1107,6 +1671,13 @@ RESPUESTA: Lista de familias con código, nombre, data_schema y permisos del usu
                 "type": "object",
                 "properties": {
                     "tenant_id": {"type": "string", "description": "UUID del tenant (opcional si solo tienes uno)"}
+                }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "registries": {"type": "array", "description": "Lista de familias de registro con code, name, data_schema, permissions", "items": {"type": "object"}},
+                    "total": {"type": "integer", "description": "Total de familias disponibles"}
                 }
             }
         },
@@ -1130,16 +1701,120 @@ official_number, reference, y vinculaciones a expedientes y legajos.
 
 PARAMETROS:
 - query: Texto de búsqueda (3-500 caracteres)
-- limit: Cantidad máxima de resultados (default 6, max 50)""",
+- limit: Cantidad máxima de resultados (default 20, max 50)""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Texto de búsqueda semántica (3-500 caracteres)", "minLength": 3, "maxLength": 500},
-                    "limit": {"type": "integer", "description": "Cantidad máxima de resultados (default 6, max 50)", "default": 6, "minimum": 1, "maximum": 50},
+                    "limit": {"type": "integer", "description": "Cantidad máxima de resultados (default 20, max 50)", "default": 20, "minimum": 1, "maximum": 50},
                     "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tienes acceso a múltiples organizaciones)"}
                 },
                 "required": ["query"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "query": {"type": "string", "description": "Query original"},
+                    "rewritten_query": {"type": "string", "description": "Query reescrita por IA para mejorar la búsqueda"},
+                    "intent": {"type": "string", "description": "Tipo de búsqueda: 'rag' (semántica) o 'lookup' (por número exacto)"},
+                    "results": {
+                        "type": "array",
+                        "description": "Documentos encontrados ordenados por relevancia",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string"},
+                                "official_number": {"type": "string"},
+                                "document_type": {"type": "string"},
+                                "reference": {"type": "string"},
+                                "short_resume": {"type": "string"},
+                                "similarity": {"type": "number", "description": "Similitud coseno 0-1"},
+                                "chunk_text": {"type": "string", "description": "Fragmento relevante del documento"},
+                                "linked_cases": {"type": "array"},
+                                "linked_records": {"type": "array"}
+                            }
+                        }
+                    },
+                    "total": {"type": "integer"}
+                }
             }
+        },
+
+        # ── S8-013: Responsables de expediente ────────────────────────────────
+        {
+            "name": "get_case_responsibles",
+            "description": """Lista los responsables activos de un expediente.
+
+Devuelve el responsable ADMIN (titular) y los responsables ADDITIONAL asignados.
+
+USAR PARA:
+- "¿Quién es responsable del expediente X?"
+- "¿Qué usuarios están asignados al expediente Y?"
+- Verificar antes de agregar un nuevo responsable
+
+RESPUESTA: { admin: {...}, additional: [...] }""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string", "description": "UUID del expediente"},
+                    "user_id": {"type": "string", "description": "UUID del usuario que consulta (se inyecta automáticamente)"},
+                    "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tenés acceso a múltiples organizaciones)"},
+                },
+                "required": ["case_id"],
+            },
+        },
+        {
+            "name": "add_case_responsible",
+            "description": """Agrega un responsable a un expediente.
+
+Permite asignar usuarios como responsables ADMIN o ADDITIONAL de un expediente.
+
+USAR PARA:
+- "Asignar a Juan como responsable del expediente X"
+- "Agregar a María como colaboradora del expediente Y"
+
+TIPOS:
+- ADMIN: responsable principal (reemplaza al actual)
+- ADDITIONAL: responsable adicional/colaborador
+
+NOTA: Requiere permiso de edición sobre el expediente.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string", "description": "UUID del expediente"},
+                    "responsible_user_id": {"type": "string", "description": "UUID del usuario a agregar como responsable"},
+                    "responsible_type": {"type": "string", "enum": ["ADMIN", "ADDITIONAL"], "description": "Tipo de responsabilidad"},
+                    "sector_id": {"type": "string", "description": "UUID del sector del usuario responsable"},
+                    "reason": {"type": "string", "description": "Motivo de la asignación (opcional)"},
+                    "user_id": {"type": "string", "description": "UUID del usuario que realiza la acción (se inyecta automáticamente)"},
+                    "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tenés acceso a múltiples organizaciones)"},
+                },
+                "required": ["case_id", "responsible_user_id", "responsible_type", "sector_id"],
+            },
+        },
+        {
+            "name": "remove_case_responsible",
+            "description": """Quita un responsable de un expediente (soft delete).
+
+USAR PARA:
+- "Quitar a Juan como responsable del expediente X"
+- "Remover al colaborador Y del expediente Z"
+
+NOTA: Requiere el `responsible_id` (ID del registro de responsable, no el user_id).
+      Usá `get_case_responsibles` primero para obtener los IDs.
+      Requiere permiso de edición sobre el expediente.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "case_id": {"type": "string", "description": "UUID del expediente"},
+                    "responsible_id": {"type": "string", "description": "UUID del registro de responsable (de get_case_responsibles)"},
+                    "reason": {"type": "string", "description": "Motivo de la remoción (opcional)"},
+                    "user_id": {"type": "string", "description": "UUID del usuario que realiza la acción (se inyecta automáticamente)"},
+                    "tenant_id": {"type": "string", "description": "UUID de la municipalidad (requerido si tenés acceso a múltiples organizaciones)"},
+                },
+                "required": ["case_id", "responsible_id"],
+            },
         },
     ]
 
@@ -1157,12 +1832,12 @@ async def handle_list_my_tenants(request_id: Any, authorization_header: str) -> 
         return create_jsonrpc_error(request_id, -32001, "Autenticación requerida. Usa OAuth para conectar.")
 
     token = authorization_header[7:]
-    email = extract_email_from_token(token)
+    email = await extract_email_from_token(token)
 
     if not email:
         return create_jsonrpc_error(request_id, -32001, "No se pudo obtener email del token")
 
-    tenants = find_user_all_tenants(email)
+    tenants = await find_user_all_tenants(email)
 
     result = {
         "tenants": [
@@ -1244,7 +1919,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         # =====================================================================
         if authorization_header and authorization_header.startswith("Bearer "):
             try:
-                ctx, jwt_user_id = validate_mcp_jwt(authorization_header, tenant_id=tenant_id)
+                ctx, jwt_user_id = await validate_mcp_jwt(authorization_header, tenant_id=tenant_id)
                 logger.info(f"[Auth0] Autenticación exitosa: user_id={jwt_user_id[:8]}..., schema={ctx.schema_name}")
             except MultiTenantSelectionRequired as e:
                 # Usuario tiene múltiples tenants y no especificó tenant_id
@@ -1259,7 +1934,9 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                                 {
                                     "tenant_id": str(t["municipality_id"]),
                                     "name": t["municipality_name"],
-                                    "schema": t["schema_name"]
+                                    # SEC-31: "schema" removido — el schema_name es un detalle
+                                    # interno de BD que no debe exponerse al cliente MCP.
+                                    # El tenant_id (UUID) es el identificador público.
                                 }
                                 for t in e.tenants
                             ],
@@ -1294,7 +1971,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             # MIT-1: Validar que el usuario existe y está activo en el tenant
             try:
                 from shared.utils import get_authenticated_user
-                get_authenticated_user(jwt_user_id, schema_name=ctx.schema_name)
+                await get_authenticated_user(jwt_user_id, schema_name=ctx.schema_name)
             except ValidationError as e:
                 logger.warning(f"[Auth0] user_id {jwt_user_id[:8]}... inválido o inactivo: {e}")
                 return create_jsonrpc_error(
@@ -1328,7 +2005,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         result = None
 
         if tool_name == "search_cases":
-            result = cases.search_cases(
+            result = await cases.search_cases(
                 ctx=ctx,
                 page=int(arguments.get("page", 1)),
                 page_size=int(arguments.get("page_size", 20)),
@@ -1340,36 +2017,38 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_case":
-            result = cases.get_case(
+            result = await cases.get_case(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 user_id=arguments["user_id"],
-                include_documents=arguments.get("include_documents", False)
+                include_documents=arguments.get("include_documents", False),
+                include_movements=arguments.get("include_movements", False),
             )
 
         elif tool_name == "get_case_history":
-            result = cases.get_case_history(
+            result = await cases.get_case_history(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_case_documents":
-            result = cases.get_case_documents(
+            result = await cases.get_case_documents(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_case_permissions":
-            result = cases.get_case_permissions(
+            result = await cases.get_case_permissions(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 user_id=arguments["user_id"]
             )
 
         elif tool_name == "search_documents":
-            result = documents.search_documents(
+            _min_signers_raw = arguments.get("min_signers")
+            result = await documents.search_documents(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1377,7 +2056,8 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
                 search=arguments.get("search"),
                 status=arguments.get("status"),
                 document_type=arguments.get("document_type"),
-                case_id=arguments.get("case_id")
+                case_id=arguments.get("case_id"),
+                min_signers=int(_min_signers_raw) if _min_signers_raw is not None else None,
             )
 
         elif tool_name == "get_document":
@@ -1388,24 +2068,24 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_document_types":
-            result = system.get_document_types(ctx=ctx)
+            result = await system.get_document_types(ctx=ctx)
 
 
         elif tool_name == "get_user_info":
-            result = system.get_user_info(
+            result = await system.get_user_info(
                 ctx=ctx,
                 user_id=arguments["user_id"]
             )
 
 
         elif tool_name == "get_pending_signatures":
-            result = documents.get_pending_signatures(
+            result = await documents.get_pending_signatures(
                 ctx=ctx,
                 user_id=arguments["user_id"]
             )
 
         elif tool_name == "get_document_content":
-            result = documents.get_document_content(
+            result = await documents.get_document_content(
                 ctx=ctx,
                 document_id=arguments["document_id"],
                 user_id=arguments["user_id"]
@@ -1415,7 +2095,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # Documentos (Escritura)
         elif tool_name == "create_document":
-            result = documents.create_document(
+            result = await documents.create_document(
                 ctx=ctx,
                 document_type_acronym=arguments["document_type_acronym"],
                 reference=arguments["reference"],
@@ -1425,7 +2105,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "save_document":
-            result = documents.save_document(
+            result = await documents.save_document(
                 ctx=ctx,
                 document_id=arguments["document_id"],
                 user_id=arguments["user_id"],
@@ -1445,7 +2125,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # Expedientes (Operaciones)
         elif tool_name == "get_case_by_number":
-            result = cases.get_case_by_number(
+            result = await cases.get_case_by_number(
                 ctx=ctx,
                 case_number=arguments["case_number"],
                 user_id=arguments["user_id"]
@@ -1453,7 +2133,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
 
         elif tool_name == "prepare_assignment":
-            result = cases.prepare_assignment(
+            result = await cases.prepare_assignment(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 user_id=arguments["user_id"]
@@ -1472,13 +2152,13 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # Sistema (Catálogos)
         elif tool_name == "get_document_states":
-            result = system.get_document_states(ctx=ctx)
+            result = await system.get_document_states(ctx=ctx)
 
         # ===== NUEVOS TOOLS - FASE 2 =====
 
         # Documentos (Firma/Rechazo/Eliminacion)
         elif tool_name == "reject_document":
-            result = documents.reject_document(
+            result = await documents.reject_document(
                 ctx=ctx,
                 document_id=arguments["document_id"],
                 user_id=arguments["user_id"],
@@ -1487,7 +2167,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # Expedientes (Operaciones nuevas)
         elif tool_name == "propose_document":
-            result = cases.propose_document(
+            result = await cases.propose_document(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 document_draft_id=arguments["document_draft_id"],
@@ -1495,7 +2175,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "reject_proposal":
-            result = cases.reject_proposal(
+            result = await cases.reject_proposal(
                 ctx=ctx,
                 case_id=arguments["case_id"],
                 proposed_id=arguments["proposed_id"],
@@ -1504,13 +2184,13 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # Sistema (Catalogos nuevos)
         elif tool_name == "get_case_templates":
-            result = system.get_case_templates(
+            result = await system.get_case_templates(
                 ctx=ctx,
                 user_id=arguments["user_id"]
             )
 
         elif tool_name == "search_users":
-            result = system.search_users(
+            result = await system.search_users(
                 ctx=ctx,
                 search=arguments["search"],
                 limit=int(arguments.get("limit", 10))
@@ -1518,7 +2198,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # Notas
         elif tool_name == "get_notes":
-            result = notes.get_notes(
+            result = await notes.get_notes(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1530,7 +2210,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
         # ===== NUEVOS TOOLS - FASE 3 =====
 
         elif tool_name == "search_document_by_number":
-            result = documents.search_document_by_number(
+            result = await documents.search_document_by_number(
                 ctx=ctx,
                 doc_number=arguments.get("doc_number", ""),
                 user_id=arguments["user_id"]
@@ -1544,7 +2224,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_sent_notes":
-            result = notes.get_sent_notes(
+            result = await notes.get_sent_notes(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1553,7 +2233,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_archived_notes":
-            result = notes.get_archived_notes(
+            result = await notes.get_archived_notes(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1562,7 +2242,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_note_detail":
-            result = notes.get_note_detail(
+            result = await notes.get_note_detail(
                 ctx=ctx,
                 note_id=arguments.get("note_id", ""),
                 user_id=arguments["user_id"]
@@ -1570,7 +2250,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # ===== MEMOS =====
         elif tool_name == "get_memos":
-            result = memos.get_memos(
+            result = await memos.get_memos(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1579,7 +2259,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_sent_memos":
-            result = memos.get_sent_memos_tool(
+            result = await memos.get_sent_memos_tool(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1588,7 +2268,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_archived_memos":
-            result = memos.get_archived_memos_tool(
+            result = await memos.get_archived_memos_tool(
                 ctx=ctx,
                 user_id=arguments["user_id"],
                 page=int(arguments.get("page", 1)),
@@ -1597,7 +2277,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_memo_detail":
-            result = memos.get_memo_detail(
+            result = await memos.get_memo_detail(
                 ctx=ctx,
                 memo_id=arguments.get("memo_id", ""),
                 user_id=arguments["user_id"]
@@ -1605,7 +2285,7 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
 
         # ===== LEGAJOS (RLM) =====
         elif tool_name == "search_records":
-            result = records.search_records(
+            result = await records.search_records(
                 ctx=ctx,
                 family_code=arguments.get("family_code"),
                 search=arguments.get("search"),
@@ -1615,19 +2295,48 @@ async def handle_call_tool(request_id: Any, params: Dict, authorization_header: 
             )
 
         elif tool_name == "get_record":
-            result = records.get_record_detail(
+            result = await records.get_record_detail(
                 ctx=ctx,
                 record_id=arguments.get("record_id", ""),
             )
 
         elif tool_name == "get_registry_families":
-            result = records.get_registry_families(ctx=ctx)
+            result = await records.get_registry_families(ctx=ctx)
 
         elif tool_name == "semantic_search":
-            result = search.semantic_search_tool(
+            result = await search.semantic_search_tool(
                 ctx=ctx,
                 query=arguments["query"],
-                limit=int(arguments.get("limit", 6))
+                limit=int(arguments.get("limit", 20)),
+                source="mcp",
+            )
+
+        # ── S8-013: Responsables ──────────────────────────────────────────────
+        elif tool_name == "get_case_responsibles":
+            result = await cases.get_case_responsibles_list(
+                ctx=ctx,
+                case_id=arguments["case_id"],
+                user_id=arguments["user_id"],
+            )
+
+        elif tool_name == "add_case_responsible":
+            result = await cases.add_case_responsible(
+                ctx=ctx,
+                case_id=arguments["case_id"],
+                user_id=arguments["user_id"],
+                responsible_user_id=arguments["responsible_user_id"],
+                responsible_type=arguments["responsible_type"],
+                sector_id=arguments["sector_id"],
+                reason=arguments.get("reason", "Asignación de responsable"),
+            )
+
+        elif tool_name == "remove_case_responsible":
+            result = await cases.remove_case_responsible(
+                ctx=ctx,
+                case_id=arguments["case_id"],
+                responsible_id=arguments["responsible_id"],
+                user_id=arguments["user_id"],
+                reason=arguments.get("reason", "Remoción de responsable"),
             )
 
         else:
@@ -2653,6 +3362,26 @@ async def openapi_spec(request: Request) -> JSONResponse:
                     "security": [{"ApiKeyAuth": []}]
                 }
             },
+            "/api/v1/sync/documents": {
+                "get": {
+                    "operationId": "syncDocuments",
+                    "summary": "PDFs de documentos oficiales firmados con presigned URLs (Backup)",
+                    "description": "Requiere X-API-Key backup. Devuelve presigned URLs de R2 (TTL 600s). Solo documentos firmados (signed_at IS NOT NULL). since siempre obligatorio.",
+                    "parameters": [
+                        {"name": "since", "in": "query", "required": True, "schema": {"type": "string", "format": "date-time"}},
+                        {"name": "page", "in": "query", "required": False, "schema": {"type": "integer", "default": 1}},
+                        {"name": "page_size", "in": "query", "required": False, "schema": {"type": "integer", "default": 100, "maximum": 100}}
+                    ],
+                    "responses": {
+                        "200": {"description": "Lista de documentos con presigned URLs"},
+                        "400": {"description": "Parámetro since faltante o inválido"},
+                        "401": {"description": "Acceso denegado"},
+                        "403": {"description": "Origen no autorizado"},
+                        "429": {"description": "Rate limit (Retry-After header)"}
+                    },
+                    "security": [{"ApiKeyAuth": []}]
+                }
+            },
             # ===== RLM (Registro Legajo Multiproposito) =====
             "/api/v1/registries": {
                 "get": {
@@ -2986,13 +3715,33 @@ async def oauth_protected_resource_metadata(request: Request) -> JSONResponse:
     """
     RFC 9728: OAuth 2.0 Protected Resource Metadata.
 
-    Claude Code usa este endpoint para descubrir el Authorization Server (Auth0).
-    Auth0 tiene DCR habilitado, así que apuntamos directo.
+    Claude Code y otros clientes MCP usan este endpoint para descubrir:
+    1. El Authorization Server (Auth0)
+    2. El audience que deben incluir al solicitar el token
+
+    El campo "resource" es el audience que el cliente DEBE enviar a Auth0
+    al solicitar el token (audience param en /authorize). Auth0 emite entonces
+    un JWT real con ese audience, que luego verify_mcp_token puede validar.
+
+    Si MCP_RESOURCE_URI no está configurado en Fly, el endpoint retorna
+    un resource vacío que causará que los tokens sean rechazados — esto es
+    intencional para forzar la configuración correcta en producción.
     """
     auth0_domain = os.getenv("AUTH0_DOMAIN", "")
-    resource_uri = os.getenv("MCP_RESOURCE_URI", "http://localhost:8005")
+    resource_uri = os.getenv("MCP_RESOURCE_URI", "")
+
+    if not resource_uri:
+        logger.warning(
+            "[OAuth] MCP_RESOURCE_URI no configurado. "
+            "Los clientes MCP no podrán obtener un token con audience correcto. "
+            "Setear MCP_RESOURCE_URI en los secrets de Fly.io."
+        )
 
     return JSONResponse({
+        # "resource" es el audience que el cliente debe solicitar a Auth0.
+        # Claude Code y ChatGPT leen este campo (RFC 9728 §2) y lo incluyen
+        # como audience param en el flujo OAuth, garantizando que Auth0 emita
+        # un JWT con ese audience que el servidor puede validar.
         "resource": resource_uri,
         # Apuntamos directo a Auth0 (tiene DCR habilitado)
         "authorization_servers": [f"https://{auth0_domain}"],
@@ -3215,6 +3964,17 @@ routes = [
     Route("/api/v1/cases/{case_id}/assign", api_assign_case, methods=["POST"]),
     Route("/api/v1/cases/{case_id}/close-assign", api_close_assignment, methods=["POST"]),
 
+    # Cases (Expedientes - Responsables)
+    Route("/api/v1/cases/{case_id}/responsibles", api_get_case_responsibles, methods=["GET"]),
+    Route("/api/v1/cases/{case_id}/responsibles", api_add_case_responsible, methods=["POST"]),
+    Route("/api/v1/cases/{case_id}/responsibles/{responsible_id}", api_remove_case_responsible, methods=["DELETE"]),
+
+    # Cases (Expedientes - Subsanacion S8-011)
+    Route("/api/v1/cases/{case_id}/subsanar", api_subsanar_document, methods=["POST"]),
+
+    # Cases (Expedientes - Movimientos S8-014)
+    Route("/api/v1/cases/{case_id}/movements", api_get_case_movements, methods=["GET"]),
+
     # Cases (Expedientes - Operaciones nuevas)
     Route("/api/v1/cases/", api_create_case, methods=["POST"]),
     Route("/api/v1/cases/{case_id}/transfer", api_transfer_case, methods=["POST"]),
@@ -3269,10 +4029,14 @@ routes = [
     # === Backup Sync (X-API-Key con key_type='backup', sin X-User-ID) ===
     Route("/api/v1/sync/schema", api_sync_schema, methods=["GET"]),
     Route("/api/v1/sync/data", api_sync_data, methods=["GET"]),
+    Route("/api/v1/sync/documents", api_sync_documents, methods=["GET"]),
     # Busqueda semantica
     Route("/api/v1/search/semantic", api_semantic_search, methods=["GET"]),
     # Legajos (RLM)
+    # IMPORTANTE: rutas literales van ANTES que los patrones {record_id} para que
+    # Starlette las resuelva correctamente y no caigan en el handler de detalle.
     Route("/api/v1/records/search", api_search_records, methods=["GET"]),
+    Route("/api/v1/records/families", api_get_registry_families, methods=["GET"]),
     Route("/api/v1/records/{record_id}/fields/{field_name}/verify", api_verify_record_field, methods=["POST"]),
     Route("/api/v1/records/{record_id}/fields/{field_name}", api_update_record_field, methods=["PATCH"]),
     Route("/api/v1/records/{record_id}/history", api_get_record_history, methods=["GET"]),
@@ -3372,6 +4136,7 @@ if __name__ == "__main__":
     logger.info(f"Backup Sync API (X-API-Key backup, sin X-User-ID):")
     logger.info(f"  - GET /api/v1/sync/schema")
     logger.info(f"  - GET /api/v1/sync/data")
+    logger.info(f"  - GET /api/v1/sync/documents")
     logger.info("=" * 60)
 
     uvicorn.run(app, host="0.0.0.0", port=port)

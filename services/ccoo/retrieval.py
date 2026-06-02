@@ -5,7 +5,7 @@ Unifica notas y memos en consultas UNION ALL con paginacion server-side.
 
 from typing import Dict, Any
 from shared.logging import get_logger
-from database import get_db_connection
+from database import get_conn
 from services.shared.query_utils import escape_like, build_date_filter
 from .queries import (
     get_received_ccoo_query,
@@ -72,7 +72,7 @@ def _calc_total_pages(total: int, page_size: int) -> int:
     return (total + page_size - 1) // page_size if total > 0 else 1
 
 
-def get_received_ccoo(
+async def get_received_ccoo(
     sector_ids: list[str],
     user_id: str,
     *,
@@ -105,73 +105,61 @@ def get_received_ccoo(
         sector_ids = []
 
     offset = (page - 1) * page_size
-    date_where, date_params = build_date_filter(date_filter, date_from, date_to)
 
-    # Base params para named parameters
-    base_params = {
-        'sector_ids': sector_ids,
-        'user_id': user_id,
-        'limit': page_size,
-        'offset': offset,
-    }
+    async with get_conn(schema_name=schema_name) as conn:
+        if search:
+            search_pattern = f"%{escape_like(search)}%"
+            search_term = search.strip().lower()
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            if search:
-                search_pattern = f"%{escape_like(search)}%"
-                search_term = search.strip().lower()
-                search_params = {
-                    **base_params,
-                    'search_pattern': search_pattern,
-                    'search_term': search_term,
-                }
+            # Count: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term) -> date params desde $5
+            count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
+            count_row = await conn.fetchrow(
+                get_received_ccoo_search_count_query(date_where=count_where),
+                sector_ids, user_id, search_pattern, search_term, *count_date_params
+            )
+            total = count_row['total']
 
-                # Count
-                cursor.execute(
-                    get_received_ccoo_search_count_query(date_where=date_where),
-                    search_params
-                )
-                total = cursor.fetchone()['total']
+            # Data: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset) -> date params desde $7
+            data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=7)
+            rows = await conn.fetch(
+                get_received_ccoo_search_query(date_where=data_where),
+                sector_ids, user_id, search_pattern, search_term, page_size, offset, *data_date_params
+            )
+        else:
+            # Count: ($1=sector_ids, $2=user_id) -> date params desde $3
+            count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=3)
+            count_row = await conn.fetchrow(
+                get_received_ccoo_count_query(date_where=count_where),
+                sector_ids, user_id, *count_date_params
+            )
+            total = count_row['total']
 
-                # Data
-                cursor.execute(
-                    get_received_ccoo_search_query(date_where=date_where),
-                    search_params
-                )
-            else:
-                # Count
-                cursor.execute(
-                    get_received_ccoo_count_query(date_where=date_where),
-                    base_params
-                )
-                total = cursor.fetchone()['total']
-
-                # Data
-                cursor.execute(
-                    get_received_ccoo_query(date_where=date_where),
-                    base_params
-                )
-
-            rows = cursor.fetchall()
-            items = [_format_received_item(row) for row in rows]
-
-            logger.debug(
-                f"[{schema_name}] User {user_id}: {len(items)} CCOO recibidas "
-                f"(pagina {page}){' search=' + search if search else ''}"
+            # Data: ($1=sector_ids, $2=user_id, $3=limit, $4=offset) -> date params desde $5
+            data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
+            rows = await conn.fetch(
+                get_received_ccoo_query(date_where=data_where),
+                sector_ids, user_id, page_size, offset, *data_date_params
             )
 
-            return {
-                'items': items,
-                'pagination': {
-                    'page': page,
-                    'page_size': page_size,
-                    'total': total,
-                    'total_pages': _calc_total_pages(total, page_size),
-                }
+        items = [_format_received_item(row) for row in rows]
+
+        logger.debug(
+            f"[{schema_name}] User {user_id}: {len(items)} CCOO recibidas "
+            f"(pagina {page}){' search=' + search if search else ''}"
+        )
+
+        return {
+            'items': items,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': _calc_total_pages(total, page_size),
             }
+        }
 
 
-def get_sent_ccoo(
+async def get_sent_ccoo(
     sector_ids: list[str],
     user_id: str,
     *,
@@ -204,72 +192,61 @@ def get_sent_ccoo(
         sector_ids = []
 
     offset = (page - 1) * page_size
-    date_where, date_params = build_date_filter(date_filter, date_from, date_to)
 
-    base_params = {
-        'sector_ids': sector_ids,
-        'user_id': user_id,
-        'limit': page_size,
-        'offset': offset,
-    }
+    async with get_conn(schema_name=schema_name) as conn:
+        if search:
+            search_pattern = f"%{escape_like(search)}%"
+            search_term = search.strip().lower()
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            if search:
-                search_pattern = f"%{escape_like(search)}%"
-                search_term = search.strip().lower()
-                search_params = {
-                    **base_params,
-                    'search_pattern': search_pattern,
-                    'search_term': search_term,
-                }
+            # Count: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term) -> date params desde $5
+            count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
+            count_row = await conn.fetchrow(
+                get_sent_ccoo_search_count_query(date_where=count_where),
+                sector_ids, user_id, search_pattern, search_term, *count_date_params
+            )
+            total = count_row['total']
 
-                # Count
-                cursor.execute(
-                    get_sent_ccoo_search_count_query(date_where=date_where),
-                    search_params
-                )
-                total = cursor.fetchone()['total']
+            # Data: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset) -> date params desde $7
+            data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=7)
+            rows = await conn.fetch(
+                get_sent_ccoo_search_query(date_where=data_where),
+                sector_ids, user_id, search_pattern, search_term, page_size, offset, *data_date_params
+            )
+        else:
+            # Count: ($1=sector_ids, $2=user_id) -> date params desde $3
+            count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=3)
+            count_row = await conn.fetchrow(
+                get_sent_ccoo_count_query(date_where=count_where),
+                sector_ids, user_id, *count_date_params
+            )
+            total = count_row['total']
 
-                # Data
-                cursor.execute(
-                    get_sent_ccoo_search_query(date_where=date_where),
-                    search_params
-                )
-            else:
-                # Count
-                cursor.execute(
-                    get_sent_ccoo_count_query(date_where=date_where),
-                    base_params
-                )
-                total = cursor.fetchone()['total']
-
-                # Data
-                cursor.execute(
-                    get_sent_ccoo_query(date_where=date_where),
-                    base_params
-                )
-
-            rows = cursor.fetchall()
-            items = [_format_sent_item(row) for row in rows]
-
-            logger.debug(
-                f"[{schema_name}] User {user_id}: {len(items)} CCOO enviadas "
-                f"(pagina {page}){' search=' + search if search else ''}"
+            # Data: ($1=sector_ids, $2=user_id, $3=limit, $4=offset) -> date params desde $5
+            data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
+            rows = await conn.fetch(
+                get_sent_ccoo_query(date_where=data_where),
+                sector_ids, user_id, page_size, offset, *data_date_params
             )
 
-            return {
-                'items': items,
-                'pagination': {
-                    'page': page,
-                    'page_size': page_size,
-                    'total': total,
-                    'total_pages': _calc_total_pages(total, page_size),
-                }
+        items = [_format_sent_item(row) for row in rows]
+
+        logger.debug(
+            f"[{schema_name}] User {user_id}: {len(items)} CCOO enviadas "
+            f"(pagina {page}){' search=' + search if search else ''}"
+        )
+
+        return {
+            'items': items,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': _calc_total_pages(total, page_size),
             }
+        }
 
 
-def get_archived_ccoo(
+async def get_archived_ccoo(
     sector_ids: list[str],
     user_id: str,
     *,
@@ -297,63 +274,54 @@ def get_archived_ccoo(
 
     offset = (page - 1) * page_size
 
-    base_params = {
-        'sector_ids': sector_ids,
-        'user_id': user_id,
-        'limit': page_size,
-        'offset': offset,
-    }
+    async with get_conn(schema_name=schema_name) as conn:
+        if search:
+            search_pattern = f"%{escape_like(search)}%"
+            search_term = search.strip().lower()
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            if search:
-                search_pattern = f"%{escape_like(search)}%"
-                search_term = search.strip().lower()
-                search_params = {
-                    **base_params,
-                    'search_pattern': search_pattern,
-                    'search_term': search_term,
-                }
+            # Count: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term)
+            count_row = await conn.fetchrow(
+                get_archived_ccoo_search_count_query(),
+                sector_ids, user_id, search_pattern, search_term
+            )
+            total = count_row['total']
 
-                # Count
-                cursor.execute(
-                    get_archived_ccoo_search_count_query(),
-                    search_params
-                )
-                total = cursor.fetchone()['total']
+            # Data: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
+            rows = await conn.fetch(
+                get_archived_ccoo_search_query(),
+                sector_ids, user_id, search_pattern, search_term, page_size, offset
+            )
+        else:
+            # Count: ($1=sector_ids, $2=user_id)
+            count_row = await conn.fetchrow(
+                get_archived_ccoo_count_query(),
+                sector_ids, user_id
+            )
+            total = count_row['total']
 
-                # Data
-                cursor.execute(
-                    get_archived_ccoo_search_query(),
-                    search_params
-                )
-            else:
-                # Count
-                cursor.execute(get_archived_ccoo_count_query(), base_params)
-                total = cursor.fetchone()['total']
-
-                # Data
-                cursor.execute(get_archived_ccoo_query(), base_params)
-
-            rows = cursor.fetchall()
-
-            items = []
-            for row in rows:
-                item = _format_received_item(row)
-                item['archived_at'] = row['archived_at'].isoformat() if row.get('archived_at') else None
-                items.append(item)
-
-            logger.debug(
-                f"[{schema_name}] User {user_id}: {len(items)} CCOO archivadas "
-                f"(pagina {page}){' search=' + search if search else ''}"
+            # Data: ($1=sector_ids, $2=user_id, $3=limit, $4=offset)
+            rows = await conn.fetch(
+                get_archived_ccoo_query(),
+                sector_ids, user_id, page_size, offset
             )
 
-            return {
-                'items': items,
-                'pagination': {
-                    'page': page,
-                    'page_size': page_size,
-                    'total': total,
-                    'total_pages': _calc_total_pages(total, page_size),
-                }
+        items = []
+        for row in rows:
+            item = _format_received_item(row)
+            item['archived_at'] = row['archived_at'].isoformat() if row['archived_at'] else None
+            items.append(item)
+
+        logger.debug(
+            f"[{schema_name}] User {user_id}: {len(items)} CCOO archivadas "
+            f"(pagina {page}){' search=' + search if search else ''}"
+        )
+
+        return {
+            'items': items,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total': total,
+                'total_pages': _calc_total_pages(total, page_size),
             }
+        }

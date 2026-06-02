@@ -3,10 +3,9 @@ Servicio de historial para el módulo RLM.
 Registra todos los cambios en record_history.
 """
 
-import json
 from typing import Any, Optional
 from shared.logging import get_logger
-from database import execute_query, execute_update
+from database import fetch_all, fetch_one, execute
 from services.rlm.queries import (
     insert_history_query,
     get_record_history_query,
@@ -16,7 +15,7 @@ from services.rlm.queries import (
 logger = get_logger(__name__)
 
 
-def record_action(
+async def record_action(
     record_id: str,
     action: str,
     user_id: str,
@@ -41,20 +40,15 @@ def record_action(
         schema_name: Schema del tenant
     """
     try:
-        before_json = json.dumps(before_value, default=str) if before_value is not None else None
-        after_json = json.dumps(after_value, default=str) if after_value is not None else None
-
-        execute_update(
+        await execute(
             insert_history_query(),
-            (
-                record_id,
-                action,
-                field_name,
-                before_json,
-                after_json,
-                user_id,
-                sector_id,
-            ),
+            record_id,
+            action,
+            field_name,
+            before_value,
+            after_value,
+            user_id,
+            sector_id,
             schema_name=schema_name
         )
 
@@ -65,7 +59,7 @@ def record_action(
         logger.error(f"Error recording history: {e}")
 
 
-def get_history(
+async def get_history(
     record_id: str,
     user_id: str,
     *,
@@ -91,23 +85,24 @@ def get_history(
         AuthorizationError: Si no tiene permiso can_view
     """
     from services.rlm.permissions import verify_record_view_permission
-    verify_record_view_permission(record_id, user_id, schema_name=schema_name)
+    await verify_record_view_permission(record_id, user_id, schema_name=schema_name)
 
     # Count
-    count_result = execute_query(
+    count_result = await fetch_one(
         get_record_history_count_query(),
-        (record_id,),
+        record_id,
         schema_name=schema_name,
-        fetch_one=True
     )
     total = count_result["total"] if count_result else 0
 
     # List
     offset = (page - 1) * page_size
-    results = execute_query(
+    results = await fetch_all(
         get_record_history_query(),
-        (record_id, page_size, offset),
-        schema_name=schema_name
+        record_id,
+        page_size,
+        offset,
+        schema_name=schema_name,
     )
 
     entries = []

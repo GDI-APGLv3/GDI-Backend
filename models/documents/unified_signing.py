@@ -8,6 +8,33 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
+
+class SuperSignRequest(BaseModel):
+    """
+    Body opcional para el endpoint POST /documents/{document_id}/super-sign.
+
+    Permite al frontend indicar explicitamente el proveedor de firma,
+    sobreescribiendo la politica del tipo de documento (signature_policy).
+
+    Si no se envia body (o se envia `{}`), el backend usa la logica
+    automatica basada en `signature_policy` de la BD.
+    """
+
+    provider_name: Optional[str] = Field(
+        None,
+        description=(
+            "Proveedor de firma elegido por el usuario: "
+            "'autofirma' (firma digital) | 'electronic' (firma electronica) | "
+            "None (usar politica del tipo de documento)"
+        ),
+    )
+
+    note: Optional[str] = Field(
+        None,
+        description="Nota opcional para adjuntar al proceso de firma",
+    )
+
+
 class SuperSignResponse(BaseModel):
     """
     Respuesta unificada para firma de documentos.
@@ -84,9 +111,9 @@ class SuperSignResponse(BaseModel):
         description="Estado del documento después de firmar (sent_to_sign o signed)"
     )
 
-    signed_at: str = Field(
-        ...,
-        description="Timestamp de la firma en formato ISO"
+    signed_at: Optional[str] = Field(
+        None,
+        description="Timestamp de la firma en formato ISO (None si el flujo es digital y la firma aun no ocurrio)"
     )
 
     is_numerator: bool = Field(
@@ -103,4 +130,30 @@ class SuperSignResponse(BaseModel):
     signed_pdf_url: Optional[str] = Field(
         None,
         description="URL del PDF firmado y numerado desde Legal Orchestrator (solo presente si is_numerator=true)"
+    )
+
+    # Campos opcionales para flujo de firma digital (Fase 2)
+    flow: str = Field(
+        "electronic",
+        description="Flujo de firma: 'electronic' (Fase 1) o 'digital' (Fase 2 AutoFirma)"
+    )
+
+    session_id: Optional[str] = Field(
+        None,
+        description="ID de sesión de firma digital (solo flow=digital)"
+    )
+
+    poll_url: Optional[str] = Field(
+        None,
+        description="URL para pollear el estado de la sesión de firma digital"
+    )
+
+    user_payload: Optional[str] = Field(
+        None,
+        description="URI afirma:// para abrir AutoFirma en el cliente"
+    )
+
+    expires_at: Optional[str] = Field(
+        None,
+        description="Timestamp ISO de expiración de la sesión de firma digital"
     )

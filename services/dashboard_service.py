@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 from shared.logging import get_logger
 import math
 
-from database import execute_query
+from database import fetch_all, fetch_one
 from services.dashboard_queries import (
     get_feed_movements_query,
     get_cases_in_sector_count_query
@@ -50,7 +50,7 @@ class DashboardService:
         return messages.get(movement_type, f"{user_name} realizó una acción")
 
     @staticmethod
-    def get_feed(
+    async def get_feed(
         user_id: str,
         page: int = 1,
         page_size: int = DEFAULT_PAGE_SIZE,
@@ -78,7 +78,7 @@ class DashboardService:
         logger.info(f"Getting feed for user {user_id[:8]}... page={page}, size={page_size}")
 
         # Obtener sectores del usuario
-        sector_ids = DashboardService._get_user_sector_ids(user_id, schema_name=schema_name)
+        sector_ids = await DashboardService._get_user_sector_ids(user_id, schema_name=schema_name)
 
         if not sector_ids:
             logger.warning(f"User {user_id[:8]}... has no viewable sectors")
@@ -94,9 +94,7 @@ class DashboardService:
         # La query usa CTEs internas para sectores del usuario, solo necesita user_id 2 veces
         # y luego page_size y offset
         query = get_feed_movements_query("")
-        params = (user_id, user_id, page_size, offset)
-
-        results = execute_query(query, params, schema_name=schema_name)
+        results = await fetch_all(query, user_id, user_id, page_size, offset, schema_name=schema_name)
 
         if not results:
             return {
@@ -113,8 +111,8 @@ class DashboardService:
 
         items = []
         for row in results:
-            user_name = row.get('user_name') or 'Sistema'
-            movement_type = row.get('movement_type', 'unknown')
+            user_name = row['user_name'] or 'Sistema'
+            movement_type = row['movement_type'] or 'unknown'
 
             item = {
                 "movement_id": str(row['movement_id']),
@@ -122,36 +120,36 @@ class DashboardService:
                 "message": DashboardService._generate_movement_message(
                     movement_type,
                     user_name,
-                    row.get('reason', '')
+                    row['reason'] or ''
                 ),
-                "reason": row.get('reason', ''),
-                "created_at": row['created_at'].isoformat() if row.get('created_at') else None,
-                "is_active": row.get('is_active', False),
+                "reason": row['reason'] or '',
+                "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                "is_active": row['is_active'] or False,
                 "case": {
                     "id": str(row['case_id']),
-                    "case_number": row.get('case_number', ''),
-                    "reference": row.get('case_reference', ''),
-                    "case_type": row.get('case_type', ''),
-                    "case_type_name": row.get('case_type_name', ''),
-                    "ai_summary": row.get('case_ai_summary'),
-                    "short_ai_summary": row.get('case_short_ai_summary')
+                    "case_number": row['case_number'] or '',
+                    "reference": row['case_reference'] or '',
+                    "case_type": row['case_type'] or '',
+                    "case_type_name": row['case_type_name'] or '',
+                    "ai_summary": row['case_ai_summary'],
+                    "short_ai_summary": row['case_short_ai_summary']
                 },
                 "user": {
                     "name": user_name,
-                    "photo_url": row.get('user_photo'),
-                    "sector": row.get('user_sector', ''),
-                    "sector_color": row.get('user_sector_color')
+                    "photo_url": row['user_photo'],
+                    "sector": row['user_sector'] or '',
+                    "sector_color": row['user_sector_color']
                 },
                 "supporting_document": None
             }
 
             # Agregar documento de soporte si existe
-            if row.get('doc_number'):
+            if row['doc_number']:
                 item["supporting_document"] = {
                     "official_number": row['doc_number'],
-                    "reference": row.get('doc_reference', ''),
-                    "ai_summary": row.get('doc_ai_summary'),
-                    "short_resume": row.get('doc_short_resume')
+                    "reference": row['doc_reference'] or '',
+                    "ai_summary": row['doc_ai_summary'],
+                    "short_resume": row['doc_short_resume']
                 }
 
             items.append(item)
@@ -167,7 +165,7 @@ class DashboardService:
         }
 
     @staticmethod
-    def get_stats(user_id: str, *, schema_name: str) -> Dict[str, Any]:
+    async def get_stats(user_id: str, *, schema_name: str) -> Dict[str, Any]:
         """
         Obtiene estadisticas del dashboard para el usuario.
 
@@ -183,7 +181,7 @@ class DashboardService:
 
         # Contar expedientes donde el usuario es admin
         query = get_cases_in_sector_count_query()
-        result = execute_query(query, (user_id,), fetch_one=True, schema_name=schema_name)
+        result = await fetch_one(query, user_id, schema_name=schema_name)
 
         cases_in_sector = result['count'] if result else 0
 

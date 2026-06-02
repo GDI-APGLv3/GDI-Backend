@@ -26,7 +26,7 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 ### Expedientes
 | Tool | Accion |
 |------|--------|
-| search_cases | Buscar por texto, numero, estado, fecha |
+| search_cases | Ver expedientes del usuario/sector (por estado, fecha, texto). Usar para "mis expedientes", "expedientes activos", "expedientes de esta semana" |
 | get_case | Detalle (usar include_documents=true para docs) |
 | get_case_history | Historial cronologico + ai_summary |
 | get_case_documents | Docs oficiales y propuestos |
@@ -78,10 +78,10 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 | get_record | Detalle completo de un legajo |
 | get_registry_families | Familias de registro disponibles |
 
-### Busqueda semantica
+### Busqueda semantica ⭐ HERRAMIENTA PRINCIPAL DE BUSQUEDA
 | Tool | Accion |
 |------|--------|
-| semantic_search | Busca documentos oficiales por significado (RAG con embeddings). Usar cuando la consulta es conceptual y no textual literal. |
+| semantic_search | **PRIMERA OPCION cuando el usuario quiere encontrar algo.** Busca en el CONTENIDO de todos los documentos oficiales por significado usando IA. Encuentra documentos aunque el usuario no use las palabras exactas. Usar siempre que la consulta sea "busca algo sobre X", "encontra documentos de Y", "hay algo relacionado con Z". |
 
 ### Sistema
 | Tool | Accion |
@@ -94,11 +94,36 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 | list_my_tenants | Mis municipalidades |
 | search_users | Buscar por nombre/email (min 4 chars) |
 
+## Decidir que tool de busqueda usar
+
+Esta es la decision mas importante. Ante cualquier consulta de busqueda:
+
+**"Ver mis expedientes / los del sector / los activos"** → `search_cases`
+- El usuario quiere ver expedientes que le pertenecen o tiene acceso
+- Ejemplos: "mostrame mis expedientes", "que expedientes tengo activos", "expedientes de esta semana"
+
+**"Encontrar algo sobre un tema"** → `semantic_search` (PRIMERA OPCION)
+- El usuario busca por concepto, no sabe exactamente donde esta
+- Ejemplos: "busca documentos sobre habilitaciones", "algo relacionado con multas de transito", "encontra documentos que hablen de licitaciones"
+- Busca en el CONTENIDO de todos los documentos oficiales por significado
+
+**"Buscar un expediente especifico"** → `search_cases(search="...")`
+- Cuando conoce el numero, nombre de empresa, persona o referencia exacta
+
+**"Buscar un documento por numero"** → `search_document_by_number`
+- Conoce el numero oficial: IF-2026-..., DICT-2026-..., etc.
+
+**Regla de oro**: Si el usuario dice "busca", "encontra", "hay algo sobre", "documentos que hablen de" → `semantic_search`. Si dice "mis expedientes", "ver expedientes", "expedientes del sector" → `search_cases`.
+
 ## Flujos comunes
 
 **Firmas pendientes**: `get_pending_signatures()`
 
-**Investigar expediente**: `search_cases(search="panaderia")` -> `get_case_history(case_id)` -> narrar con ai_summary
+**Ver mis expedientes**: `search_cases()` -> listar con case_number, reference, ai_summary
+
+**Encontrar algo sobre un tema**: `semantic_search(query="...")` -> mostrar resultados con similarity y chunk_text relevante
+
+**Investigar expediente especifico**: `search_cases(search="panaderia")` -> `get_case_history(case_id)` -> narrar con ai_summary
 
 **Crear y firmar documento**: `create_document(type, ref)` -> `save_document(id, content, signers)` -> `start_signing(id)`
 
@@ -107,8 +132,6 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 **Crear MEMO** (entre personas): `search_users()` para UUIDs -> `create_document(document_type_acronym="MEMO", reference, recipients={to:[user_uuid], cc:[], bcc:[]})` -> `save_document` -> `start_signing`
 
 **Leer documento oficial**: `search_document_by_number("IF-2026-...")` -> `get_document_content(id)`
-
-**Buscar por significado** (cuando la consulta es conceptual): `semantic_search(query="deudas de tasa por servicios generales")` -> ranking por similitud semantica.
 
 ## Reglas
 

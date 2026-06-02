@@ -3,7 +3,7 @@ Servicio para operaciones sobre registros (registry_families).
 """
 
 from shared.logging import get_logger
-from database import execute_query
+from database import fetch_all, fetch_one
 from shared.exceptions import NotFoundError
 from services.rlm.queries import (
     get_registries_query,
@@ -15,7 +15,7 @@ from services.rlm.permissions import get_user_permissions, get_bulk_permissions
 logger = get_logger(__name__)
 
 
-def list_registries(user_id: str, *, schema_name: str) -> dict:
+async def list_registries(user_id: str, *, schema_name: str) -> dict:
     """
     Lista todos los registros disponibles con conteo de legajos.
 
@@ -27,9 +27,9 @@ def list_registries(user_id: str, *, schema_name: str) -> dict:
         Dict con lista de registros
     """
     try:
-        results = execute_query(
+        results = await fetch_all(
             get_registries_query(),
-            schema_name=schema_name
+            schema_name=schema_name,
         )
 
         # Bulk: obtener permisos de TODAS las familias en 2 queries (no N+1)
@@ -39,7 +39,7 @@ def list_registries(user_id: str, *, schema_name: str) -> dict:
             "can_view": False,
             "can_verify": False,
         }
-        permissions_map = get_bulk_permissions(user_id, schema_name=schema_name)
+        permissions_map = await get_bulk_permissions(user_id, schema_name=schema_name)
 
         registries = []
         for row in (results or []):
@@ -64,7 +64,7 @@ def list_registries(user_id: str, *, schema_name: str) -> dict:
         raise
 
 
-def get_registry_detail(registry_id: str, user_id: str, *, schema_name: str) -> dict:
+async def get_registry_detail(registry_id: str, user_id: str, *, schema_name: str) -> dict:
     """
     Obtiene el detalle de un registro incluyendo su data_schema.
 
@@ -80,17 +80,16 @@ def get_registry_detail(registry_id: str, user_id: str, *, schema_name: str) -> 
         NotFoundError: Si el registro no existe
     """
     try:
-        result = execute_query(
+        result = await fetch_one(
             get_registry_detail_query(),
-            (registry_id,),
+            registry_id,
             schema_name=schema_name,
-            fetch_one=True
         )
 
         if not result:
             raise NotFoundError(f"Registro con ID '{registry_id}' no encontrado")
 
-        perms = get_user_permissions(registry_id, user_id, schema_name=schema_name)
+        perms = await get_user_permissions(registry_id, user_id, schema_name=schema_name)
 
         return {
             "id": result["id"],
@@ -110,7 +109,7 @@ def get_registry_detail(registry_id: str, user_id: str, *, schema_name: str) -> 
         raise
 
 
-def get_registry_by_code(code: str, *, schema_name: str) -> dict:
+async def get_registry_by_code(code: str, *, schema_name: str) -> dict:
     """
     Obtiene un registro por su código.
 
@@ -124,11 +123,10 @@ def get_registry_by_code(code: str, *, schema_name: str) -> dict:
     Raises:
         NotFoundError: Si el registro no existe
     """
-    result = execute_query(
+    result = await fetch_one(
         get_registry_by_code_query(),
-        (code.upper(),),
+        code.upper(),
         schema_name=schema_name,
-        fetch_one=True
     )
 
     if not result:

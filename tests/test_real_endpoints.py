@@ -6,8 +6,8 @@ Sin mocks: TESTING_MODE bypassa auth y usa datos reales.
 import pytest
 
 # Datos reales en BD dev-test (schema 100_test)
-REAL_CASE_ID = "f615d581-a73a-48fc-b4e5-363938da3e1c"
-REAL_CASE_NUMBER = "EE-2026-000001-TXST-INTE"
+REAL_CASE_ID = "5130f93f-28c1-4ea3-8830-19e6822ea630"
+REAL_CASE_NUMBER = "EE-2026-000005-MDEV-INTE"
 
 
 class TestRealCasesEndpoints:

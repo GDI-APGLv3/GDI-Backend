@@ -10,7 +10,7 @@ Valida:
 Uso:
     python tests/test_parallel_cases.py [N]
 
-Default N=10. Apunta al backend en TESTING_MODE (configurable via GDI_TEST_BASE_URL).
+Default N=10. Apunta a <your-backend-app> en TESTING_MODE.
 """
 
 import asyncio
@@ -21,8 +21,7 @@ from collections import Counter
 import httpx
 
 # === CONFIGURACION ===
-import os
-BASE_URL = os.getenv("GDI_TEST_BASE_URL", "http://localhost:8000")
+BASE_URL = "https://<your-backend-app>.fly.dev"
 USER_ID = "a1000000-0000-0000-0000-000000000100"
 SCHEMA_NAME = "100_test"
 CASE_TEMPLATE_ID = "c1000000-0000-0000-0000-000000000001"  # TEST template

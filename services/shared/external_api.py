@@ -53,7 +53,7 @@ async def generate_final_document_pdf(document_id: str, document_data: Dict[str,
     is_imported = content is None or content == '' or content == {}
 
     from services.storage.cloudflare import get_tenant_r2_client
-    r2_client = get_tenant_r2_client(schema_name=schema_name)
+    r2_client = await get_tenant_r2_client(schema_name=schema_name)
     filename = document_id.replace('-', '') + '.pdf'
 
     try:
@@ -103,10 +103,10 @@ async def generate_final_document_pdf(document_id: str, document_data: Dict[str,
 
                 if type_acronym == 'NOTA':
                     from services.notes.recipients import format_recipients_for_pdf
-                    recipients = format_recipients_for_pdf(document_id, schema_name=schema_name)
+                    recipients = await format_recipients_for_pdf(document_id, schema_name=schema_name)
                 else:
                     from services.memos.recipients import format_memo_recipients_for_pdf
-                    recipients = format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
+                    recipients = await format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
 
                 pdf_bytes = await call_pdfcomposer_note_final(
                     document_data,
@@ -497,7 +497,7 @@ async def get_document_pdf_url(document_id: str, document_generate_id: str, docu
 
     logger.debug(f"Obteniendo URL de PDF: doc={document_id}, status={document_status}")
 
-    r2_client = get_tenant_r2_client(schema_name=schema_name)
+    r2_client = await get_tenant_r2_client(schema_name=schema_name)
 
     if document_status == "sent_to_sign":
         # Documentos en proceso de firma: bucket tosign
@@ -509,18 +509,18 @@ async def get_document_pdf_url(document_id: str, document_generate_id: str, docu
     elif document_status == "signed":
         # Documentos firmados: bucket oficial
         # Necesitamos buscar el official_number en la BD
-        from database import execute_query
+        from database import fetch_one
 
         logger.debug(f"Buscando official_number en BD...")
 
         query = """
             SELECT official_number
             FROM official_documents
-            WHERE id = %s
+            WHERE id = $1
               AND signed_at IS NOT NULL
         """
 
-        result = execute_query(query, (document_id,), fetch_one=True, schema_name=schema_name)
+        result = await fetch_one(query, document_id, schema_name=schema_name)
 
         if result and result.get("official_number"):
             official_number = result["official_number"]
@@ -622,7 +622,7 @@ async def call_pdfcomposer_generate_pdf(
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 

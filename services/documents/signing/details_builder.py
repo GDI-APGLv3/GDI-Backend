@@ -11,7 +11,7 @@ Responsabilidades:
 
 from shared.logging import get_logger
 from typing import Dict, Any, List, Optional
-from database import get_db_connection, execute_query
+from database import fetch_all, fetch_one
 from shared.exceptions import DocumentNotFoundError, ValidationError, AuthorizationError
 from services.shared.user_data import (
     get_user_complete_data,
@@ -56,36 +56,36 @@ async def build_signature_details_response(document_id: str, user_id: str, *, sc
     logger.info(f"Construyendo detalles de firma - Doc: {document_id[:8]}, Usuario: {user_id[:8]}")
 
     # 1. Obtener datos básicos del documento
-    document_info = _get_document_basic_info(document_id, schema_name=schema_name)
+    document_info = await _get_document_basic_info(document_id, schema_name=schema_name)
     if not document_info:
         raise DocumentNotFoundError(document_id)
 
     # 2. Verificar si el documento tiene official_number
-    has_official_number = _has_official_number(document_id, schema_name=schema_name)
+    has_official_number = await _has_official_number(document_id, schema_name=schema_name)
 
     # 3. Validar permisos según estado del documento
     if has_official_number:
-        _validate_user_exists(user_id, schema_name=schema_name)
+        await _validate_user_exists(user_id, schema_name=schema_name)
     else:
-        _validate_user_has_access(user_id, document_info, document_id, schema_name=schema_name)
+        await _validate_user_has_access(user_id, document_info, document_id, schema_name=schema_name)
 
     # 4. Obtener datos completos del creador
-    creator_info = get_user_complete_data(document_info['created_by'], schema_name=schema_name)
+    creator_info = await get_user_complete_data(document_info['created_by'], schema_name=schema_name)
 
     # 5. Obtener firmantes
-    signers_data = get_document_signers_complete_data(document_id, schema_name=schema_name)
+    signers_data = await get_document_signers_complete_data(document_id, schema_name=schema_name)
 
     # 5.1 Obtener recipients si es documento tipo NOTA o MEMO
     recipients = None
     doc_type_acronym = document_info.get('document_type_acronym')
     if doc_type_acronym == 'NOTA':
         # Obtener sector_id del usuario actual
-        user_data = get_user_complete_data(user_id, schema_name=schema_name)
+        user_data = await get_user_complete_data(user_id, schema_name=schema_name)
         requesting_sector_id = user_data.get('sector_id') if user_data else None
 
         if requesting_sector_id:
             try:
-                recipients = get_visible_recipients(
+                recipients = await get_visible_recipients(
                     document_id=document_id,
                     requesting_sector_id=str(requesting_sector_id),
                     schema_name=schema_name
@@ -96,7 +96,7 @@ async def build_signature_details_response(document_id: str, user_id: str, *, sc
     elif doc_type_acronym == 'MEMO':
         try:
             from services.memos.recipients import get_visible_memo_recipients
-            recipients = get_visible_memo_recipients(
+            recipients = await get_visible_memo_recipients(
                 document_id=document_id,
                 requesting_user_id=user_id,
                 schema_name=schema_name
@@ -106,7 +106,7 @@ async def build_signature_details_response(document_id: str, user_id: str, *, sc
             recipients = None
 
     # 5.2 Obtener expedientes propuestos
-    proposed_cases = _fetch_proposed_cases(document_id, schema_name=schema_name)
+    proposed_cases = await _fetch_proposed_cases(document_id, schema_name=schema_name)
     if proposed_cases:
         logger.info(f"Expedientes propuestos cargados: {len(proposed_cases)} expedientes")
 
@@ -133,81 +133,55 @@ async def build_signature_details_response(document_id: str, user_id: str, *, sc
 # OBTENCIÓN DE DATOS - Data Access Layer
 # ============================================================================
 
-def _get_document_basic_info(document_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
-    """Obtiene información básica del documento para signature_details.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Returns:
-        Dict con datos básicos o None si no existe
-    """
-    result = execute_query(get_document_basic_info_for_signature_query(), (document_id,), schema_name=schema_name)
-    return result[0] if result else None
+async def _get_document_basic_info(document_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
+    """Obtiene información básica del documento para signature_details."""
+    rows = await fetch_all(
+        get_document_basic_info_for_signature_query(),
+        document_id,
+        schema_name=schema_name,
+    )
+    return dict(rows[0]) if rows else None
 
 
 # ============================================================================
 # VALIDACIONES - Business Logic Layer
 # ============================================================================
 
-def _has_official_number(document_id: str, *, schema_name: str) -> bool:
-    """Verifica si el documento tiene número oficial asignado.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Returns:
-        bool: True si el documento está en official_documents, False si no
-    """
-    result = execute_query(check_document_has_official_number_query(), (document_id,), schema_name=schema_name)
-    return result[0]['has_official_number'] if result else False
+async def _has_official_number(document_id: str, *, schema_name: str) -> bool:
+    """Verifica si el documento tiene número oficial asignado."""
+    rows = await fetch_all(
+        check_document_has_official_number_query(),
+        document_id,
+        schema_name=schema_name,
+    )
+    return rows[0]['has_official_number'] if rows else False
 
 
-def _check_has_embeddings(document_id: str, *, schema_name: str) -> bool:
-    """Verifica si el documento tiene embeddings indexados (con embedding NOT NULL).
-
-    Args:
-        document_id: UUID del documento oficial
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Returns:
-        bool: True si tiene al menos un chunk con embedding, False si no
-    """
-    result = execute_query(check_document_has_embeddings_query(), (document_id,), schema_name=schema_name)
-    return result[0]['has_embeddings'] if result else False
+async def _check_has_embeddings(document_id: str, *, schema_name: str) -> bool:
+    """Verifica si el documento tiene embeddings indexados (con embedding NOT NULL)."""
+    rows = await fetch_all(
+        check_document_has_embeddings_query(),
+        document_id,
+        schema_name=schema_name,
+    )
+    return rows[0]['has_embeddings'] if rows else False
 
 
-def _validate_user_exists(user_id: str, *, schema_name: str) -> None:
-    """Valida que el usuario exista en la base de datos.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Raises:
-        AuthorizationError: Si el usuario no existe
-    """
-    result = execute_query(check_user_exists_query(), (user_id,), schema_name=schema_name)
-    user_exists = result[0]['user_exists'] if result else False
+async def _validate_user_exists(user_id: str, *, schema_name: str) -> None:
+    """Valida que el usuario exista en la base de datos."""
+    rows = await fetch_all(
+        check_user_exists_query(),
+        user_id,
+        schema_name=schema_name,
+    )
+    user_exists = rows[0]['user_exists'] if rows else False
 
     if not user_exists:
         raise AuthorizationError(f"Usuario '{user_id}' no existe en el sistema")
 
 
-def _validate_user_has_access(user_id: str, document_info: Dict[str, Any], document_id: str, *, schema_name: str) -> None:
-    """Valida que el usuario tenga acceso al documento en proceso de firma.
-
-    Args:
-        user_id: UUID del usuario
-        document_info: Información del documento (incluye created_by y sent_by)
-        document_id: UUID del documento
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Raises:
-        AuthorizationError: Si el usuario no tiene permisos
-    """
+async def _validate_user_has_access(user_id: str, document_info: Dict[str, Any], document_id: str, *, schema_name: str) -> None:
+    """Valida que el usuario tenga acceso al documento en proceso de firma."""
     # Verificar si es creador, quien envió a firma, o firmante
     if user_id == document_info.get('created_by'):
         return
@@ -216,23 +190,27 @@ def _validate_user_has_access(user_id: str, document_info: Dict[str, Any], docum
         return
 
     # Verificar si es firmante
-    result = execute_query(check_user_is_document_signer_query(), (document_id, user_id), schema_name=schema_name)
-    is_signer = result[0]['is_signer'] if result else False
+    rows = await fetch_all(
+        check_user_is_document_signer_query(),
+        document_id,
+        user_id,
+        schema_name=schema_name,
+    )
+    is_signer = rows[0]['is_signer'] if rows else False
 
     if is_signer:
         return
 
     # Verificar si tiene permisos de sector sobre el sector del creador
     from services.case_service import CaseService
-    user_viewable_sectors = CaseService.get_user_viewable_sector_ids(user_id, schema_name=schema_name)
+    user_viewable_sectors = await CaseService.get_user_viewable_sector_ids(user_id, schema_name=schema_name)
 
     # Obtener sector del creador del documento
-    creator_sector_query = """
-        SELECT u.sector_id
-        FROM users u
-        WHERE u.id = %s
-    """
-    creator_result = execute_query(creator_sector_query, (document_info.get('created_by'),), schema_name=schema_name)
+    creator_result = await fetch_all(
+        "SELECT u.sector_id FROM users u WHERE u.id = $1",
+        document_info.get('created_by'),
+        schema_name=schema_name,
+    )
     creator_sector_id = str(creator_result[0]['sector_id']) if creator_result and creator_result[0].get('sector_id') else None
 
     if creator_sector_id and creator_sector_id in user_viewable_sectors:
@@ -250,13 +228,6 @@ def _validate_user_has_access(user_id: str, document_info: Dict[str, Any], docum
 def _group_signers_by_status(signers_data: List[Dict[str, Any]], current_user_id: str) -> Dict[str, Any]:
     """
     Agrupa firmantes por estado de firma y calcula estadísticas.
-
-    Args:
-        signers_data: Lista completa de firmantes
-        current_user_id: ID del usuario actual (para validación interna)
-
-    Returns:
-        Dict con firmantes agrupados y conteos
     """
     pending_signatures = []
     completed_signatures = []
@@ -290,18 +261,7 @@ def _get_user_situation_message(
     signatures_grouped: Dict[str, Any],
     has_official_number: bool
 ) -> Optional[str]:
-    """Genera un mensaje específico según la situación del usuario respecto al documento.
-
-    Args:
-        user_id: ID del usuario actual
-        document_info: Información del documento
-        current_signer_info: Información del usuario como firmante
-        signatures_grouped: Firmantes agrupados por estado
-        has_official_number: True si el documento ya está oficializado
-
-    Returns:
-        str con el mensaje específico o None si no aplica mensaje especial
-    """
+    """Genera un mensaje específico según la situación del usuario respecto al documento."""
     # Caso 1: Documento ya finalizado
     if has_official_number:
         return SIGNATURE_DOCUMENT_FINALIZED_MESSAGE
@@ -341,19 +301,7 @@ async def _build_final_response(
     *,
     schema_name: str
 ) -> Dict[str, Any]:
-    """Construye la respuesta final del endpoint signature_details.
-
-    Args:
-        document_info: Información básica del documento
-        creator_info: Datos completos del creador
-        signatures_grouped: Firmantes agrupados por estado
-        user_id: ID del usuario actual
-        document_id: UUID del documento
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Returns:
-        Dict con estructura completa del endpoint
-    """
+    """Construye la respuesta final del endpoint signature_details."""
     # Buscar información del usuario actual en los firmantes
     current_signer_info = _find_current_signer(signatures_grouped, user_id)
 
@@ -361,12 +309,12 @@ async def _build_final_response(
     can_sign = _can_user_sign(current_signer_info, signatures_grouped)
 
     # Verificar si el documento tiene número oficial
-    has_official_number = _has_official_number(document_id, schema_name=schema_name)
+    has_official_number = await _has_official_number(document_id, schema_name=schema_name)
 
     # Verificar estado IA (solo para docs oficiales)
     has_embeddings = False
     if has_official_number:
-        has_embeddings = _check_has_embeddings(document_id, schema_name=schema_name)
+        has_embeddings = await _check_has_embeddings(document_id, schema_name=schema_name)
 
     # Generar mensaje específico según la situación del usuario
     user_message = _get_user_situation_message(
@@ -405,7 +353,8 @@ async def _build_final_response(
         "resume": document_info.get('resume'),
         "short_resume": document_info.get('short_resume'),
         "has_embeddings": has_embeddings,
-        "official_number": document_info.get('official_number')
+        "official_number": document_info.get('official_number'),
+        "signature_policy": document_info.get('signature_policy')
     }
 
     pdf_url = None
@@ -434,6 +383,7 @@ async def _build_final_response(
 
     response = {
         "document": document_section,
+        "signature_policy": document_info.get('signature_policy'),
         "current_signer": {
             "user_id": current_signer_info.get('user_id', user_id),
             "user_name": current_signer_info.get('full_name', ''),
@@ -477,16 +427,7 @@ async def _build_final_response(
 # ============================================================================
 
 def _find_current_signer(signatures_grouped: Dict[str, Any], user_id: str) -> Dict[str, Any]:
-    """
-    Encuentra la información del firmante actual en los grupos de firmantes.
-
-    Args:
-        signatures_grouped: Firmantes agrupados por estado
-        user_id: ID del usuario actual
-
-    Returns:
-        Dict con información del firmante actual o dict vacío si no se encuentra
-    """
+    """Encuentra la información del firmante actual en los grupos de firmantes."""
     # Buscar en firmantes pendientes
     for signer in signatures_grouped['pending']:
         if signer['user_id'] == user_id:
@@ -501,15 +442,7 @@ def _find_current_signer(signatures_grouped: Dict[str, Any], user_id: str) -> Di
 
 
 def _can_user_sign(current_signer_info: Dict[str, Any], signatures_grouped: Dict[str, Any]) -> bool:
-    """Determina si el usuario actual puede firmar el documento.
-
-    Args:
-        current_signer_info: Información del firmante actual
-        signatures_grouped: Firmantes agrupados por estado
-
-    Returns:
-        bool: True si puede firmar, False si no
-    """
+    """Determina si el usuario actual puede firmar el documento."""
     # Si no es firmante, no puede firmar
     if not current_signer_info:
         return False
@@ -535,14 +468,7 @@ def _can_user_sign(current_signer_info: Dict[str, Any], signatures_grouped: Dict
 
 
 def _format_signatures_for_progress(signatures_grouped: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Formatea las firmas para el modelo de progreso.
-
-    Args:
-        signatures_grouped: Firmantes agrupados por estado
-
-    Returns:
-        Lista de firmantes formateada para el modelo SignerInfo
-    """
+    """Formatea las firmas para el modelo de progreso."""
     signatures = []
 
     # Añadir firmantes pendientes
@@ -562,6 +488,7 @@ def _format_signatures_for_progress(signatures_grouped: Dict[str, Any]) -> List[
 
     # Añadir firmantes completados
     for signer in signatures_grouped['completed']:
+        raw_signed_at = signer.get('signed_at')
         signatures.append({
             "user_id": signer['user_id'],
             "user_name": signer['full_name'],
@@ -570,7 +497,7 @@ def _format_signatures_for_progress(signatures_grouped: Dict[str, Any]) -> List[
             "signing_order": 1,
             "is_numerator": signer.get('is_numerator', False),
             "has_signed": True,
-            "signed_at": None,
+            "signed_at": raw_signed_at.isoformat() if raw_signed_at else None,
             "is_current_user": False,
             "seal_name": signer.get('seal_name', None)
         })

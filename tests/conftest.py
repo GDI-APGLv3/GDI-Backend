@@ -1,10 +1,11 @@
 """
 Configuración de fixtures y setup para tests
 """
+import os
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 import asyncio
 from typing import Dict, Any
 
@@ -97,17 +98,41 @@ MOCK_DEPARTMENT = {
 
 @pytest.fixture
 def event_loop():
-    """Fixture para manejar el event loop de asyncio"""
+    """Event loop por test — garantiza que pool y ASGI corren en el mismo loop."""
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
 @pytest_asyncio.fixture
 async def client():
-    """Cliente HTTP asíncrono para tests"""
-    from httpx import ASGITransport
+    """Cliente HTTP asíncrono con pool asyncpg inicializado en el mismo event loop."""
+    import database as db_module
+    from database import init_pool, close_pool
+    from shared.tenant_validation import clear_all_cache
+
+    # Cerrar pool previo si quedó de un test anterior (loop distinto)
+    if db_module.pool is not None:
+        try:
+            await close_pool()
+        except Exception:
+            pass
+
+    pool_ok = False
+    try:
+        await init_pool()
+        clear_all_cache()
+        pool_ok = True
+    except Exception:
+        pass
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
+
+    if pool_ok:
+        try:
+            await close_pool()
+        except Exception:
+            pass
 
 @pytest.fixture
 def mock_auth_headers():
@@ -156,11 +181,21 @@ def mock_department_data():
 
 @pytest.fixture
 def mock_db_connection():
-    """Mock de conexión a base de datos"""
-    with patch('database.get_db_connection') as mock_conn:
-        mock_cursor = MagicMock()
-        mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cursor
-        yield mock_cursor
+    """Mock de las funciones asyncpg de database.py para tests sin BD real."""
+    with patch('database.fetch_all', new_callable=AsyncMock) as mock_fetch_all, \
+         patch('database.fetch_one', new_callable=AsyncMock) as mock_fetch_one, \
+         patch('database.fetch_val', new_callable=AsyncMock) as mock_fetch_val, \
+         patch('database.execute', new_callable=AsyncMock) as mock_execute:
+        mock_fetch_all.return_value = []
+        mock_fetch_one.return_value = None
+        mock_fetch_val.return_value = None
+        mock_execute.return_value = "UPDATE 0"
+        yield {
+            'fetch_all': mock_fetch_all,
+            'fetch_one': mock_fetch_one,
+            'fetch_val': mock_fetch_val,
+            'execute': mock_execute,
+        }
 
 @pytest.fixture
 def mock_case_service():

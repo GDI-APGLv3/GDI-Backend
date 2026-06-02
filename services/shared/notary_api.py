@@ -11,6 +11,7 @@ Si hay certificado en R2 (resolve_certificate), envía cert_file + cert_password
 en el multipart para que Notary firme con PAdES sin necesitar el .p12 local.
 """
 
+import hashlib
 import os
 import httpx
 from typing import Dict, Any
@@ -43,7 +44,8 @@ async def call_notary_sign_pdf(
     stamp_position: str = "",
     *,
     tenant_id: str = None,
-    schema_name: str = None
+    schema_name: str = None,
+    expected_sha256: str | None = None
 ) -> bytes:
     """
     Llama a Notary /sign-pdf con manejo automático de FULLPAGE.
@@ -67,6 +69,9 @@ async def call_notary_sign_pdf(
         stamp_position: Posición del sello
         tenant_id: ID del tenant para certificado PAdES
         schema_name: Schema del tenant (para resolver certificado de R2)
+        expected_sha256: Hash SHA-256 esperado del PDF (SU-009). Si es None
+            se calcula localmente sobre pdf_bytes. Siempre se envía a Notary
+            como campo expected_sha256 en el multipart.
 
     Returns:
         bytes: PDF firmado por Notary
@@ -85,6 +90,13 @@ async def call_notary_sign_pdf(
     logger.info(f"stamp_position: {stamp_position or '(default)'}")
     logger.info(f"tenant_id: {tenant_id or '(none)'}")
     logger.info(f"   Tamaño PDF: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
+
+    # SU-009: Calcular SHA-256 local sobre los bytes que efectivamente se envían a Notary.
+    # Esto cubre el tramo Backend→Notary con independencia de la fuente del PDF
+    # (PDFComposer, R2, etc.). Si el caller ya calculó y pasó expected_sha256, se usa
+    # ese valor directamente; de lo contrario se calcula aquí.
+    _pdf_sha256 = expected_sha256 if expected_sha256 else hashlib.sha256(pdf_bytes).hexdigest()
+    logger.info(f"[SU-009] SHA-256 para Notary: {_pdf_sha256}")
 
     # Intentar resolver certificado de R2 si tenemos tenant_id + schema_name
     cert_bytes = None
@@ -109,7 +121,9 @@ async def call_notary_sign_pdf(
         "department": (None, signer_department),
         "entity": (None, signer_municipality),
         "document_number": (None, official_number),
-        "city": (None, city)
+        "city": (None, city),
+        # SU-009: hash SHA-256 para que Notary verifique integridad antes de firmar
+        "expected_sha256": (None, _pdf_sha256)
     }
 
     # Agregar stamp_position si está especificado (para documentos importados)
@@ -128,6 +142,23 @@ async def call_notary_sign_pdf(
     headers = {
         "x-api-key": NOTARY_API_KEY
     }
+
+    # Agregar HMAC inter-servicio si está configurado (Fase 1 NuevaFIRMAfull).
+    # Se firma el PDF original como body representativo de la request.
+    # Si el secreto no está configurado, build_internal_hmac_header devuelve ""
+    # y no se agrega el header (backward compatible).
+    try:
+        from services.notary_internal_hmac import build_internal_hmac_header
+        hmac_value = build_internal_hmac_header(
+            method="POST",
+            path="/sign-pdf",
+            body_bytes=pdf_bytes,
+        )
+        if hmac_value:
+            headers["X-Internal-Sign"] = hmac_value
+    except Exception as _hmac_err:
+        # Soft-fail: no interrumpir la firma si el HMAC falla
+        logger.warning(f"No se pudo generar X-Internal-Sign (soft-fail): {_hmac_err}")
 
     try:
         # PRIMER INTENTO: Firmar PDF original
@@ -180,6 +211,10 @@ async def call_notary_sign_pdf(
                 # SEGUNDO INTENTO: Firmar PDF aumentado
                 logger.info("Intento 2/2: Enviando PDF aumentado a Notary...")
 
+                # SU-009: recalcular SHA-256 sobre el PDF aumentado (diferente al original)
+                _augmented_sha256 = hashlib.sha256(augmented_pdf).hexdigest()
+                logger.info(f"[SU-009] SHA-256 PDF aumentado (FULLPAGE retry): {_augmented_sha256}")
+
                 files_retry = {
                     "pdf_file": ("document.pdf", augmented_pdf, "application/pdf"),
                     "name": (None, signer_name),
@@ -187,7 +222,9 @@ async def call_notary_sign_pdf(
                     "department": (None, signer_department),
                     "entity": (None, signer_municipality),
                     "document_number": (None, official_number),
-                    "city": (None, city)
+                    "city": (None, city),
+                    # SU-009: hash del PDF aumentado
+                    "expected_sha256": (None, _augmented_sha256)
                 }
 
                 # Agregar stamp_position si está especificado
@@ -255,3 +292,95 @@ async def call_notary_sign_pdf(
         error_msg = f"Error inesperado llamando a Notary: {type(e).__name__} - {str(e)}"
         logger.info(f" [ERR] {error_msg}")
         raise Exception(error_msg)
+
+
+async def call_notary_verify(pdf_bytes: bytes) -> dict:
+    """
+    Llama a Notary /sign-pdf/verify para validar integridad del PDF firmado por AutoFirma.
+
+    Returns:
+        {ok, failure_reason, signature_count, signature_visible, modification_level}
+
+    Nunca lanza excepción — en caso de error de red devuelve ok=False con failure_reason.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{NOTARY_URL}/sign-pdf/verify",
+                files={"pdf_file": ("signed.pdf", pdf_bytes, "application/pdf")},
+                headers={"x-api-key": NOTARY_API_KEY},
+            )
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "ok": False,
+            "failure_reason": f"notary_verify_http_{response.status_code}",
+            "signature_count": 0,
+            "signature_visible": False,
+            "modification_level": None,
+        }
+    except Exception as e:
+        logger.warning(f"call_notary_verify error (soft): {e}")
+        return {
+            "ok": False,
+            "failure_reason": f"notary_verify_unreachable",
+            "signature_count": 0,
+            "signature_visible": False,
+            "modification_level": None,
+        }
+
+
+async def call_notary_stamp_only(
+    pdf_bytes: bytes,
+    official_number: str,
+    city: str = "LATAM",
+    stamp_position: str = "first",
+    existing_count: int | None = None,
+) -> tuple[bytes, float, float, float, float]:
+    """
+    Llama a Notary /stamp-number: estampa número/fecha y devuelve posición de firma.
+
+    Usado en el flujo digital (AutoFirma) para:
+    1. Aplicar el sello de número/fecha (igual que en flujo electrónico).
+    2. Calcular la posición donde AutoFirma debe insertar la firma PAdES.
+
+    Returns:
+        (stamped_pdf_bytes, sig_llx, sig_lly, sig_urx, sig_ury)
+        Las coordenadas son en espacio PDF (origin bottom-left), listas para
+        usar directamente en las propiedades de AutoFirma.
+
+    Raises:
+        Exception: Si Notary falla.
+    """
+    import base64
+
+    files = {
+        "pdf_file": ("document.pdf", pdf_bytes, "application/pdf"),
+        "document_number": (None, official_number),
+        "city": (None, city),
+        "stamp_position": (None, stamp_position),
+    }
+    if existing_count is not None:
+        files["existing_count"] = (None, str(existing_count))
+
+    headers = {"x-api-key": NOTARY_API_KEY}
+
+    async with httpx.AsyncClient(timeout=NOTARY_TIMEOUT) as client:
+        response = await client.post(
+            f"{NOTARY_URL}/stamp-number",
+            files=files,
+            headers=headers,
+        )
+
+    if response.status_code != 200:
+        raise Exception(f"Notary /stamp-number falló {response.status_code}: {response.text[:300]}")
+
+    data = response.json()
+    stamped_pdf = base64.b64decode(data["stamped_pdf_b64"])
+    return (
+        stamped_pdf,
+        float(data["sig_llx"]),
+        float(data["sig_lly"]),
+        float(data["sig_urx"]),
+        float(data["sig_ury"]),
+    )

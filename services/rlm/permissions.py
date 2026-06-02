@@ -6,14 +6,14 @@ Busca permisos en el sector principal del usuario Y en sus sectores adicionales
 """
 
 from shared.logging import get_logger
-from database import execute_query
+from database import fetch_all, fetch_one
 from shared.exceptions import NotFoundError, AuthorizationError
 from services.rlm.queries import get_sector_permissions_query, get_all_permissions_for_sectors_query
 
 logger = get_logger(__name__)
 
 
-def _get_user_sector_ids(user_id: str, *, schema_name: str) -> list:
+async def _get_user_sector_ids(user_id: str, *, schema_name: str) -> list:
     """
     Obtiene todos los sector_ids del usuario: principal + adicionales.
 
@@ -26,16 +26,16 @@ def _get_user_sector_ids(user_id: str, *, schema_name: str) -> list:
     """
     from services.case_queries import get_user_sectors_with_permissions_query
 
-    result = execute_query(
+    result = await fetch_all(
         get_user_sectors_with_permissions_query(),
-        (user_id, user_id),
-        schema_name=schema_name
+        user_id,
+        schema_name=schema_name,
     )
 
     return [str(row['sector_id']) for row in (result or [])]
 
 
-def get_user_permissions(registry_family_id: str, user_id: str, *, schema_name: str) -> dict:
+async def get_user_permissions(registry_family_id: str, user_id: str, *, schema_name: str) -> dict:
     """
     Obtiene los permisos de un usuario sobre un registro.
 
@@ -59,7 +59,7 @@ def get_user_permissions(registry_family_id: str, user_id: str, *, schema_name: 
 
     try:
         # Obtener todos los sectores del usuario
-        sector_ids = _get_user_sector_ids(user_id, schema_name=schema_name)
+        sector_ids = await _get_user_sector_ids(user_id, schema_name=schema_name)
 
         if not sector_ids:
             logger.debug(f"No sectors found for user {user_id[:8]}")
@@ -68,11 +68,11 @@ def get_user_permissions(registry_family_id: str, user_id: str, *, schema_name: 
         # Buscar permisos de cada sector sobre este registro
         merged_perms = dict(default_perms)
         for sector_id in sector_ids:
-            result = execute_query(
+            result = await fetch_one(
                 get_sector_permissions_query(),
-                (registry_family_id, sector_id),
+                registry_family_id,
+                sector_id,
                 schema_name=schema_name,
-                fetch_one=True
             )
             if result:
                 # OR: si CUALQUIER sector tiene el permiso, se activa
@@ -95,7 +95,7 @@ def get_user_permissions(registry_family_id: str, user_id: str, *, schema_name: 
         raise
 
 
-def get_bulk_permissions(user_id: str, *, schema_name: str) -> dict:
+async def get_bulk_permissions(user_id: str, *, schema_name: str) -> dict:
     """
     Obtiene los permisos del usuario sobre TODAS las registry_families en 2 queries.
 
@@ -121,7 +121,7 @@ def get_bulk_permissions(user_id: str, *, schema_name: str) -> dict:
 
     try:
         # Query 1: obtener todos los sectores del usuario
-        sector_ids = _get_user_sector_ids(user_id, schema_name=schema_name)
+        sector_ids = await _get_user_sector_ids(user_id, schema_name=schema_name)
 
         if not sector_ids:
             logger.debug(f"No sectors found for user {user_id[:8]}")
@@ -129,7 +129,7 @@ def get_bulk_permissions(user_id: str, *, schema_name: str) -> dict:
 
         # Query 2: obtener TODOS los permisos de esos sectores sobre TODAS las familias
         query, params = get_all_permissions_for_sectors_query(sector_ids)
-        results = execute_query(query, params, schema_name=schema_name)
+        results = await fetch_all(query, *params, schema_name=schema_name)
 
         if not results:
             return {}
@@ -158,7 +158,7 @@ def get_bulk_permissions(user_id: str, *, schema_name: str) -> dict:
         raise
 
 
-def check_permission(registry_family_id: str, user_id: str, permission: str, *, schema_name: str) -> bool:
+async def check_permission(registry_family_id: str, user_id: str, permission: str, *, schema_name: str) -> bool:
     """
     Verifica si un usuario tiene un permiso específico.
 
@@ -173,11 +173,11 @@ def check_permission(registry_family_id: str, user_id: str, permission: str, *, 
     Returns:
         True si tiene el permiso
     """
-    perms = get_user_permissions(registry_family_id, user_id, schema_name=schema_name)
+    perms = await get_user_permissions(registry_family_id, user_id, schema_name=schema_name)
     return perms.get(permission, False)
 
 
-def verify_record_view_permission(record_id: str, user_id: str, *, schema_name: str) -> None:
+async def verify_record_view_permission(record_id: str, user_id: str, *, schema_name: str) -> None:
     """
     Verifica can_view sobre un record. Raise AuthorizationError si no tiene.
 
@@ -192,14 +192,13 @@ def verify_record_view_permission(record_id: str, user_id: str, *, schema_name: 
     """
     from services.rlm.queries import get_record_family_query
 
-    record = execute_query(
+    record = await fetch_one(
         get_record_family_query(),
-        (record_id,),
+        record_id,
         schema_name=schema_name,
-        fetch_one=True
     )
     if not record:
         raise NotFoundError(f"Legajo '{record_id}' no encontrado")
 
-    if not check_permission(record["registry_family_id"], user_id, "can_view", schema_name=schema_name):
+    if not await check_permission(record["registry_family_id"], user_id, "can_view", schema_name=schema_name):
         raise AuthorizationError("No tiene permiso para ver este legajo")

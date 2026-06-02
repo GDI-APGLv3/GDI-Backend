@@ -11,7 +11,7 @@ from services.rlm.registries import list_registries
 logger = logging.getLogger(__name__)
 
 
-def search_records(
+async def search_records(
     ctx: MCPContext,
     family_code: Optional[str] = None,
     search: Optional[str] = None,
@@ -38,7 +38,7 @@ def search_records(
     if page_size > 100:
         raise ValueError("page_size máximo es 100")
 
-    return list_records(
+    return await list_records(
         user_id=ctx.user_id,
         schema_name=ctx.schema_name,
         registry_code=family_code,
@@ -49,7 +49,7 @@ def search_records(
     )
 
 
-def get_record_detail(
+async def get_record_detail(
     ctx: MCPContext,
     record_id: str,
 ) -> Dict[str, Any]:
@@ -65,14 +65,14 @@ def get_record_detail(
     """
     logger.info(f"[MCP] get_record - schema={ctx.schema_name}, record_id={record_id}")
 
-    return get_record(
+    return await get_record(
         record_id=record_id,
         user_id=ctx.user_id,
         schema_name=ctx.schema_name,
     )
 
 
-def get_registry_families(
+async def get_registry_families(
     ctx: MCPContext,
 ) -> Dict[str, Any]:
     """
@@ -86,7 +86,7 @@ def get_registry_families(
     """
     logger.info(f"[MCP] get_registry_families - schema={ctx.schema_name}")
 
-    return list_registries(
+    return await list_registries(
         user_id=ctx.user_id,
         schema_name=ctx.schema_name,
     )

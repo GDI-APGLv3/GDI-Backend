@@ -13,6 +13,10 @@ from .prepare_actions import router as prepare_actions_router
 from .get_by_number import router as get_by_number_router
 from .subsanar_document import router as subsanar_router
 from .proposed_documents import router as proposed_documents_router
+from .download_case_zip import router as download_case_zip_router
+from .favorites import router as favorites_router
+from .responsibles import router as responsibles_router
+from .counts import router as counts_router
 
 # Router principal para expedientes
 cases_router = APIRouter(
@@ -26,8 +30,10 @@ cases_router = APIRouter(
     }
 )
 
-# Registrar todos los sub-routers
+# IMPORTANTE: registrar rutas estáticas ANTES que /{case_id} para evitar
+# que FastAPI interprete "counts" u otros literales como un UUID de expediente.
 cases_router.include_router(list_router)
+cases_router.include_router(counts_router)   # GET /counts — debe ir antes de detail_router
 cases_router.include_router(create_router)
 cases_router.include_router(detail_router)
 cases_router.include_router(transfer_router)
@@ -36,3 +42,6 @@ cases_router.include_router(prepare_actions_router)
 cases_router.include_router(get_by_number_router)
 cases_router.include_router(subsanar_router)
 cases_router.include_router(proposed_documents_router)
+cases_router.include_router(download_case_zip_router)
+cases_router.include_router(favorites_router)
+cases_router.include_router(responsibles_router)

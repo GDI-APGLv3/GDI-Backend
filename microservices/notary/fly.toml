@@ -1,5 +1,4 @@
-# Plantilla Fly.io para el microservicio Notary (firma digital).
-app = "<YOUR_NOTARY_APP_NAME>"
+app = "<your-notary-app>"
 primary_region = "gru"
 
 [build]

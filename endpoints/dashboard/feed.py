@@ -49,9 +49,9 @@ async def get_feed(
         logger.info(f"Getting feed - User: {tenant_user_id[:8]}, Page: {page}")
 
         # Obtener usuario validado
-        db_user_id = get_authenticated_user(tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
-        result = DashboardService.get_feed(
+        result = await DashboardService.get_feed(
             user_id=db_user_id,
             page=page,
             page_size=page_size,

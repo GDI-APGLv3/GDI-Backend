@@ -33,10 +33,9 @@ para que el order_number se calcule correctamente con SELECT FOR UPDATE.
 
 from typing import Dict, Any, Callable
 from datetime import datetime
-import json
 from fastapi.concurrency import run_in_threadpool
 
-from database import get_db_connection
+from database import get_conn, fetch_one, execute
 from shared.exceptions import (
     ValidationError, ExternalServiceError, DocumentNotFoundError
 )
@@ -100,7 +99,7 @@ async def create_and_sign_case_document(
     # PASO 1: Crear documento en draft
     # ================================================================
     logger.info(f"PASO 1: Creando documento {document_type_acronym}...")
-    document = create_document(
+    document = await create_document(
         document_type_acronym=document_type_acronym,
         reference=reference,
         creator_id=user_id,
@@ -121,25 +120,23 @@ async def create_and_sign_case_document(
 
         logger.info("Guardando contenido...")
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                content_structure = {
-                    "html": html_content,
-                    "format_version": "2.0",
-                    "updated_at": datetime.now().isoformat()
-                }
+        content_structure = {
+            "html": html_content,
+            "format_version": "2.0",
+            "updated_at": datetime.now().isoformat()
+        }
 
-                update_content_query = """
-                    UPDATE document_draft
-                    SET content = %s::jsonb,
-                        last_modified_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """
-                cursor.execute(update_content_query, (
-                    json.dumps(content_structure),
-                    document_id
-                ))
-                conn.commit()
+        await execute(
+            """
+            UPDATE document_draft
+            SET content = $1::jsonb,
+                last_modified_at = CURRENT_TIMESTAMP
+            WHERE id = $2
+            """,
+            content_structure,
+            document_id,
+            schema_name=schema_name,
+        )
 
         logger.info("Contenido guardado")
 
@@ -150,62 +147,60 @@ async def create_and_sign_case_document(
         logger.info("PASO 3: Recolectando datos para generate_official_number...")
         current_year = datetime.now().year
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                # Obtener document_type_id
-                cursor.execute(
-                    "SELECT id as document_type_id FROM document_types WHERE acronym = %s",
-                    (document_type_acronym,)
-                )
-                type_result = cursor.fetchone()
-                if not type_result:
-                    raise ValidationError(f"Tipo de documento {document_type_acronym} no encontrado")
-                document_type_id = type_result['document_type_id']
+        # Obtener document_type_id
+        type_result = await fetch_one(
+            "SELECT id as document_type_id FROM document_types WHERE acronym = $1",
+            document_type_acronym,
+            schema_name=schema_name,
+        )
+        if not type_result:
+            raise ValidationError(f"Tipo de documento {document_type_acronym} no encontrado")
+        document_type_id = type_result['document_type_id']
 
-                # Obtener reference del documento
-                cursor.execute(
-                    "SELECT reference FROM document_draft WHERE id = %s",
-                    (document_id,)
-                )
-                doc_data = cursor.fetchone()
-                if not doc_data:
-                    raise DocumentNotFoundError(document_id)
-                reference_text = doc_data['reference']
+        # Obtener reference del documento
+        doc_data = await fetch_one(
+            "SELECT reference FROM document_draft WHERE id = $1",
+            document_id,
+            schema_name=schema_name,
+        )
+        if not doc_data:
+            raise DocumentNotFoundError(document_id)
+        reference_text = doc_data['reference']
 
-                # Obtener firmantes
-                cursor.execute(
-                    """
-                    SELECT json_agg(
-                        json_build_object(
-                            'user_id', ds.user_id,
-                            'full_name', u.full_name,
-                            'status', ds.status,
-                            'is_numerator', ds.is_numerator,
-                            'signing_order', ds.signing_order,
-                            'signed_at', ds.signed_at
-                        )
-                    ) as signers
-                    FROM document_signers ds
-                    JOIN users u ON ds.user_id = u.id
-                    WHERE ds.document_id = %s
-                    """,
-                    (document_id,)
+        # Obtener firmantes
+        signers_result = await fetch_one(
+            """
+            SELECT json_agg(
+                json_build_object(
+                    'user_id', ds.user_id,
+                    'full_name', u.full_name,
+                    'status', ds.status,
+                    'is_numerator', ds.is_numerator,
+                    'signing_order', ds.signing_order,
+                    'signed_at', ds.signed_at
                 )
-                signers_result = cursor.fetchone()
-                signers_data = signers_result['signers'] if signers_result else []
+            ) as signers
+            FROM document_signers ds
+            JOIN users u ON ds.user_id = u.id
+            WHERE ds.document_id = $1
+            """,
+            document_id,
+            schema_name=schema_name,
+        )
+        signers_data = signers_result['signers'] if signers_result else []
 
-                # Obtener sector_ids de los firmantes
-                cursor.execute(
-                    """
-                    SELECT ARRAY_AGG(DISTINCT u.sector_id) FILTER (WHERE u.sector_id IS NOT NULL) as sector_ids
-                    FROM document_signers ds
-                    JOIN users u ON ds.user_id = u.id
-                    WHERE ds.document_id = %s
-                    """,
-                    (document_id,)
-                )
-                signer_sectors_result = cursor.fetchone()
-                signer_sector_ids = signer_sectors_result['sector_ids'] if signer_sectors_result else None
+        # Obtener sector_ids de los firmantes
+        signer_sectors_result = await fetch_one(
+            """
+            SELECT ARRAY_AGG(DISTINCT u.sector_id) FILTER (WHERE u.sector_id IS NOT NULL) as sector_ids
+            FROM document_signers ds
+            JOIN users u ON ds.user_id = u.id
+            WHERE ds.document_id = $1
+            """,
+            document_id,
+            schema_name=schema_name,
+        )
+        signer_sector_ids = signer_sectors_result['sector_ids'] if signer_sectors_result else None
 
         logger.info("Datos recolectados")
 
@@ -271,40 +266,39 @@ async def create_and_sign_case_document(
         # ================================================================
         logger.info("PASO 7: Confirmando firma en official_documents (UPDATE)...")
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                # Marcar como firmado
-                cursor.execute(
-                    """
-                    UPDATE official_documents
-                    SET signed_at = CURRENT_TIMESTAMP
-                    WHERE id = %s AND signed_at IS NULL
-                    """,
-                    (document_id,)
-                )
+        await execute(
+            """
+            UPDATE official_documents
+            SET signed_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND signed_at IS NULL
+            """,
+            document_id,
+            schema_name=schema_name,
+        )
 
-                # Actualizar el firmante en el array signers con jsonb_set
-                # Formato ISO con T y Z para consistencia con numerator.py (commit 490cd24)
-                cursor.execute(
-                    """
-                    UPDATE official_documents
-                    SET signers = (
-                        SELECT jsonb_agg(
-                            CASE WHEN s->>'user_id' = %s
-                                THEN jsonb_set(
-                                    jsonb_set(s, '{status}', '"signed"'),
-                                    '{signed_at}', to_jsonb(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-                                )
-                                ELSE s
-                            END
+        # Actualizar el firmante en el array signers con jsonb_set
+        # Formato ISO con T y Z para consistencia con numerator.py (commit 490cd24)
+        await execute(
+            """
+            UPDATE official_documents
+            SET signers = (
+                SELECT jsonb_agg(
+                    CASE WHEN s->>'user_id' = $1
+                        THEN jsonb_set(
+                            jsonb_set(s, '{status}', '"signed"'),
+                            '{signed_at}', to_jsonb(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
                         )
-                        FROM jsonb_array_elements(signers) s
-                    )
-                    WHERE id = %s
-                    """,
-                    (user_id, document_id)
+                        ELSE s
+                    END
                 )
-                conn.commit()
+                FROM jsonb_array_elements(signers) s
+            )
+            WHERE id = $2
+            """,
+            user_id,
+            document_id,
+            schema_name=schema_name,
+        )
 
         logger.info("official_documents actualizado con signed_at y signers")
 
@@ -313,21 +307,21 @@ async def create_and_sign_case_document(
         # ================================================================
         logger.info("PASO 8: Actualizando estados a 'signed'...")
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "UPDATE document_draft SET status = 'signed' WHERE id = %s",
-                    (document_id,)
-                )
-                cursor.execute(
-                    """
-                    UPDATE document_signers
-                    SET status = 'signed', signed_at = CURRENT_TIMESTAMP
-                    WHERE document_id = %s AND user_id = %s
-                    """,
-                    (document_id, user_id)
-                )
-                conn.commit()
+        await execute(
+            "UPDATE document_draft SET status = 'signed' WHERE id = $1",
+            document_id,
+            schema_name=schema_name,
+        )
+        await execute(
+            """
+            UPDATE document_signers
+            SET status = 'signed', signed_at = CURRENT_TIMESTAMP
+            WHERE document_id = $1 AND user_id = $2
+            """,
+            document_id,
+            user_id,
+            schema_name=schema_name,
+        )
 
         logger.info("Estados actualizados")
         logger.info("Proceso completado exitosamente")
@@ -472,7 +466,7 @@ async def _direct_pdf_flow(
         # Paso 3: Subir a R2 oficial
         logger.info("3/3: Subiendo a R2 oficial...")
         from services.storage.cloudflare import get_tenant_r2_client
-        r2_client = get_tenant_r2_client(schema_name=schema_name)
+        r2_client = await get_tenant_r2_client(schema_name=schema_name)
 
         filename_oficial = f"{payload['official_document_number']}.pdf"
         await run_in_threadpool(r2_client.upload_oficial, signed_pdf_bytes, filename_oficial)

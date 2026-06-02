@@ -29,8 +29,8 @@ async def get_record_relations(
 ):
     """Listar relaciones de un legajo con otros legajos."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = get_relations(
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await get_relations(
             record_id,
             db_user_id,
             schema_name=schema_name,
@@ -58,9 +58,9 @@ async def create_record_relation(
 ):
     """Crear una relación entre dos legajos."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = create_relation(
+        result = await create_relation(
             record_id=record_id,
             target_record_id=request.target_record_id,
             relation_type=request.relation_type,
@@ -91,9 +91,9 @@ async def delete_record_relation(
 ):
     """Eliminar una relación entre legajos."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = delete_relation(
+        result = await delete_relation(
             record_id=record_id,
             relation_id=relation_id,
             user_id=db_user_id,

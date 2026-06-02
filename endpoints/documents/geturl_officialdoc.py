@@ -1,6 +1,7 @@
 """Endpoint para obtener URL de descarga de documentos oficiales."""
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
+from uuid import UUID
 from shared.exceptions import (
     AuthorizationError, DocumentNotFoundError, ValidationError, DocumentStateError,
     exception_to_http_exception
@@ -37,11 +38,12 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def get_url_official_doc(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento"),
+    document_id: UUID = Path(..., description="UUID del documento"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> OfficialDocumentUrlResponse:
     """Obtiene URL temporal para descargar documento oficial firmado."""
+    document_id = str(document_id)
     logger.info(
         "Obteniendo URL de documento oficial",
         extra={
@@ -54,7 +56,7 @@ async def get_url_official_doc(
 
     try:
         from services.documents.permissions import can_user_view_document
-        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+        if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
             from shared.exceptions import AuthorizationError
             raise AuthorizationError("No tiene permisos para ver este documento")
         result = await get_official_document_url(document_id, schema_name=schema_name)

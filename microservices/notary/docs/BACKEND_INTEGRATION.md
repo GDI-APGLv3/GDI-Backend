@@ -95,7 +95,7 @@ signature_type = response.headers.get("X-Signature-Type")
 ## Ejemplo de Request
 
 ```bash
-curl -X POST "https://notary.gdilatam.com/sign-pdf" \
+curl -X POST "https://notary.your-domain.com/sign-pdf" \
   -H "X-API-Key: ${NOTARY_API_KEY}" \
   -F "pdf_file=@documento.pdf" \
   -F "name=Juan Perez" \

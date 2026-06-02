@@ -9,11 +9,12 @@ from shared.logging import setup_logging, get_logger
 setup_logging()
 
 # Ahora sí importar el resto
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from database import DATABASE_URL, init_db_pool
+from fastapi.responses import JSONResponse
+import asyncpg
+from database import DATABASE_URL, init_pool, close_pool
 from typing import Dict, Any
 import asyncio
 import importlib
@@ -21,9 +22,43 @@ import os
 from models.tags import tag_metadata
 from middleware.tenant_middleware import TenantMiddleware
 from middleware.rate_limit import RateLimitMiddleware
+from middleware.host_filter import HostFilterMiddleware
 
 # Logger para el módulo main (usa el formatter con correlation_id)
 main_logger = get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gestiona init/cierre del pool asyncpg y servicios de background."""
+    await init_pool()
+    from shared.tenant_validation import clear_all_cache
+    clear_all_cache()
+    main_logger.info("[OK] Pool asyncpg inicializado")
+
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from jobs.orphan_inprocess import schedule_orphan_reclaim
+    scheduler = AsyncIOScheduler()
+    schedule_orphan_reclaim(scheduler)
+    scheduler.start()
+    app.state.scheduler = scheduler
+    main_logger.info("[OK] APScheduler iniciado - orphan_reclaim cada 300s")
+
+    asyncio.create_task(_warm_up_services())
+    main_logger.info("[OK] Backend GDI iniciado correctamente con sistema de expedientes")
+
+    yield
+
+    if hasattr(app.state, "scheduler"):
+        app.state.scheduler.shutdown(wait=False)
+        main_logger.info("[OK] APScheduler detenido correctamente")
+    await close_pool()
+    main_logger.info("[OK] Pool asyncpg cerrado")
+
+
+# MEDIA-15: Ocultar docs en producción — solo disponibles en desarrollo/testing
+_ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+_is_production = _ENVIRONMENT == "production"
 
 # Configuración de la aplicación con metadatos
 app = FastAPI(
@@ -35,8 +70,6 @@ app = FastAPI(
     - Gestión de documentos en diferentes estados (borradores y oficiales)
     - Consulta de documentos por usuario con filtros avanzados y paginación
     - Recuperación de metadatos del sistema (estados visuales, tipos de documentos)
-
-    USER: 457c52a4-9305-4e8a-9642-0b9380a4768a
     """,
     version="1.0.0",
     contact={
@@ -50,20 +83,23 @@ app = FastAPI(
     },
     openapi_tags=tag_metadata,
     swagger_ui_parameters={
-        "persistAuthorization": True,  # Mantener token en Swagger UI entre recargas
-    }
+        "persistAuthorization": True,
+    },
+    lifespan=lifespan,
+    # MEDIA-15: Deshabilitar docs en producción para no exponer la API sin auth
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
 )
 
 # Configuración de CORS para permitir acceso desde el frontend
 # Orígenes permitidos: localhost (desarrollo) y Vercel (producción, vía FRONTEND_URL)
-allowed_origins = (
-    # Puertos 3000-3050 para localhost y 127.0.0.1
-    [f"http://localhost:{port}" for port in range(3000, 3051)] +
-    [f"http://127.0.0.1:{port}" for port in range(3000, 3051)] +
-    # Puertos 8000-8050 para localhost y 127.0.0.1
-    [f"http://localhost:{port}" for port in range(8000, 8051)] +
-    [f"http://127.0.0.1:{port}" for port in range(8000, 8051)]
-)
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
 
 # Agregar origenes de produccion (soporta multiples URLs separadas por coma)
 frontend_urls = os.getenv("FRONTEND_URL", "")
@@ -77,7 +113,17 @@ app.add_middleware(
     allow_origins=allowed_origins,  # Orígenes específicos
     allow_credentials=True,  # Permite cookies/credenciales
     allow_methods=["*"],  # Permite todos los métodos HTTP
-    allow_headers=["*"],  # Permite todos los headers
+    # MEDIA-16: lista explícita de headers permitidos (no wildcard)
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "X-User-ID",
+        "X-Tenant-Schema",
+        "X-API-Key",
+    ],
 )
 
 # Rate limiting por IP (60 req/min) - corta ANTES de TenantMiddleware
@@ -88,11 +134,68 @@ app.add_middleware(RateLimitMiddleware)
 app.add_middleware(TenantMiddleware)
 main_logger.info("TenantMiddleware registrado correctamente")
 
+# Host-based filter: subdominios dedicados (enlace.your-domain.com) solo
+# responden a paths whitelisted; el resto -> 404. Se registra ULTIMO
+# para que ejecute PRIMERO en el request (Starlette aplica middlewares
+# en orden inverso al registro).
+app.add_middleware(HostFilterMiddleware)
+main_logger.info("HostFilterMiddleware registrado correctamente")
+
+# ---------------------------------------------------------------------------
+# Handlers globales de excepciones
+# Garantizan que NUNCA llegue al cliente un mensaje técnico de BD o stack.
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(asyncpg.PostgresError)
+async def asyncpg_error_handler(request: Request, exc: asyncpg.PostgresError) -> JSONResponse:
+    """Intercepta excepciones asyncpg que lleguen sin capturar."""
+    main_logger.error(
+        f"[DB ERROR] {type(exc).__name__} en {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
+    if isinstance(exc, asyncpg.ForeignKeyViolationError):
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "No se puede realizar esta operación porque el registro está vinculado a otros datos"},
+        )
+    if isinstance(exc, asyncpg.UniqueViolationError):
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "Ya existe un registro con esos datos"},
+        )
+    if isinstance(exc, asyncpg.IntegrityConstraintViolationError):
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "No se puede realizar esta operación por restricciones de integridad"},
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Error al procesar la solicitud"},
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Captura cualquier excepción no controlada y evita que llegue al cliente como mensaje técnico."""
+    # HTTPException ya tiene su propio handler en FastAPI — no la interceptamos aquí
+    if isinstance(exc, HTTPException):
+        raise exc
+
+    main_logger.error(
+        f"[UNHANDLED] {type(exc).__name__} en {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Error interno del servidor"},
+    )
+
+
 # Función para cargar dinámicamente todos los endpoints
 def include_endpoints(app):
     """Incluye dinámicamente todos los endpoints encontrados en la carpeta endpoints"""
     # Categorías de endpoints a cargar
-    endpoint_categories = ['auth', 'documents', 'users', 'system', 'cases', 'sectors', 'dashboard', 'notes', 'memos', 'ccoo', 'rlm', 'search']
+    endpoint_categories = ['auth', 'documents', 'users', 'system', 'cases', 'sectors', 'dashboard', 'notes', 'memos', 'ccoo', 'rlm', 'search', 'digital_signature']
     
     # Recorrer cada categoría
     for category in endpoint_categories:
@@ -148,6 +251,10 @@ def include_endpoints(app):
             router_module = importlib.import_module(f"{category_path}.router")
             if hasattr(router_module, 'router'):
                 app.include_router(router_module.router)
+        elif category == 'digital_signature':
+            router_module = importlib.import_module(f"{category_path}.router")
+            if hasattr(router_module, 'digital_signature_router'):
+                app.include_router(router_module.digital_signature_router)
         else:
             # Cargar todos los módulos .py de otras categorías
             for file in os.listdir(category_dir):
@@ -209,22 +316,19 @@ async def _warm_up_services():
                 main_logger.warning(f"[WARM-UP] {name}: no responde ({e.__class__.__name__})")
 
 
-# Inicializar pool de conexiones al arrancar
-@app.on_event("startup")
-async def startup_event():
-    """Inicializar recursos al arrancar la aplicación"""
-    init_db_pool()
-    # Limpiar cache de tenants al iniciar (evita datos obsoletos)
-    from shared.tenant_validation import clear_all_cache
-    clear_all_cache()
-    main_logger.info("[OK] Backend GDI iniciado correctamente con sistema de expedientes")
-    asyncio.create_task(_warm_up_services())
-
 # Función de favicon para evitar 404 en navegadores
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Endpoint para manejar solicitudes de favicon de los navegadores"""
     return {"message": "No favicon configured"}
+
+
+# Health check publico (sin auth, sin tenant). Lo usa Fly.io para
+# monitoring + Let's Encrypt para validar el subdominio enlace.your-domain.com
+# (HostFilterMiddleware lo whitelistea).
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    return {"status": "ok"}
 
 # Iniciar el servidor solo cuando se ejecuta directamente (desarrollo local)
 if __name__ == "__main__":

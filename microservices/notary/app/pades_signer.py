@@ -14,6 +14,7 @@ Versión: 1.0.0
 import asyncio
 import io
 import logging
+import time
 from typing import Optional
 
 from pyhanko.sign import signers, timestamps, fields
@@ -35,6 +36,117 @@ from .certificate_loader import LoadedCertificate, validate_certificate
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# CIRCUIT BREAKER PARA TSA
+# =============================================================================
+
+class TsaCircuitBreaker:
+    """
+    Circuit breaker minimalista en memoria para las llamadas al TSA (AC-ONTI).
+
+    Estados:
+    - CLOSED  : comportamiento normal, las llamadas pasan.
+    - OPEN    : el TSA se considera caído; las llamadas fallan rápido con 503.
+    - HALF_OPEN: período de prueba tras el cooldown; deja pasar UNA request;
+                 si tiene éxito → CLOSED, si falla → OPEN (reinicia cooldown).
+
+    Parámetros (hardcodeados; se pueden externalizar a config.py si se necesita):
+    - FAILURE_THRESHOLD = 5   fallos consecutivos para abrir el breaker.
+    - COOLDOWN_SECONDS  = 60  segundos en OPEN antes de pasar a HALF_OPEN.
+
+    El estado es compartido entre workers de Gunicorn SOLO si se usa
+    threading/uvicorn workers (memoria compartida). Con múltiples procesos
+    Gunicorn cada worker tiene su propio estado, lo cual es aceptable:
+    cada proceso abrirá su propio breaker tras sus propias fallas.
+    """
+
+    # Umbral de fallos consecutivos antes de abrir el breaker.
+    # Racional: con TSA_RETRIES=2 y TSA_TIMEOUT=3s cada ciclo de fallos
+    # tarda ~9.8s (3 intentos + 0.2s + 0.6s backoff). Con 5 ciclos fallidos
+    # el sistema esperó ~49s antes de abrir —suficiente para distinguir
+    # una caída real del TSA de timeouts esporádicos.
+    FAILURE_THRESHOLD = 5
+
+    # Segundos en estado OPEN antes de intentar HALF_OPEN.
+    COOLDOWN_SECONDS = 60
+
+    # Nombres de estados (evita strings sueltos)
+    STATE_CLOSED    = "CLOSED"
+    STATE_OPEN      = "OPEN"
+    STATE_HALF_OPEN = "HALF_OPEN"
+
+    def __init__(self):
+        self._state = self.STATE_CLOSED
+        self._failure_count = 0       # fallos consecutivos en CLOSED / HALF_OPEN
+        self._opened_at: float = 0.0  # timestamp (time.monotonic) cuando se abrió
+
+    # ------------------------------------------------------------------
+    # Propiedades de consulta
+    # ------------------------------------------------------------------
+
+    @property
+    def state(self) -> str:
+        """Devuelve el estado actual, resolviendo la transición OPEN→HALF_OPEN."""
+        if self._state == self.STATE_OPEN:
+            elapsed = time.monotonic() - self._opened_at
+            if elapsed >= self.COOLDOWN_SECONDS:
+                logger.info(
+                    f"TSA CircuitBreaker: cooldown expirado ({elapsed:.0f}s) → HALF_OPEN"
+                )
+                self._state = self.STATE_HALF_OPEN
+        return self._state
+
+    @property
+    def is_open(self) -> bool:
+        """True si el breaker NO permite pasar la request (estado OPEN)."""
+        return self.state == self.STATE_OPEN
+
+    # ------------------------------------------------------------------
+    # Registro de resultados
+    # ------------------------------------------------------------------
+
+    def record_success(self):
+        """Llamar tras una respuesta exitosa del TSA."""
+        if self._state != self.STATE_CLOSED:
+            logger.info(
+                f"TSA CircuitBreaker: éxito en estado {self._state} → CLOSED"
+            )
+        self._state = self.STATE_CLOSED
+        self._failure_count = 0
+
+    def record_failure(self):
+        """
+        Llamar tras un fallo del TSA (timeout, error HTTP, etc.).
+        En HALF_OPEN un fallo único reabre el breaker inmediatamente.
+        """
+        self._failure_count += 1
+
+        if self._state == self.STATE_HALF_OPEN:
+            logger.warning(
+                "TSA CircuitBreaker: fallo en HALF_OPEN → OPEN "
+                f"(cooldown reinicia {self.COOLDOWN_SECONDS}s)"
+            )
+            self._open()
+            return
+
+        if self._failure_count >= self.FAILURE_THRESHOLD:
+            logger.error(
+                f"TSA CircuitBreaker: {self._failure_count} fallos consecutivos "
+                f"(umbral={self.FAILURE_THRESHOLD}) → OPEN. "
+                f"Cooldown: {self.COOLDOWN_SECONDS}s"
+            )
+            self._open()
+
+    def _open(self):
+        self._state = self.STATE_OPEN
+        self._opened_at = time.monotonic()
+        self._failure_count = 0  # reinicia para la próxima vez que se cierre
+
+
+# Singleton del circuit breaker — compartido en el proceso.
+_tsa_circuit_breaker = TsaCircuitBreaker()
+
+
 class PAdESSigningError(Exception):
     """Excepción para errores de firma PAdES."""
     pass
@@ -42,6 +154,14 @@ class PAdESSigningError(Exception):
 
 class PAdESTimestampError(PAdESSigningError):
     """Error al obtener timestamp del TSA."""
+    pass
+
+
+class PAdESTsaUnavailableError(PAdESTimestampError):
+    """
+    Error fail-fast cuando el circuit breaker está abierto.
+    El caller debería devolver HTTP 503 al cliente en lugar de 500.
+    """
     pass
 
 
@@ -135,17 +255,36 @@ class RetryingTimestamper(timestamps.TimeStamper):
         self.last_url = url  # expuesto para logging via P3.0
 
     async def async_request_tsa_response(self, req):
+        # --- Circuit breaker: fail-fast si el breaker está abierto ---
+        if _tsa_circuit_breaker.is_open:
+            logger.warning(
+                f"TSA CircuitBreaker OPEN: rechazando llamada a {self._url} "
+                f"sin esperar (fail-fast)."
+            )
+            raise PAdESTsaUnavailableError(
+                "TSA no disponible (circuit breaker abierto). "
+                "El servicio de timestamp AC-ONTI está respondiendo con errores "
+                "consecutivos. Reintentá en unos segundos."
+            )
+
         last_error = None
         total_attempts = self._retries + 1
         for attempt in range(total_attempts):
             try:
+                # HTTPTimeStamper ya tiene timeout explícito (TSA_TIMEOUT segundos)
+                # configurado en get_timestamp_client() → RetryingTimestamper.__init__.
                 resp = await self._client.async_request_tsa_response(req)
                 self.last_retry_count = attempt
                 if attempt > 0:
                     logger.info(
                         f"TSA respondio en intento {attempt + 1}/{total_attempts}"
                     )
+                # Éxito: cerrar el breaker si estaba en HALF_OPEN
+                _tsa_circuit_breaker.record_success()
                 return resp
+            except PAdESTimestampError:
+                # Re-raise sin registrar como fallo del TSA (ya fue tratado arriba)
+                raise
             except Exception as e:
                 last_error = e
                 logger.warning(
@@ -154,7 +293,11 @@ class RetryingTimestamper(timestamps.TimeStamper):
                 if attempt < self._retries:
                     # Backoff exponencial: 200ms, 600ms
                     await asyncio.sleep(0.2 * (3 ** attempt))
+
         self.last_retry_count = self._retries
+
+        # Todos los intentos fallaron: registrar en el circuit breaker
+        _tsa_circuit_breaker.record_failure()
 
         raise PAdESTimestampError(
             f"TSA {self._url} fallo {total_attempts} intentos seguidos. "
@@ -352,6 +495,10 @@ async def sign_pdf_combined(
 
         return result
 
+    except PAdESSigningError:
+        # Subclases (incluida PAdESTsaUnavailableError) se propagan tal cual
+        # para que el caller distinga TSA caído (503) de otros errores PAdES (500).
+        raise
     except PyHankoSigningError as e:
         logger.error(f"Error de pyHanko: {e}")
         raise PAdESSigningError(f"Error al firmar PDF: {e}")

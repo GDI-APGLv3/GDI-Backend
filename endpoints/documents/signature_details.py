@@ -1,5 +1,6 @@
 """Endpoint para obtener detalles de documento en proceso de firma."""
 
+from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
 from models.documents.signing import DocumentSignatureDetailsResponse
@@ -29,14 +30,15 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def get_document_signature_details(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento a visualizar"),
+    document_id: UUID = Path(..., description="UUID del documento a visualizar"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> DocumentSignatureDetailsResponse:
     """Obtiene detalles completos de un documento en proceso de firma."""
+    document_id = str(document_id)
     try:
         from services.documents.permissions import can_user_view_document
-        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+        if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
             raise AuthorizationError("No tiene permisos para ver este documento")
         logger.info(f"Obteniendo detalles de firma - Usuario: {request.state.tenant_user_id[:8]}")
         result = await build_signature_details_response(document_id, request.state.tenant_user_id, schema_name=schema_name)

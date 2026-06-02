@@ -3,6 +3,7 @@ Endpoint para archivar/desarchivar un memo.
 A diferencia de NOTAS, no requiere sector_id (archiva por user_id).
 """
 
+from uuid import UUID
 from fastapi import APIRouter, Depends, Path
 from shared.logging import get_logger
 from shared.dependencies import get_tenant_schema
@@ -40,7 +41,7 @@ router = APIRouter()
 """
 )
 async def archive_memo(
-    document_id: str = Path(..., description="UUID del documento a archivar"),
+    document_id: UUID = Path(..., description="UUID del documento a archivar"),
     request: ArchiveMemoRequest = ...,
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
@@ -54,8 +55,8 @@ async def archive_memo(
             f"Usuario {current_user.user_id} intentando {action} memo {document_id}"
         )
 
-        result = toggle_memo_archive(
-            document_id=document_id,
+        result = await toggle_memo_archive(
+            document_id=str(document_id),
             user_id=current_user.user_id,
             archived=request.archived,
             schema_name=schema_name

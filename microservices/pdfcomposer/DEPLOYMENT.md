@@ -82,7 +82,7 @@ cd PDFCOMPOSER
 pip install -r requirements.txt
 
 # 3. Configurar entorno local
-echo "API_KEY=miapikey" > .env
+echo "API_KEY=your-api-key-here" > .env
 
 # 4. Ejecutar API
 # Opción A: Desarrollo con hot-reload
@@ -108,7 +108,7 @@ docker build -t pdfcomposer .
 
 # Run container
 docker run -p 8002:8080 \
-  -e API_KEY=miapikey \
+  -e API_KEY=your-api-key-here \
   -e PORT=8080 \
   pdfcomposer
 ```
@@ -122,7 +122,7 @@ curl http://localhost:8002/health
 
 # Test endpoint con autenticación
 curl -X POST "http://localhost:8002/preview-pdf/" \
-  -H "X-API-Key: miapikey" \
+  -H "X-API-Key: your-api-key-here" \
   -F "TypeDocument=TEST" \
   -F "Reference=TEST-001" \
   -F "Text=Test content"
@@ -146,7 +146,7 @@ flyctl logs -a <your-pdfcomposer-prd-app>
 API_KEY=your-secure-api-key-here
 
 # Desarrollo (.env)
-API_KEY=miapikey
+API_KEY=your-api-key-here
 ```
 
 ---

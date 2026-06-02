@@ -76,7 +76,7 @@ async def list_received_notes(
             f"{' search=' + search if search else ''}"
         )
 
-        result = get_received_notes_multi_sector(
+        result = await get_received_notes_multi_sector(
             viewable_sector_ids,
             schema_name=schema_name,
             page=page,

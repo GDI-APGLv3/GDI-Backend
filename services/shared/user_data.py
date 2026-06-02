@@ -6,11 +6,11 @@ Sigue Clean Architecture y Single Responsibility Principle.
 """
 
 from typing import Dict, Any, List, Optional
-from database import get_db_connection, execute_query
+from database import fetch_all, fetch_one
 from shared.exceptions import ValidationError
 
 
-def get_user_complete_data(user_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
+async def get_user_complete_data(user_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
     """
     Obtiene datos básicos de un usuario para preview - OPTIMIZADA.
 
@@ -24,15 +24,15 @@ def get_user_complete_data(user_id: str, *, schema_name: str) -> Optional[Dict[s
         Dict con datos básicos del usuario o None si no existe
     """
     query = _build_creator_user_query()
-    result = execute_query(query, (user_id,), schema_name=schema_name)
+    result = await fetch_one(query, user_id, schema_name=schema_name)
 
     if not result:
         return None
 
-    return _format_creator_data(result[0])
+    return _format_creator_data(dict(result))
 
 
-def get_multiple_users_complete_data(user_ids: List[str], *, schema_name: str) -> List[Dict[str, Any]]:
+async def get_multiple_users_complete_data(user_ids: List[str], *, schema_name: str) -> List[Dict[str, Any]]:
     """
     Obtiene datos completos de múltiples usuarios.
 
@@ -49,12 +49,12 @@ def get_multiple_users_complete_data(user_ids: List[str], *, schema_name: str) -
         return []
 
     query = _build_multiple_users_query(len(user_ids))
-    result = execute_query(query, user_ids, schema_name=schema_name)
+    result = await fetch_all(query, *user_ids, schema_name=schema_name)
 
-    return [_format_single_user_data(user) for user in result]
+    return [_format_single_user_data(dict(user)) for user in result]
 
 
-def get_document_signers_complete_data(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
+async def get_document_signers_complete_data(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
     """
     Obtiene datos completos de firmantes de un documento específico.
 
@@ -72,9 +72,9 @@ def get_document_signers_complete_data(document_id: str, *, schema_name: str) ->
         ValidationError: Si no hay numerador o hay más de uno
     """
     query = _build_document_signers_query()
-    result = execute_query(query, (document_id,), schema_name=schema_name)
+    result = await fetch_all(query, document_id, schema_name=schema_name)
 
-    signers = [_format_signer_data(signer) for signer in result]
+    signers = [_format_signer_data(dict(signer)) for signer in result]
 
     # Validar reglas de numerador
     _validate_numerator_rules(signers, document_id)
@@ -89,23 +89,23 @@ def get_document_signers_complete_data(document_id: str, *, schema_name: str) ->
 def _validate_numerator_rules(signers: List[Dict[str, Any]], document_id: str) -> None:
     """
     Valida las reglas de numerador para un documento.
-    
+
     Reglas:
     - Debe haber exactamente 1 numerador (mínimo 1, máximo 1)
-    
+
     Args:
         signers: Lista de firmantes del documento
         document_id: ID del documento para mensajes de error
-        
+
     Raises:
         ValidationError: Si no se cumplen las reglas de numerador
     """
     from shared.exceptions import ValidationError
-    
+
     # Contar numeradores
     numerators = [s for s in signers if s.get('is_numerator') is True]
     numerator_count = len(numerators)
-    
+
     if numerator_count == 0:
         raise ValidationError(f"Documento {document_id} debe tener al menos 1 numerador")
     elif numerator_count > 1:
@@ -139,7 +139,7 @@ def _build_creator_user_query() -> str:
         LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
         LEFT JOIN sectors s ON u.sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
-        WHERE u.id = %s
+        WHERE u.id = $1
         ORDER BY u.id, cs.name
     """
 
@@ -147,7 +147,7 @@ def _build_creator_user_query() -> str:
 def _build_single_user_query() -> str:
     """
     Construye query para obtener datos completos de un usuario.
-    
+
     Incluye JOINs necesarios para traer todos los datos relacionados.
     """
     return """
@@ -165,7 +165,7 @@ def _build_single_user_query() -> str:
         LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
         LEFT JOIN sectors s ON u.sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
-        WHERE u.id = %s
+        WHERE u.id = $1
         ORDER BY u.id, cs.name
     """
 
@@ -173,12 +173,12 @@ def _build_single_user_query() -> str:
 def _build_multiple_users_query(user_count: int) -> str:
     """
     Construye query para obtener datos de múltiples usuarios.
-    
+
     Args:
         user_count: Número de usuarios para generar placeholders
     """
-    placeholders = ', '.join(['%s'] * user_count)
-    
+    placeholders = ', '.join([f'${i+1}' for i in range(user_count)])
+
     return f"""
         SELECT DISTINCT ON (u.id)
             u.id as user_id,
@@ -212,6 +212,7 @@ def _build_document_signers_query() -> str:
             u.full_name,
             u.email,
             ds.is_numerator,
+            ds.signed_at,
             u.profile_picture_url,
             cs.name as seal_name,
             d.acronym as department_acronym,
@@ -225,7 +226,7 @@ def _build_document_signers_query() -> str:
         LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
         LEFT JOIN sectors s ON u.sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
-        WHERE ds.document_id = %s
+        WHERE ds.document_id = $1
         ORDER BY ds.user_id, cs.name
     """
 
@@ -237,7 +238,7 @@ def _build_document_signers_query() -> str:
 def _format_single_user_data(user_raw: Dict[str, Any]) -> Dict[str, Any]:
     """
     Formatea datos crudos de un usuario a estructura estándar.
-    
+
     Mantiene consistencia con el servicio de búsqueda optimizado.
     """
     return {
@@ -273,7 +274,7 @@ def _format_creator_data(user_raw: Dict[str, Any]) -> Dict[str, Any]:
 def _format_signer_data(signer_raw: Dict[str, Any]) -> Dict[str, Any]:
     """
     Formatea datos de un firmante - SOLO CAMPOS NECESARIOS.
-    
+
     Mantiene compatibilidad con estructura original + estado de firma.
     """
     return {
@@ -284,11 +285,12 @@ def _format_signer_data(signer_raw: Dict[str, Any]) -> Dict[str, Any]:
         "profile_picture_url": signer_raw.get('profile_picture_url'),
         "seal_name": signer_raw.get('seal_name'),
         "department_acronym": signer_raw.get('department_acronym'),
-        "has_signed": bool(signer_raw.get('has_signed', False))  # ÚNICO CAMPO NUEVO
+        "has_signed": bool(signer_raw.get('has_signed', False)),
+        "signed_at": signer_raw.get('signed_at'),
     }
 
 
-def get_document_signers_for_preview(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
+async def get_document_signers_for_preview(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
     """
     Obtiene datos de firmantes para previsualización SIN validaciones.
 
@@ -303,7 +305,7 @@ def get_document_signers_for_preview(document_id: str, *, schema_name: str) -> L
         Lista de firmantes (puede estar vacía si no hay firmantes)
     """
     query = _build_document_signers_query()
-    result = execute_query(query, (document_id,), schema_name=schema_name)
+    result = await fetch_all(query, document_id, schema_name=schema_name)
 
     # Retornar firmantes formateados SIN validaciones
-    return [_format_signer_data(signer) for signer in result]
+    return [_format_signer_data(dict(signer)) for signer in result]

@@ -3,6 +3,7 @@ Endpoint para guardar cambios en un documento editable.
 Optimizado siguiendo principios de Clean Code.
 """
 from typing import Optional
+from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
 from models.documents.editing import SaveDocumentRequest, SaveDocumentResponse
@@ -102,7 +103,7 @@ Todos los campos son opcionales. Solo se actualizan los campos enviados.
 )
 async def save_document_changes_endpoint(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento"),
+    document_id: UUID = Path(..., description="UUID del documento"),
     body: SaveDocumentRequest = None,
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
@@ -121,6 +122,7 @@ async def save_document_changes_endpoint(
     Raises:
         HTTPException: Para errores de validación, documento no encontrado o estado inválido
     """
+    document_id = str(document_id)
     try:
         logger.info(f"Usuario {request.state.tenant_user_id} guardando cambios en documento {document_id}")
 
@@ -156,7 +158,7 @@ async def save_document_changes_endpoint(
         if body.proposed_case_ids is not None:
             logger.debug(f"Proponiendo vinculación a {len(body.proposed_case_ids)} expedientes")
 
-        result = save_document_changes(
+        result = await save_document_changes(
             document_id=document_id,
             reference=body.reference,
             content=body.content,

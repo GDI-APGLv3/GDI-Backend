@@ -13,6 +13,8 @@ from .create_imported import router as create_imported_router
 # B. BÚSQUEDA Y AUTOCOMPLETADO
 from .autocomplete import router as autocomplete_router
 from .search_official import router as search_official_router
+from .search import router as search_router
+from .pending_signatures import router as pending_signatures_router
 
 # C. OBTENER DETALLES (por especificidad)
 from .unified_details import router as unified_details_router
@@ -44,6 +46,10 @@ documents_router.include_router(create_document_router)
 documents_router.include_router(create_imported_router)
 
 # B. BÚSQUEDA Y AUTOCOMPLETADO
+# search y pending_signatures van ANTES que rutas con path params para evitar
+# que FastAPI interprete "search" o "pending-signatures" como un document_id.
+documents_router.include_router(search_router)
+documents_router.include_router(pending_signatures_router)
 documents_router.include_router(autocomplete_router)
 documents_router.include_router(search_official_router)
 

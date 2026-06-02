@@ -16,7 +16,7 @@ USO:
 from typing import Dict, Any
 from datetime import datetime
 
-from database import get_db_connection
+from database import get_conn
 from shared.exceptions import ValidationError
 from shared.logging import get_logger
 from services.cases._document_creator_base import create_and_sign_case_document
@@ -64,7 +64,7 @@ async def create_transfer_document(
     logger.info(f"Motivo: {movement_reason[:50]}...")
 
     # Obtener datos completos de BD para usar en HTML y payload
-    transfer_data = _fetch_transfer_data(
+    transfer_data = await _fetch_transfer_data(
         case_id=case_id,
         case_number=case_number,
         movement_reason=movement_reason,
@@ -117,7 +117,7 @@ async def create_transfer_document(
 # FUNCIONES AUXILIARES
 # ============================================================================
 
-def _fetch_transfer_data(
+async def _fetch_transfer_data(
     case_id: str,
     case_number: str,
     movement_reason: str,
@@ -141,83 +141,79 @@ def _fetch_transfer_data(
     """
     logger.info("Obteniendo datos de BD...")
 
-    with get_db_connection(schema_name) as conn:
-        # Obtener datos del firmante usando función compartida
-        signer_data = get_signer_data(user_id, schema_name=schema_name)
+    # Obtener datos del firmante usando función compartida (async)
+    signer_data = await get_signer_data(user_id, schema_name=schema_name)
 
-        with conn.cursor() as cursor:
-            # Query para sector solicitante (requesting)
-            requesting_query = """
-                SELECT
-                    s.acronym as sector_acronym,
-                    dep.name as department_name,
-                    dep.acronym as department_acronym
-                FROM sectors s
-                JOIN departments dep ON s.department_id = dep.id
-                WHERE s.id = %s
-            """
-            cursor.execute(requesting_query, (requesting_sector_id,))
-            requesting_result = cursor.fetchone()
+    async with get_conn(schema_name=schema_name) as conn:
+        # Query para sector solicitante (requesting)
+        requesting_query = """
+            SELECT
+                s.acronym as sector_acronym,
+                dep.name as department_name,
+                dep.acronym as department_acronym
+            FROM sectors s
+            JOIN departments dep ON s.department_id = dep.id
+            WHERE s.id = $1
+        """
+        requesting_result = await conn.fetchrow(requesting_query, requesting_sector_id)
 
-            if not requesting_result:
-                raise ValidationError(f"Sector solicitante {requesting_sector_id} no encontrado")
+        if not requesting_result:
+            raise ValidationError(f"Sector solicitante {requesting_sector_id} no encontrado")
 
-            # Query para sector receptor (receiving)
-            receiving_query = """
-                SELECT
-                    s.acronym as sector_acronym,
-                    dep.name as department_name,
-                    dep.acronym as department_acronym
-                FROM sectors s
-                JOIN departments dep ON s.department_id = dep.id
-                WHERE s.id = %s
-            """
-            cursor.execute(receiving_query, (receiving_sector_id,))
-            receiving_result = cursor.fetchone()
+        # Query para sector receptor (receiving)
+        receiving_query = """
+            SELECT
+                s.acronym as sector_acronym,
+                dep.name as department_name,
+                dep.acronym as department_acronym
+            FROM sectors s
+            JOIN departments dep ON s.department_id = dep.id
+            WHERE s.id = $1
+        """
+        receiving_result = await conn.fetchrow(receiving_query, receiving_sector_id)
 
-            if not receiving_result:
-                raise ValidationError(f"Sector receptor {receiving_sector_id} no encontrado")
+        if not receiving_result:
+            raise ValidationError(f"Sector receptor {receiving_sector_id} no encontrado")
 
-            # Construir áreas en formato: "SECTOR - Nombre Departamento"
-            requesting_area = f"{requesting_result['sector_acronym']} - {requesting_result['department_name']}"
-            receiving_area = f"{receiving_result['sector_acronym']} - {receiving_result['department_name']}"
+        # Construir áreas en formato: "SECTOR - Nombre Departamento"
+        requesting_area = f"{requesting_result['sector_acronym']} - {requesting_result['department_name']}"
+        receiving_area = f"{receiving_result['sector_acronym']} - {receiving_result['department_name']}"
 
-            # Obtener logo del municipio desde settings
-            cursor.execute("SELECT logo_url FROM settings LIMIT 1")
-            settings_result = cursor.fetchone()
-            logo_url = settings_result['logo_url'] if settings_result and settings_result.get('logo_url') else DEFAULT_LOGO_URL
+        # Obtener logo del municipio desde settings
+        settings_result = await conn.fetchrow("SELECT logo_url FROM settings LIMIT 1")
+        logo_url = settings_result['logo_url'] if settings_result and settings_result['logo_url'] else DEFAULT_LOGO_URL
 
-            # Obtener city desde settings del tenant
-            city = get_city_from_settings(cursor=cursor)
+        # Obtener city desde settings del tenant
+        city = await get_city_from_settings(conn=conn, schema_name=schema_name)
 
-            transfer_data = {
-                # Áreas
-                "requesting_area": requesting_area,
-                "receiving_area": receiving_area,
+    transfer_data = {
+        # Áreas
+        "requesting_area": requesting_area,
+        "receiving_area": receiving_area,
 
-                # Firmante
-                "signer_full_name": signer_data['full_name'],
-                "signer_seal": signer_data['seal'],
-                "signer_department": signer_data['department_name'],
-                "signer_municipality": signer_data['municipality_name'],
+        # Firmante
+        "signer_full_name": signer_data['full_name'],
+        "signer_seal": signer_data['seal'],
+        "signer_department": signer_data['department_name'],
+        "signer_municipality": signer_data['municipality_name'],
 
-                # Logo del municipio
-                "municipality_logo_url": logo_url,
+        # Logo del municipio
+        "municipality_logo_url": logo_url,
 
-                # City del tenant
-                "city_name": city,
+        # City del tenant
+        "city_name": city,
 
-                # Extra para logs
-                "requesting_dept_acronym": requesting_result['department_acronym'],
-                "receiving_dept_acronym": receiving_result['department_acronym']
-            }
+        # Extra para logs
+        "requesting_dept_acronym": requesting_result['department_acronym'],
+        "receiving_dept_acronym": receiving_result['department_acronym']
+    }
 
-            logger.info("Datos obtenidos:")
-            logger.info(f"  - Solicitante: {requesting_area}")
-            logger.info(f"  - Receptor: {receiving_area}")
-            logger.info(f"  - Firmante: {transfer_data['signer_full_name']}")
+    logger.info("Datos obtenidos:")
+    logger.info(f"  - Solicitante: {requesting_area}")
+    logger.info(f"  - Receptor: {receiving_area}")
+    logger.info(f"  - Firmante: {transfer_data['signer_full_name']}")
 
-            return transfer_data
+    return transfer_data
 
 
 def _build_transfer_html(

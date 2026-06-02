@@ -23,8 +23,8 @@ async def get_registries(
 ):
     """Listar registros disponibles con permisos del usuario."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = list_registries(db_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await list_registries(db_user_id, schema_name=schema_name)
 
         return RegistryListResponse(
             success=True,
@@ -45,8 +45,8 @@ async def get_registry(
 ):
     """Obtener detalle de un registro con su data_schema."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = get_registry_detail(str(registry_id), db_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await get_registry_detail(str(registry_id), db_user_id, schema_name=schema_name)
 
         return RegistryDetailResponse(
             success=True,

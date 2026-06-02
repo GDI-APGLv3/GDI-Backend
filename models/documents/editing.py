@@ -98,7 +98,7 @@ class DocumentSigner(BaseModel):
 class SaveDocumentRequest(BaseModel):
     """Modelo para solicitud de guardado de cambios en documento"""
     reference: Optional[str] = Field(None, max_length=250, description="Nuevo asunto o referencia del documento (máximo 250 caracteres)")
-    content: Optional[str] = Field(None, description="Contenido HTML del documento (se almacena como JSON)")
+    content: Optional[str] = Field(None, max_length=500_000, description="Contenido HTML del documento (se almacena como JSON)")
     signers: Optional[List[DocumentSigner]] = Field(None, description="Lista de firmantes del documento")
     recipients: Optional[NoteRecipientsInput] = Field(
         None,

@@ -37,9 +37,9 @@ async def update_record_field(
 ):
     """Actualizar un campo enriquecido específico de un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = update_field(
+        result = await update_field(
             record_id=str(record_id),
             field_name=field_name,
             user_id=db_user_id,
@@ -75,9 +75,9 @@ async def verify_record_field(
 ):
     """Marcar un campo como verificado."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = verify_field(
+        result = await verify_field(
             record_id=str(record_id),
             field_name=field_name,
             user_id=db_user_id,
@@ -109,9 +109,9 @@ async def get_record_history(
 ):
     """Obtener historial de cambios de un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = get_history(
+        result = await get_history(
             record_id=str(record_id),
             user_id=db_user_id,
             schema_name=schema_name,

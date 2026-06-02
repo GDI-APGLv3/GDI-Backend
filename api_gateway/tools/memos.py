@@ -12,7 +12,7 @@ from shared.exceptions import AuthorizationError, NotFoundError
 logger = logging.getLogger(__name__)
 
 
-def get_memos(
+async def get_memos(
     ctx: MCPContext,
     user_id: str,
     page: int = 1,
@@ -36,9 +36,11 @@ def get_memos(
 
     if not user_id:
         raise ValueError("user_id es requerido")
+    if page_size > 100:
+        raise ValueError("page_size máximo es 100")
 
     try:
-        result = get_received_memos(
+        result = await get_received_memos(
             user_id,
             schema_name=ctx.schema_name,
             page=page,
@@ -56,7 +58,7 @@ def get_memos(
         raise RuntimeError(f"Error obteniendo memos: {str(e)}")
 
 
-def get_sent_memos_tool(
+async def get_sent_memos_tool(
     ctx: MCPContext,
     user_id: str,
     page: int = 1,
@@ -80,9 +82,11 @@ def get_sent_memos_tool(
 
     if not user_id:
         raise ValueError("user_id es requerido")
+    if page_size > 100:
+        raise ValueError("page_size máximo es 100")
 
     try:
-        result = get_sent_memos(
+        result = await get_sent_memos(
             user_id,
             schema_name=ctx.schema_name,
             page=page,
@@ -100,7 +104,7 @@ def get_sent_memos_tool(
         raise RuntimeError(f"Error obteniendo memos enviados: {str(e)}")
 
 
-def get_archived_memos_tool(
+async def get_archived_memos_tool(
     ctx: MCPContext,
     user_id: str,
     page: int = 1,
@@ -124,9 +128,11 @@ def get_archived_memos_tool(
 
     if not user_id:
         raise ValueError("user_id es requerido")
+    if page_size > 100:
+        raise ValueError("page_size máximo es 100")
 
     try:
-        result = get_archived_memos(
+        result = await get_archived_memos(
             user_id,
             schema_name=ctx.schema_name,
             page=page,
@@ -144,7 +150,7 @@ def get_archived_memos_tool(
         raise RuntimeError(f"Error obteniendo memos archivados: {str(e)}")
 
 
-def get_memo_detail(
+async def get_memo_detail(
     ctx: MCPContext,
     memo_id: str,
     user_id: str
@@ -175,7 +181,7 @@ def get_memo_detail(
     try:
         from services.memos import get_memo_detail as _get_memo_detail
 
-        result = _get_memo_detail(
+        result = await _get_memo_detail(
             document_id=memo_id,
             requesting_user_id=user_id,
             schema_name=ctx.schema_name

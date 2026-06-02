@@ -20,6 +20,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException
 from fastapi.responses import Response
 from typing import Optional
 import asyncio
+import hashlib
 import logging
 import traceback
 
@@ -40,7 +41,7 @@ from .certificate_loader import (
 )
 from .pades_signer import (
     sign_pdf_combined,
-    get_pades_signature_info, PAdESSigningError
+    get_pades_signature_info, PAdESSigningError, PAdESTsaUnavailableError
 )
 
 # Configurar logging para el servicio
@@ -101,6 +102,7 @@ async def sign_pdf(
     use_pades: Optional[str] = Form("true", description="Use PAdES digital signature if certificate available (true/false)"),
     cert_file: Optional[UploadFile] = File(None, description="Optional .p12 certificate bytes (from Backend)"),
     cert_password: Optional[str] = Form(None, description="Optional certificate password (from Backend)"),
+    expected_sha256: Optional[str] = Form(None, description="SHA-256 hex digest esperado del PDF (opcional). Si se envía, se verifica integridad antes de firmar."),
     api_key: str = Depends(validate_api_key)
 ):
     """
@@ -181,6 +183,25 @@ async def sign_pdf(
         # Validar formato del PDF (debe ser Letter) - pasar el objeto UploadFile
         pdf_content = validate_pdf_format(pdf_file)
 
+        # Verificar integridad del PDF si el Backend envió un hash esperado (SU-009)
+        if expected_sha256:
+            calculated_sha256 = hashlib.sha256(pdf_content).hexdigest()
+            if calculated_sha256.lower() != expected_sha256.lower():
+                logger.warning(
+                    f"PDF_INTEGRITY_FAILED: hash esperado={expected_sha256[:8]}..., "
+                    f"calculado={calculated_sha256[:8]}... — rechazando firma"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error_code": "PDF_INTEGRITY_FAILED",
+                        "detail": "El hash del PDF recibido no coincide con el esperado"
+                    }
+                )
+            logger.info(
+                f"Integridad del PDF verificada OK (sha256={calculated_sha256[:8]}...)"
+            )
+
         # Validar parámetros de la firma
         validate_signature_params(name, seal, department, entity)
 
@@ -249,10 +270,14 @@ async def sign_pdf(
         if city:
             signature_params["city"] = city
 
-        # Aplicar estampado si se proporcionan document_number y city
+        # Aplicar estampado si se proporcionan document_number y city.
+        # stamp_document usa pypdf + ReportLab (CPU/IO bound) → se corre en un
+        # thread separado para no bloquear el event loop de asyncio.
         if document_number and city:
             position = stamp_position or "first"
-            pdf_content = stamp_document(pdf_content, document_number, city, page_position=position)
+            pdf_content = await asyncio.to_thread(
+                stamp_document, pdf_content, document_number, city, position
+            )
             logger.info(f"Estampado aplicado con número: {document_number}, ciudad: {city}, posición: {position}")
 
         # Firmar el documento (Combinada: Visual + PAdES, o solo Visual)
@@ -271,6 +296,24 @@ async def sign_pdf(
                 )
                 signature_type = "pades"
                 logger.info(f"Firma combinada (Visual + PAdES) completada para: {name}")
+            except PAdESTsaUnavailableError as e:
+                # Circuit breaker abierto: TSA caído de forma sostenida.
+                # Se devuelve 503 independientemente de FALLBACK_TO_VISUAL para
+                # que el Backend pueda distinguir "TSA caído" de "error interno".
+                logger.error(f"TSA no disponible (circuit breaker): {e}")
+                if not FALLBACK_TO_VISUAL:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"TSA_UNAVAILABLE: {str(e)}"
+                    )
+                logger.info("Fallback a firma visual por TSA no disponible")
+                signed_pdf = await asyncio.to_thread(
+                    sign_pdf_document,
+                    pdf_content,
+                    signature_params,
+                    x,
+                    y,
+                )
             except PAdESSigningError as e:
                 logger.error(f"Error en firma PAdES: {e}")
                 if not FALLBACK_TO_VISUAL:
@@ -344,6 +387,74 @@ async def sign_pdf(
 
 
 
+@app.post("/stamp-number")
+async def stamp_number(
+    pdf_file: UploadFile = File(..., description="PDF a estampar"),
+    document_number: Optional[str] = Form(None, description="Número de documento (opcional — si se omite, solo calcula posición sin estampar)"),
+    city: Optional[str] = Form(None, description="Ciudad para el sello (requerido si document_number presente)"),
+    stamp_position: Optional[str] = Form(None, description="'first' (default) o 'last'"),
+    existing_count: Optional[int] = Form(None, description="Número de firmas ya completadas (override de auto-detección)"),
+    api_key: str = Depends(validate_api_key)
+):
+    """
+    Estampa número/fecha en el PDF y devuelve el PDF estampado + posición para AutoFirma.
+
+    Usado en el flujo de firma digital con AutoFirma: el Backend llama este endpoint
+    para obtener el PDF listo con el sello y las coordenadas donde AutoFirma debe insertar
+    la firma criptográfica.
+
+    Returns:
+        JSON con:
+        - stamped_pdf_b64: PDF estampado en base64
+        - sig_llx: LowerLeftX de la firma (coordenadas PDF)
+        - sig_lly: LowerLeftY de la firma (coordenadas PDF)
+        - sig_urx: UpperRightX de la firma (coordenadas PDF)
+        - sig_ury: UpperRightY de la firma (coordenadas PDF)
+    """
+    import base64
+    from .layout import calculate_signature_position, count_existing_signatures
+    from .config import SIGNATURE_WIDTH, SIGNATURE_HEIGHT
+
+    try:
+        pdf_content = validate_pdf_format(pdf_file)
+
+        if stamp_position:
+            validate_stamp_position(stamp_position)
+
+        # Solo estampar si hay número Y ciudad; si no, solo calcular posición.
+        # stamp_document es CPU/IO bound → se corre en thread para no bloquear asyncio.
+        if document_number and city:
+            position = stamp_position or "first"
+            stamped_pdf = await asyncio.to_thread(
+                stamp_document, pdf_content, document_number, city, position
+            )
+        else:
+            stamped_pdf = pdf_content
+
+        if existing_count is not None:
+            existing = existing_count
+            logger.info(f"stamp_number existing_count override={existing_count}")
+        else:
+            existing = count_existing_signatures(stamped_pdf)
+        x, y = calculate_signature_position(existing, stamped_pdf)
+
+        return {
+            "stamped_pdf_b64": base64.b64encode(stamped_pdf).decode(),
+            "sig_llx": round(x, 2),
+            "sig_lly": round(y, 2),
+            "sig_urx": round(x + SIGNATURE_WIDTH, 2),
+            "sig_ury": round(y + SIGNATURE_HEIGHT, 2),
+        }
+
+    except (ValueError, LayoutError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"stamp_number error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Error interno durante el estampado")
+
+
 @app.get("/certificate/{tenant_id}")
 async def get_certificate_status(
     tenant_id: str,
@@ -360,6 +471,103 @@ async def get_certificate_status(
     """
     validate_tenant_id(tenant_id)
     return get_certificate_info(tenant_id)
+
+
+@app.post("/sign-pdf/verify")
+async def verify_pdf_signature(
+    pdf_file: UploadFile = File(..., description="PDF to verify"),
+    api_key: str = Depends(validate_api_key)
+):
+    """
+    Verifica las firmas PAdES de un PDF.
+
+    Returns:
+        dict: {ok, failure_reason, signature_count, signature_visible, modification_level}
+    """
+    try:
+        pdf_bytes = await pdf_file.read()
+        if not pdf_bytes:
+            raise HTTPException(status_code=400, detail="EMPTY_FILE")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"verify_pdf_signature read error: {e}")
+        raise HTTPException(status_code=400, detail="No se pudo procesar el PDF. Verificá que el archivo sea válido.")
+
+    # Validar tamaño: límite 50MB para verify
+    MAX_VERIFY_SIZE_MB = 50
+    if len(pdf_bytes) > MAX_VERIFY_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF file too large. Maximum size for verify: {MAX_VERIFY_SIZE_MB}MB",
+            headers={"error_code": "FILE_TOO_LARGE"}
+        )
+
+    # Validar que sea un PDF válido
+    if not pdf_bytes.startswith(b'%PDF'):
+        raise HTTPException(
+            status_code=400,
+            detail="No se pudo procesar el PDF. Verificá que el archivo sea válido.",
+            headers={"error_code": "INVALID_PDF_FORMAT"}
+        )
+
+    try:
+        from pyhanko.pdf_utils.reader import PdfFileReader
+        from pyhanko.sign.validation import validate_pdf_signature
+        from io import BytesIO
+
+        reader = PdfFileReader(BytesIO(pdf_bytes))
+        sig_fields = reader.embedded_signatures
+        if not sig_fields:
+            return {
+                "ok": False,
+                "failure_reason": "no_signatures_found",
+                "signature_count": 0,
+                "signature_visible": False,
+                "modification_level": None,
+            }
+
+        results = []
+        for sig in sig_fields:
+            try:
+                status = validate_pdf_signature(sig)
+                rect = getattr(sig.sig_field, "Rect", None)
+                visible = bool(
+                    rect and not all(float(v) == 0.0 for v in rect)
+                )
+                results.append({
+                    "intact": status.intact,
+                    "valid": status.valid,
+                    "modification_level": str(status.modification_level) if status.modification_level else None,
+                    "signature_visible": visible,
+                })
+            except Exception as sig_err:
+                results.append({
+                    "intact": False,
+                    "valid": False,
+                    "modification_level": None,
+                    "signature_visible": False,
+                    "error": str(sig_err),
+                })
+
+        all_valid = all(r.get("valid") and r.get("intact") for r in results)
+        mod_level = results[0].get("modification_level") if results else None
+        visible = any(r.get("signature_visible") for r in results)
+
+        return {
+            "ok": all_valid,
+            "failure_reason": None if all_valid else "invalid_or_tampered_signature",
+            "signature_count": len(results),
+            "signature_visible": visible,
+            "modification_level": mod_level,
+            "signatures": results,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"verify_pdf_signature error: {e}")
+        raise HTTPException(status_code=500, detail="Error al verificar la firma digital.")
 
 
 @app.get("/certificates")

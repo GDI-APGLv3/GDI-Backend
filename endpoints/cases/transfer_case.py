@@ -163,17 +163,17 @@ async def transfer_case(
         logger.info(f"Transfer request: case={case_id}, target={body.target_sector_id}, ownership={body.transfer_ownership}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # === VALIDACIÓN TEMPRANA DE ASIGNACIÓN DUPLICADA ===
         # Solo aplica para asignaciones (transfer_ownership=False)
         if not body.transfer_ownership:
-            from database import execute_query
+            from database import fetch_all
             from services.case_queries import check_duplicate_assignment_query
 
-            duplicate_check = execute_query(
+            duplicate_check = await fetch_all(
                 check_duplicate_assignment_query(),
-                (case_id, body.target_sector_id),
+                case_id, body.target_sector_id,
                 schema_name=schema_name
             )
             if duplicate_check:
@@ -195,12 +195,12 @@ async def transfer_case(
 
             try:
                 # Obtener case_number y user_sector primero
-                from database import execute_query
-                case_query = "SELECT case_number, owner_sector_id FROM cases WHERE id = %s"
-                case_info = execute_query(case_query, (case_id,), schema_name=schema_name)
+                from database import fetch_all
+                case_query = "SELECT case_number, owner_sector_id FROM cases WHERE id = $1"
+                case_info = await fetch_all(case_query, case_id, schema_name=schema_name)
 
-                user_query = "SELECT sector_id FROM users WHERE id = %s"
-                user_info = execute_query(user_query, (db_user_id,), schema_name=schema_name)
+                user_query = "SELECT sector_id FROM users WHERE id = $1"
+                user_info = await fetch_all(user_query, db_user_id, schema_name=schema_name)
 
                 if not case_info or not user_info:
                     raise ValueError("Case or user not found for document creation")
@@ -220,14 +220,14 @@ async def transfer_case(
                 logger.info(f"Official document created: {document_result['official_number']}")
 
                 # Vincular documento al expediente
-                link_result = CaseService.link_official_document(
+                link_result = await CaseService.link_official_document(
                     case_id=case_id,
                     official_document_id=document_result['document_id'],
                     linking_user_id=db_user_id,
                     user_sector_id=str(user_info[0]['sector_id']),
                     schema_name=schema_name
                 )
-                
+
                 logger.info(f"Document linked with order_number={link_result['order_number']}")
                 
             except Exception as e:
@@ -236,7 +236,7 @@ async def transfer_case(
                 raise BusinessLogicError(f"{TRANSFER_DOCUMENT_CREATION_ERROR}: {str(e)}")
         
         # Ejecutar transferencia
-        result = CaseService.transfer_case(
+        result = await CaseService.transfer_case(
             case_id=case_id,
             target_sector_id=body.target_sector_id,
             reason=body.reason,
@@ -346,24 +346,24 @@ async def close_assignment(
         logger.info(f"Close assignment request: case={case_id}, movement={body.movement_id}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Verificar si la asignación tiene PV respaldatorio ANTES de cerrar
         # (después de cerrar, el usuario pierde permisos de asignación activa)
         document_result = None
-        from database import execute_query
+        from database import fetch_all
 
-        mov_query = "SELECT supporting_document_id, assigned_sector_id FROM case_movements WHERE id = %s AND case_id = %s"
-        mov_check = execute_query(mov_query, (body.movement_id, case_id), schema_name=schema_name)
-        has_supporting_doc = mov_check and mov_check[0].get('supporting_document_id') is not None
+        mov_query = "SELECT supporting_document_id, assigned_sector_id FROM case_movements WHERE id = $1 AND case_id = $2"
+        mov_check = await fetch_all(mov_query, body.movement_id, case_id, schema_name=schema_name)
+        has_supporting_doc = mov_check and mov_check[0]['supporting_document_id'] is not None
 
         if has_supporting_doc:
             try:
-                case_query = "SELECT case_number FROM cases WHERE id = %s"
-                case_info = execute_query(case_query, (case_id,), schema_name=schema_name)
+                case_query = "SELECT case_number FROM cases WHERE id = $1"
+                case_info = await fetch_all(case_query, case_id, schema_name=schema_name)
 
-                user_query = "SELECT sector_id FROM users WHERE id = %s"
-                user_info = execute_query(user_query, (db_user_id,), schema_name=schema_name)
+                user_query = "SELECT sector_id FROM users WHERE id = $1"
+                user_info = await fetch_all(user_query, db_user_id, schema_name=schema_name)
 
                 if case_info and user_info:
                     assigned_sector = str(mov_check[0]['assigned_sector_id']) if mov_check[0]['assigned_sector_id'] else str(user_info[0]['sector_id'])
@@ -379,7 +379,7 @@ async def close_assignment(
                         schema_name=schema_name
                     )
 
-                    CaseService.link_official_document(
+                    await CaseService.link_official_document(
                         case_id=case_id,
                         official_document_id=document_result['document_id'],
                         linking_user_id=db_user_id,
@@ -395,7 +395,7 @@ async def close_assignment(
                 # No falla el cierre si el PV falla
 
         # Cerrar asignación
-        result = CaseService.close_assignment(
+        result = await CaseService.close_assignment(
             case_id=case_id,
             movement_id=body.movement_id,
             reason=body.reason,
@@ -457,10 +457,10 @@ async def get_available_sectors_for_transfer(
         logger.info(f"Fetching available sectors for case: {case_id}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Obtener sectores disponibles
-        sectors = CaseService.get_available_sectors_for_transfer(case_id, db_user_id, schema_name=schema_name)
+        sectors = await CaseService.get_available_sectors_for_transfer(case_id, db_user_id, schema_name=schema_name)
         
         logger.info(f"Found {len(sectors)} available sectors")
         
@@ -500,10 +500,10 @@ async def get_sector_users(
         logger.info(f"Fetching users for sector: {sector_id}")
 
         # Validar usuario autenticado
-        get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Obtener usuarios del sector
-        users = CaseService.get_sector_users(sector_id, schema_name=schema_name)
+        users = await CaseService.get_sector_users(sector_id, schema_name=schema_name)
         
         logger.info(f"Found {len(users)} users in sector")
         

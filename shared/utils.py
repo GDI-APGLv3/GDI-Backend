@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 from decimal import Decimal
 
 
-def get_authenticated_user(user_id: str, *, schema_name: str) -> str:
+async def get_authenticated_user(user_id: str, *, schema_name: str) -> str:
     """
     Helper para validar y obtener usuario autenticado.
 
@@ -24,20 +24,20 @@ def get_authenticated_user(user_id: str, *, schema_name: str) -> str:
     Raises:
         ValidationError: Si el usuario no existe
     """
-    from database import execute_query
+    from database import fetch_all
     from services.case_queries import get_user_validation_query
     from shared.exceptions import ValidationError
     from config.constants import USER_NOT_FOUND_ERROR
 
-    user_result = execute_query(get_user_validation_query(), (user_id,), schema_name=schema_name)
-    
+    user_result = await fetch_all(get_user_validation_query(), user_id, schema_name=schema_name)
+
     if not user_result:
         raise ValidationError(USER_NOT_FOUND_ERROR)
-    
+
     return str(user_result[0]['user_id'])
 
 
-def get_user_global_search_flags(user_id: str, *, schema_name: str) -> dict:
+async def get_user_global_search_flags(user_id: str, *, schema_name: str) -> dict:
     """
     Obtiene los flags de busqueda global de un usuario.
 
@@ -49,20 +49,20 @@ def get_user_global_search_flags(user_id: str, *, schema_name: str) -> dict:
         dict con 'can_global_search_documents' y 'can_global_search_cases' (bool)
         Defaults a False si el usuario no existe o los campos son NULL.
     """
-    from database import execute_query
+    from database import fetch_one
 
-    result = execute_query(
-        "SELECT can_global_search_documents, can_global_search_cases FROM users WHERE id = %s LIMIT 1",
-        (user_id,),
-        schema_name=schema_name
+    result = await fetch_one(
+        "SELECT can_global_search_documents, can_global_search_cases FROM users WHERE id = $1 LIMIT 1",
+        user_id,
+        schema_name=schema_name,
     )
 
     if not result:
         return {"can_global_search_documents": False, "can_global_search_cases": False}
 
     return {
-        "can_global_search_documents": result[0].get("can_global_search_documents", False),
-        "can_global_search_cases": result[0].get("can_global_search_cases", False),
+        "can_global_search_documents": result.get("can_global_search_documents", False),
+        "can_global_search_cases": result.get("can_global_search_cases", False),
     }
 
 

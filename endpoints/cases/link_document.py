@@ -86,27 +86,27 @@ async def link_document_to_case(
         logger.info(f"Link document request: case={case_id}, doc={body.official_document_id}")
 
         # Validar usuario autenticado y obtener sus datos
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Obtener sector del usuario para la vinculación
-        from database import execute_query
-        user_query = "SELECT sector_id, full_name FROM users WHERE id = %s"
-        user_result = execute_query(user_query, (db_user_id,), schema_name=schema_name)
-        
+        from database import fetch_all
+        user_query = "SELECT sector_id, full_name FROM users WHERE id = $1"
+        user_result = await fetch_all(user_query, db_user_id, schema_name=schema_name)
+
         if not user_result:
             from config.constants import LINK_DOCUMENT_USER_NOT_FOUND
             from shared.exceptions import NotFoundError
             logger.error(f"User not found: {db_user_id}")
             raise NotFoundError(LINK_DOCUMENT_USER_NOT_FOUND)
-        
+
         user_sector_id = user_result[0]['sector_id']
         user_full_name = user_result[0]['full_name']
-        
+
         logger.info(f"User {db_user_id} ({user_full_name}) linking document to case {case_id}")
-        
+
         # Vincular documento usando el servicio
         try:
-            link_result = CaseService.link_official_document(
+            link_result = await CaseService.link_official_document(
                 case_id=case_id,
                 official_document_id=body.official_document_id,
                 linking_user_id=db_user_id,
@@ -117,13 +117,13 @@ async def link_document_to_case(
         except Exception as service_error:
             logger.error(f"Service error: {type(service_error).__name__}: {str(service_error)}")
             raise
-        
+
         # Formatear order_number a 3 dígitos y linking_date a string
         formatted_order = f"{link_result['order_number']:03d}"
         linking_date_str = link_result['linking_date'].isoformat() if hasattr(link_result['linking_date'], 'isoformat') else str(link_result['linking_date'])
-        
+
         logger.info(f"Document linked successfully: {link_result['official_number']} as #{formatted_order}")
-        
+
         return {
             "success": True,
             "data": {
@@ -139,7 +139,7 @@ async def link_document_to_case(
             },
             "message": f"{LINK_DOCUMENT_SUCCESS}: {link_result['official_number']} (#{formatted_order})"
         }
-        
+
     except Exception as e:
         logger.error(f"Error in link_document_to_case endpoint: {str(e)}")
         raise exception_to_http_exception(e)

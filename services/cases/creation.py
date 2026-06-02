@@ -2,7 +2,7 @@
 
 from shared.logging import get_logger
 from typing import Dict, Any, Optional
-from database import get_db_connection
+from database import transaction, execute
 from config.constants import CASE_STATUS_ACTIVE
 from shared.exceptions import ValidationError, NotFoundError
 from services.cases.cover_creator import create_case_cover
@@ -49,21 +49,20 @@ async def create_case_with_cover_service(
     logger.info("MOMENTO 1: Validando y creando expediente como inactive...")
 
     try:
-        with get_db_connection(schema_name) as connection:
+        async with transaction(schema_name=schema_name) as conn:
             logger.info("Validating user...")
-            user_data = validate_and_get_user(connection, user_id)
+            user_data = await validate_and_get_user(conn, user_id)
             logger.info(f"User validated: {user_data['full_name']}")
 
             logger.info("Validating template...")
-            template_data = validate_and_get_template(connection, case_template_id)
+            template_data = await validate_and_get_template(conn, case_template_id)
             logger.info(f"Template validated: {template_data['type_name']}")
 
-        final_owner_sector_id = owner_sector_id or user_data['sector_id']
+            final_owner_sector_id = owner_sector_id or user_data['sector_id']
 
-        with get_db_connection(schema_name) as connection:
             logger.info("Creating case (inactive)...")
-            case_result = CaseService.create_case(
-                connection=connection,
+            case_result = await CaseService.create_case(
+                conn,
                 case_template_id=case_template_id,
                 reference=reference.strip(),
                 created_by_user_id=user_id,
@@ -72,7 +71,7 @@ async def create_case_with_cover_service(
                 owner_sector_id=final_owner_sector_id,
                 schema_name=schema_name
             )
-            connection.commit()  # Expediente existe como inactive, número seguro
+            # transaction() hace COMMIT automático al salir del bloque sin excepción
             logger.info(f"Case created (inactive): {case_result['case_number']}")
 
     except (ValidationError, NotFoundError):
@@ -151,13 +150,11 @@ async def create_case_with_cover_service(
 
     # CAEX OK: activar expediente
     logger.info(f"CAEX creado: {cover_result['official_number']} - activando expediente...")
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE cases SET status = %s WHERE id = %s",
-            (CASE_STATUS_ACTIVE, case_result['case_id'])
-        )
-        conn.commit()
+    await execute(
+        "UPDATE cases SET status = $1 WHERE id = $2",
+        CASE_STATUS_ACTIVE, case_result['case_id'],
+        schema_name=schema_name
+    )
     logger.info(f"Expediente activado: {case_result['case_number']}")
 
     return {

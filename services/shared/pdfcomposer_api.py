@@ -8,6 +8,7 @@ Llama directamente a PDFComposer para generar PDFs con templates especiales.
 """
 
 from typing import Dict, Any, Optional
+import hashlib
 import os
 import httpx
 import json
@@ -103,7 +104,7 @@ async def call_pdfcomposer_create_case(cover_data: Dict[str, Any], *, schema_nam
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 
@@ -153,6 +154,21 @@ async def call_pdfcomposer_create_case(cover_data: Dict[str, Any], *, schema_nam
                 MAX_PDF_SIZE = 10 * 1024 * 1024  # 10MB
                 if pdf_size > MAX_PDF_SIZE:
                     raise ExternalServiceError(f"PDF excede tamano maximo ({pdf_size/1024/1024:.2f}MB > 10MB)")
+
+                # SU-009: Verificar integridad del tramo PDFComposer→Backend
+                local_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                remote_sha256 = response.headers.get("X-PDF-SHA256")
+                if remote_sha256:
+                    if remote_sha256 != local_sha256:
+                        logger.warning(
+                            f"[SU-009] SHA-256 mismatch en /create-case/: "
+                            f"PDFComposer={remote_sha256} local={local_sha256} "
+                            f"— posible corrupcion en transito. Usando hash local."
+                        )
+                    else:
+                        logger.debug(f"[SU-009] SHA-256 OK /create-case/: {local_sha256}")
+                else:
+                    logger.debug(f"[SU-009] X-PDF-SHA256 no presente en respuesta /create-case/")
 
                 return pdf_bytes
 
@@ -270,7 +286,7 @@ async def call_pdfcomposer_create_transfer(transfer_data: Dict[str, Any], *, sch
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 
@@ -311,6 +327,21 @@ async def call_pdfcomposer_create_transfer(transfer_data: Dict[str, Any], *, sch
                 MAX_PDF_SIZE = 10 * 1024 * 1024
                 if pdf_size > MAX_PDF_SIZE:
                     raise ExternalServiceError(f"PDF excede tamano maximo ({pdf_size/1024/1024:.2f}MB > 10MB)")
+
+                # SU-009: Verificar integridad del tramo PDFComposer→Backend
+                local_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                remote_sha256 = response.headers.get("X-PDF-SHA256")
+                if remote_sha256:
+                    if remote_sha256 != local_sha256:
+                        logger.warning(
+                            f"[SU-009] SHA-256 mismatch en /move/: "
+                            f"PDFComposer={remote_sha256} local={local_sha256} "
+                            f"— posible corrupcion en transito. Usando hash local."
+                        )
+                    else:
+                        logger.debug(f"[SU-009] SHA-256 OK /move/: {local_sha256}")
+                else:
+                    logger.debug(f"[SU-009] X-PDF-SHA256 no presente en respuesta /move/")
 
                 return pdf_bytes
 
@@ -410,7 +441,7 @@ async def call_pdfcomposer_preview_pdf(document_data: Dict[str, Any], *, schema_
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 
@@ -580,7 +611,7 @@ async def call_pdfcomposer_import(
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         data["frase_anual"] = annual_slogan
 
@@ -622,6 +653,21 @@ async def call_pdfcomposer_import(
                 MAX_OUTPUT_SIZE = 30 * 1024 * 1024
                 if pdf_size > MAX_OUTPUT_SIZE:
                     raise ExternalServiceError(f"PDF procesado excede tamano maximo ({pdf_size/1024/1024:.2f}MB > 30MB)")
+
+                # SU-009: Verificar integridad del tramo PDFComposer→Backend
+                local_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                remote_sha256 = response.headers.get("X-PDF-SHA256")
+                if remote_sha256:
+                    if remote_sha256 != local_sha256:
+                        logger.warning(
+                            f"[SU-009] SHA-256 mismatch en /import/: "
+                            f"PDFComposer={remote_sha256} local={local_sha256} "
+                            f"— posible corrupcion en transito. Usando hash local."
+                        )
+                    else:
+                        logger.debug(f"[SU-009] SHA-256 OK /import/: {local_sha256}")
+                else:
+                    logger.debug(f"[SU-009] X-PDF-SHA256 no presente en respuesta /import/")
 
                 return pdf_bytes
 
@@ -740,7 +786,7 @@ async def call_pdfcomposer_note_preview(
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 
@@ -906,7 +952,7 @@ async def call_pdfcomposer_note_final(
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 
@@ -950,6 +996,21 @@ async def call_pdfcomposer_note_final(
                 MAX_PDF_SIZE = 10 * 1024 * 1024
                 if pdf_size > MAX_PDF_SIZE:
                     raise ExternalServiceError(f"PDF excede tamano maximo ({pdf_size/1024/1024:.2f}MB > 10MB)")
+
+                # SU-009: Verificar integridad del tramo PDFComposer→Backend
+                local_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                remote_sha256 = response.headers.get("X-PDF-SHA256")
+                if remote_sha256:
+                    if remote_sha256 != local_sha256:
+                        logger.warning(
+                            f"[SU-009] SHA-256 mismatch en /note/: "
+                            f"PDFComposer={remote_sha256} local={local_sha256} "
+                            f"— posible corrupcion en transito. Usando hash local."
+                        )
+                    else:
+                        logger.debug(f"[SU-009] SHA-256 OK /note/: {local_sha256}")
+                else:
+                    logger.debug(f"[SU-009] X-PDF-SHA256 no presente en respuesta /note/")
 
                 return pdf_bytes
 
@@ -1063,7 +1124,7 @@ async def call_pdfcomposer_create_ifrlm(ifrlm_data: Dict[str, Any], *, schema_na
 
     # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
-    annual_slogan = get_tenant_settings(schema_name).get("annual_slogan", "")
+    annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
         pdfcomposer_data["frase_anual"] = annual_slogan
 
@@ -1106,6 +1167,21 @@ async def call_pdfcomposer_create_ifrlm(ifrlm_data: Dict[str, Any], *, schema_na
                 MAX_PDF_SIZE = 10 * 1024 * 1024
                 if pdf_size > MAX_PDF_SIZE:
                     raise ExternalServiceError(f"PDF excede tamano maximo ({pdf_size/1024/1024:.2f}MB > 10MB)")
+
+                # SU-009: Verificar integridad del tramo PDFComposer→Backend
+                local_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                remote_sha256 = response.headers.get("X-PDF-SHA256")
+                if remote_sha256:
+                    if remote_sha256 != local_sha256:
+                        logger.warning(
+                            f"[SU-009] SHA-256 mismatch en /ifrlm/: "
+                            f"PDFComposer={remote_sha256} local={local_sha256} "
+                            f"— posible corrupcion en transito. Usando hash local."
+                        )
+                    else:
+                        logger.debug(f"[SU-009] SHA-256 OK /ifrlm/: {local_sha256}")
+                else:
+                    logger.debug(f"[SU-009] X-PDF-SHA256 no presente en respuesta /ifrlm/")
 
                 return pdf_bytes
 

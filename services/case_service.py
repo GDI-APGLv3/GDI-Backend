@@ -20,6 +20,7 @@ from services.cases.permissions import (
     get_user_viewable_sector_ids,
     get_user_case_permissions,
     can_user_view_case,
+    can_user_edit_case,
 )
 # Re-exportar desde sector_utils
 from services.shared.sector_utils import get_user_sector_ids as _get_user_sector_ids
@@ -69,6 +70,7 @@ class CaseService:
     _get_user_sector_ids = staticmethod(_get_user_sector_ids)
     get_user_case_permissions = staticmethod(get_user_case_permissions)
     can_user_view_case = staticmethod(can_user_view_case)
+    can_user_edit_case = staticmethod(can_user_edit_case)
 
     # Historial
     get_case_movements = staticmethod(get_case_movements)

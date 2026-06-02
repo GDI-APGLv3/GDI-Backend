@@ -5,11 +5,13 @@ Este modulo implementa una API REST para generar documentos PDF a partir de plan
 utilizando WeasyPrint como motor de renderizado.
 """
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Response, Form, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Response, Form, UploadFile, File
+from fastapi.responses import JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 from typing import Optional
 import os
 import hmac
+import hashlib
 from dotenv import load_dotenv
 import uvicorn
 import uuid
@@ -68,6 +70,21 @@ app = FastAPI(
     redoc_url=_redoc_url,
     openapi_url=_openapi_url,
 )
+
+
+@app.exception_handler(TimeoutError)
+async def timeout_error_handler(request: Request, exc: TimeoutError):
+    """
+    S6-003: Handler global para TimeoutError lanzado por generate_pdf_from_html.
+    Retorna HTTP 504 Gateway Timeout en lugar de 500, para que el Backend
+    pueda distinguir entre un error de generacion y un timeout de WeasyPrint.
+    """
+    logger.error(f"[S6-003] TimeoutError en {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=504,
+        content={"detail": "La generacion del PDF excedio el tiempo limite. Intente con un documento mas corto."},
+    )
+
 
 async def verify_api_key(api_key: Optional[str] = Header(None, alias=API_KEY_NAME)):
     """
@@ -261,7 +278,8 @@ async def generate_pdf(
 
         # Configurar las cabeceras de la respuesta
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name}"
+            "Content-Disposition": f"attachment; filename={file_name}",
+            "X-PDF-SHA256": hashlib.sha256(pdf_bytes).hexdigest(),
         }
 
         # Devolver la respuesta con el PDF y las cabeceras
@@ -334,7 +352,8 @@ async def create_case(
         file_name = f"{uuid.uuid4()}.pdf"
 
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name}"
+            "Content-Disposition": f"attachment; filename={file_name}",
+            "X-PDF-SHA256": hashlib.sha256(pdf_bytes).hexdigest(),
         }
 
         return Response(
@@ -396,7 +415,8 @@ async def move(
         file_name = f"{uuid.uuid4()}.pdf"
 
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name}"
+            "Content-Disposition": f"attachment; filename={file_name}",
+            "X-PDF-SHA256": hashlib.sha256(pdf_bytes).hexdigest(),
         }
 
         return Response(
@@ -481,7 +501,8 @@ async def import_document(
         file_name = f"{uuid.uuid4()}.pdf"
 
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name}"
+            "Content-Disposition": f"attachment; filename={file_name}",
+            "X-PDF-SHA256": hashlib.sha256(pdf_compilado).hexdigest(),
         }
 
         return Response(
@@ -608,7 +629,8 @@ async def note(
         file_name = f"{uuid.uuid4()}.pdf"
 
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name}"
+            "Content-Disposition": f"attachment; filename={file_name}",
+            "X-PDF-SHA256": hashlib.sha256(pdf_bytes).hexdigest(),
         }
 
         return Response(
@@ -674,7 +696,8 @@ async def create_ifrlm(
         file_name = f"{uuid.uuid4()}.pdf"
 
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name}"
+            "Content-Disposition": f"attachment; filename={file_name}",
+            "X-PDF-SHA256": hashlib.sha256(pdf_bytes).hexdigest(),
         }
 
         return Response(

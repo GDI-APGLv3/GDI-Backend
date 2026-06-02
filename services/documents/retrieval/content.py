@@ -3,11 +3,11 @@ Servicio para obtener contenido de documentos oficiales.
 Usado por el MCP para que el agente IA pueda leer el contenido HTML de documentos firmados.
 """
 from typing import Dict, Any
-from database import execute_query
+from database import fetch_one
 from shared.exceptions import DocumentNotFoundError
 
 
-def get_official_document_content(document_id: str, schema_name: str) -> Dict[str, Any]:
+async def get_official_document_content(document_id: str, schema_name: str) -> Dict[str, Any]:
     """
     Obtiene el contenido HTML de un documento oficial.
 
@@ -22,7 +22,8 @@ def get_official_document_content(document_id: str, schema_name: str) -> Dict[st
     Raises:
         DocumentNotFoundError: Si el documento no existe
     """
-    query = """
+    result = await fetch_one(
+        """
         SELECT
             od.id,
             od.official_number,
@@ -33,11 +34,12 @@ def get_official_document_content(document_id: str, schema_name: str) -> Dict[st
             dt.acronym as document_type_acronym
         FROM official_documents od
         LEFT JOIN document_types dt ON od.document_type_id = dt.id
-        WHERE od.id = %s
+        WHERE od.id = $1
           AND od.signed_at IS NOT NULL
-    """
-
-    result = execute_query(query, (document_id,), fetch_one=True, schema_name=schema_name)
+        """,
+        document_id,
+        schema_name=schema_name,
+    )
 
     if not result:
         raise DocumentNotFoundError(f"Documento oficial {document_id} no encontrado")

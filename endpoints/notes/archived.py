@@ -61,7 +61,7 @@ async def list_archived_notes(
             f"{' search=' + search if search else ''}"
         )
 
-        result = get_archived_notes_multi_sector(
+        result = await get_archived_notes_multi_sector(
             viewable_sector_ids,
             schema_name=schema_name,
             page=page,

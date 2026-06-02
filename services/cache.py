@@ -14,6 +14,8 @@ Uso:
 import redis
 import json
 import os
+import asyncio
+import inspect
 from typing import Callable, Any, Optional
 from functools import wraps
 from shared.logging import get_logger
@@ -49,7 +51,7 @@ def init_redis():
         redis_client = None
         return False
 
-def get_cached(
+async def get_cached(
     cache_key: str,
     fetch_func: Callable,
     ttl: int = 300,
@@ -57,19 +59,26 @@ def get_cached(
 ) -> Any:
     """
     Obtener dato desde cache o ejecutar función si no existe.
+    Soporta fetch_func sync y async (coroutine).
 
     Args:
         cache_key: Clave única para el cache (ej: "sectors:all")
-        fetch_func: Función a ejecutar si no hay cache
+        fetch_func: Función a ejecutar si no hay cache (sync o async)
         ttl: Tiempo de vida en segundos (default: 5 minutos)
         force_refresh: Forzar actualización ignorando cache
 
     Returns:
         Resultado de la función (desde cache o recién calculado)
     """
+    async def _call(func):
+        result = func()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     # Si Redis no está disponible, ejecutar función directamente
     if redis_client is None:
-        return fetch_func()
+        return await _call(fetch_func)
 
     try:
         # Si force_refresh, ignorar cache
@@ -81,7 +90,7 @@ def get_cached(
 
         # Cache miss o refresh forzado - ejecutar función
         logger.debug(f"Cache miss: {cache_key}")
-        result = fetch_func()
+        result = await _call(fetch_func)
 
         # Guardar en cache
         redis_client.setex(
@@ -95,7 +104,7 @@ def get_cached(
     except Exception as e:
         # Si falla Redis, ejecutar función directamente
         logger.error(f"Cache error {cache_key}: {e}")
-        return fetch_func()
+        return await _call(fetch_func)
 
 def invalidate_cache(cache_key: str) -> bool:
     """
@@ -145,19 +154,19 @@ def invalidate_pattern(pattern: str) -> int:
 
 def cache_decorator(cache_key_prefix: str, ttl: int = 300):
     """
-    Decorador para cachear resultados de funciones.
+    Decorador para cachear resultados de funciones (sync o async).
 
     Uso:
         @cache_decorator("users:list", ttl=60)
-        def get_all_users():
-            return execute_query("SELECT * FROM users")
+        async def get_all_users():
+            return await fetch_all("SELECT * FROM users", schema_name="public")
     """
     def decorator(func: Callable):
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             # Construir cache key con argumentos
             cache_key = f"{cache_key_prefix}:{args}:{kwargs}"
-            return get_cached(cache_key, lambda: func(*args, **kwargs), ttl)
+            return await get_cached(cache_key, lambda: func(*args, **kwargs), ttl)
         return wrapper
     return decorator
 

@@ -1,6 +1,7 @@
 """
 Endpoint unificado para obtener detalles de documentos en cualquier estado.
 """
+from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
 from models.documents.unified import UnifiedDocumentDetailsResponse
@@ -33,11 +34,12 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def get_document_details(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento"),
+    document_id: UUID = Path(..., description="UUID del documento"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> UnifiedDocumentDetailsResponse:
     """Obtiene detalles unificados de documento."""
+    document_id = str(document_id)
     try:
         logger.info(f"Obteniendo detalles - Usuario: {request.state.tenant_user_id[:8]}")
         result = await get_unified_document_details(document_id, request.state.tenant_user_id, schema_name=schema_name)

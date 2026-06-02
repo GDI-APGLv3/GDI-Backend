@@ -97,7 +97,7 @@ async def list_all_users(schema_name: str = Depends(get_tenant_schema)) -> UserL
     logger.info("GET /users - Listing all active users")
 
     try:
-        users = list_all_active_users(schema_name=schema_name)
+        users = await list_all_active_users(schema_name=schema_name)
 
         return UserListResponse(
             users=users,

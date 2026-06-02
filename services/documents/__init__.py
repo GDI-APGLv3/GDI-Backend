@@ -39,14 +39,12 @@ from .catalog import (
     # Types
     get_all_document_types,
     # Metadata
-    map_display_status,
     get_document_basic_info
 )
 
 # Importaciones de signing (ahora desde signing/)
 from .signing import (
     start_document_signing_process,
-    get_document_signature_details,
     sign_document,
     sign_document_as_numerator,
     get_numerator_documents,
@@ -91,12 +89,10 @@ __all__ = [
     "get_all_document_types",
     
     # Metadata
-    "map_display_status",
     "get_document_basic_info",
     
     # Signing
     "start_document_signing_process",
-    "get_document_signature_details",
     "sign_document",
     "super_sign_document",
     "build_signature_details_response",

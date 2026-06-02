@@ -2,6 +2,7 @@
 Endpoints para previsualización de documentos.
 Optimizado siguiendo principios de Clean Code.
 """
+from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Response, Depends, Request
 from auth import get_current_user
@@ -46,7 +47,7 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def preview_document_info(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento a previsualizar"),
+    document_id: UUID = Path(..., description="UUID del documento a previsualizar"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> PreviewInfoResponse:
@@ -65,16 +66,17 @@ async def preview_document_info(
     Raises:
         HTTPException: Para errores de documento no encontrado o estado inválido
     """
+    document_id = str(document_id)
     try:
         from services.documents.permissions import can_user_view_document
-        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+        if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
             from shared.exceptions import AuthorizationError
             raise AuthorizationError("No tiene permisos para ver este documento")
 
         logger.info(f"Usuario {request.state.tenant_user_id[:8]}... solicitando info de preview para documento {document_id[:8]}...")
 
         data_fetcher = PreviewDataFetcher(schema_name=schema_name)
-        document_data = data_fetcher.get_complete_document_data(document_id)
+        document_data = await data_fetcher.get_complete_document_data(document_id)
         
         logger.info(f"Información de preview obtenida exitosamente para documento {document_id[:8]}...")
         return {
@@ -130,7 +132,7 @@ async def preview_document_info(
 )
 async def preview_document_download(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento a previsualizar"),
+    document_id: UUID = Path(..., description="UUID del documento a previsualizar"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ):
@@ -152,9 +154,10 @@ async def preview_document_download(
     Raises:
         HTTPException: Para errores de generación o validación
     """
+    document_id = str(document_id)
     try:
         from services.documents.permissions import can_user_view_document
-        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+        if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
             from shared.exceptions import AuthorizationError
             raise AuthorizationError("No tiene permisos para ver este documento")
 

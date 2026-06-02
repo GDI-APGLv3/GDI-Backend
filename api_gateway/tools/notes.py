@@ -12,7 +12,7 @@ from shared.exceptions import ValidationError, AuthorizationError, NotFoundError
 logger = logging.getLogger(__name__)
 
 
-def get_notes(
+async def get_notes(
     ctx: MCPContext,
     user_id: str,
     page: int = 1,
@@ -41,7 +41,7 @@ def get_notes(
 
     try:
         # Resolver sector_ids del usuario
-        sector_ids = get_user_sector_ids(user_id, schema_name=ctx.schema_name)
+        sector_ids = await get_user_sector_ids(user_id, schema_name=ctx.schema_name)
 
         if not sector_ids:
             logger.warning(f"[MCP] get_notes - usuario sin sectores")
@@ -50,7 +50,7 @@ def get_notes(
                 "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 0}
             }
 
-        result = get_received_notes_multi_sector(
+        result = await get_received_notes_multi_sector(
             sector_ids=sector_ids,
             schema_name=ctx.schema_name,
             page=page,
@@ -69,7 +69,7 @@ def get_notes(
         raise RuntimeError(f"Error obteniendo notas: {str(e)}")
 
 
-def get_sent_notes(
+async def get_sent_notes(
     ctx: MCPContext,
     user_id: str,
     page: int = 1,
@@ -96,7 +96,7 @@ def get_sent_notes(
 
     try:
         # Resolver sector_ids del usuario (mismo patron que get_notes)
-        sector_ids = get_user_sector_ids(user_id, schema_name=ctx.schema_name)
+        sector_ids = await get_user_sector_ids(user_id, schema_name=ctx.schema_name)
 
         if not sector_ids:
             logger.warning(f"[MCP] get_sent_notes - usuario sin sectores")
@@ -105,7 +105,7 @@ def get_sent_notes(
                 "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 0}
             }
 
-        result = get_sent_notes_multi_sector(
+        result = await get_sent_notes_multi_sector(
             sector_ids=sector_ids,
             schema_name=ctx.schema_name,
             page=page,
@@ -123,7 +123,7 @@ def get_sent_notes(
         raise RuntimeError(f"Error obteniendo notas enviadas: {str(e)}")
 
 
-def get_archived_notes(
+async def get_archived_notes(
     ctx: MCPContext,
     user_id: str,
     page: int = 1,
@@ -150,7 +150,7 @@ def get_archived_notes(
 
     try:
         # Resolver sector_ids del usuario (mismo patron que get_notes)
-        sector_ids = get_user_sector_ids(user_id, schema_name=ctx.schema_name)
+        sector_ids = await get_user_sector_ids(user_id, schema_name=ctx.schema_name)
 
         if not sector_ids:
             logger.warning(f"[MCP] get_archived_notes - usuario sin sectores")
@@ -159,7 +159,7 @@ def get_archived_notes(
                 "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 0}
             }
 
-        result = get_archived_notes_multi_sector(
+        result = await get_archived_notes_multi_sector(
             sector_ids=sector_ids,
             schema_name=ctx.schema_name,
             page=page,
@@ -177,7 +177,7 @@ def get_archived_notes(
         raise RuntimeError(f"Error obteniendo notas archivadas: {str(e)}")
 
 
-def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
+async def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
     """
     Construye la lista de permisos del usuario para notas desde la BD.
     Replica la logica de endpoints/notes/helpers.py pero sin depender de AuthenticatedUser.
@@ -189,7 +189,7 @@ def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[D
     Returns:
         Lista de dicts con {sector_id, can_view, can_edit, is_primary}
     """
-    from database import execute_query
+    from database import fetch_all
 
     # Obtener sector principal + sectores adicionales con permisos
     query = """
@@ -201,7 +201,7 @@ def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[D
             true as is_primary
         FROM users u
         JOIN sectors s ON u.sector_id = s.id
-        WHERE u.id = %s AND s.is_active = true
+        WHERE u.id = $1 AND s.is_active = true
 
         UNION ALL
 
@@ -214,10 +214,10 @@ def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[D
         FROM users u
         JOIN user_sector_permissions usp ON u.id = usp.user_id
         JOIN sectors s2 ON usp.sector_id = s2.id
-        WHERE u.id = %s AND s2.is_active = true
+        WHERE u.id = $2 AND s2.is_active = true
     """
 
-    results = execute_query(query, (user_id, user_id), schema_name=schema_name)
+    results = await fetch_all(query, user_id, user_id, schema_name=schema_name)
 
     permissions = []
     for row in results:
@@ -231,7 +231,7 @@ def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[D
     return permissions
 
 
-def get_note_detail(
+async def get_note_detail(
     ctx: MCPContext,
     note_id: str,
     user_id: str
@@ -263,7 +263,7 @@ def get_note_detail(
         from services.notes import get_note_detail_multi_sector
 
         # Construir user_permissions desde la BD (replica logica de endpoint)
-        user_permissions = _get_user_permissions_for_notes(user_id, schema_name=ctx.schema_name)
+        user_permissions = await _get_user_permissions_for_notes(user_id, schema_name=ctx.schema_name)
 
         if not user_permissions:
             raise ValueError("No se pudo determinar los permisos del usuario")
@@ -272,7 +272,7 @@ def get_note_detail(
         if viewable_count == 0:
             raise ValueError("El usuario no tiene sectores con permiso de visualizacion")
 
-        result = get_note_detail_multi_sector(
+        result = await get_note_detail_multi_sector(
             document_id=note_id,
             requesting_user_id=user_id,
             user_permissions=user_permissions,

@@ -3,7 +3,7 @@ Validador de documentos - REFACTORIZADO
 Centraliza reglas de negocio y validaciones.
 
 UBICACION: services/documents/core/validator.py
-MIGRADO: Fase 2.2 del refactoring
+MIGRADO: Fase 6 asyncpg
 """
 from typing import Optional, List, Dict
 from uuid import UUID
@@ -26,11 +26,11 @@ class DocumentValidator:
             raise ValidationError(f"document_id '{document_id}' debe ser un UUID valido")
 
     @classmethod
-    def validate_can_be_edited(cls, document_id: str, *, schema_name: str) -> None:
+    async def validate_can_be_edited(cls, document_id: str, *, schema_name: str) -> None:
         """Valida que documento existe y puede ser editado."""
         cls.validate_document_id(document_id)
 
-        status = DocumentRepository.get_status(document_id, schema_name=schema_name)
+        status = await DocumentRepository.get_status(document_id, schema_name=schema_name)
         if status is None:
             raise DocumentNotFoundError(document_id)
 

@@ -70,7 +70,7 @@ async def archive_note(
             f"en sector {request.sector_id}"
         )
 
-        result = toggle_note_archive(
+        result = await toggle_note_archive(
             document_id=document_id,
             sector_id=request.sector_id,
             archived=request.archived,
@@ -85,5 +85,5 @@ async def archive_note(
         return ArchiveNoteResponse(**result)
 
     except Exception as e:
-        logger.error(f"Error al archivar/desarchivar nota {document_id}: {e}")
+        logger.error(f"Error al archivar/desarchivar nota {document_id}: {e}", exc_info=True)
         raise exception_to_http_exception(e)

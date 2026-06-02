@@ -12,6 +12,14 @@ from datetime import datetime
 # Import del modelo canónico compartido
 from models.shared.base import DocumentTypeInfo
 
+class SignerInfo(BaseModel):
+    """Información de un firmante de un documento."""
+    user_id: str = Field(..., description="UUID del firmante")
+    full_name: str = Field(..., description="Nombre completo del firmante")
+    profile_picture_url: Optional[str] = Field(None, description="URL de la imagen de perfil del firmante")
+    signed: bool = Field(..., description="Indica si ya firmó")
+    is_numerator: bool = Field(..., description="Indica si es el numerador")
+
 class UserDocumentInfo(BaseModel):
     """Información de un documento asociado a un usuario (solo campos necesarios para el frontend)."""
     id: str = Field(..., description="UUID del documento")
@@ -29,6 +37,14 @@ class UserDocumentInfo(BaseModel):
     creator_sector: Optional[str] = Field(None, description="Sector del creador en formato DEPT#SECTOR")
     # Nombre del usuario que envió a firmar
     sent_by_name: Optional[str] = Field(None, description="Nombre del usuario que envió el documento a firmar")
+    # Resúmenes IA
+    short_resume: Optional[str] = Field(None, description="Resumen corto IA (1-2 oraciones)")
+    resume: Optional[str] = Field(None, description="Resumen largo IA (párrafos completos)")
+    # Vínculos
+    linked_cases: Optional[List[dict]] = Field(default_factory=list, description="Expedientes vinculados [{case_id, case_number}]")
+    linked_records: Optional[List[dict]] = Field(default_factory=list, description="Legajos vinculados [{record_id, record_number}]")
+    # Firmantes
+    signers: List[SignerInfo] = Field(default_factory=list, description="Lista de firmantes del documento con su estado")
 
 class UserDocumentsResponse(BaseModel):
     """Response para obtener documentos de un usuario con información de paginación completa."""

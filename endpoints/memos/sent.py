@@ -56,7 +56,7 @@ async def list_sent_memos(
             f"{' search=' + search if search else ''}"
         )
 
-        result = get_sent_memos(
+        result = await get_sent_memos(
             current_user.user_id,
             schema_name=schema_name,
             page=page,

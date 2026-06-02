@@ -2,6 +2,7 @@
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
+from uuid import UUID
 from models.documents.rejection import RejectDocumentRequest, RejectDocumentResponse
 from models.tags import Tags
 from auth import get_current_user, AuthenticatedUser
@@ -32,12 +33,13 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def reject_document_endpoint(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento"),
+    document_id: UUID = Path(..., description="UUID del documento"),
     rejection_data: RejectDocumentRequest = None,
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> RejectDocumentResponse:
     """Rechaza un documento proporcionando un motivo."""
+    document_id = str(document_id)
     logger.info(
         "Iniciando rechazo de documento",
         extra={
@@ -49,7 +51,7 @@ async def reject_document_endpoint(
     )
 
     try:
-        result = reject_document(document_id, request.state.tenant_user_id, rejection_data.reason, schema_name=schema_name)
+        result = await reject_document(document_id, request.state.tenant_user_id, rejection_data.reason, schema_name=schema_name)
 
         logger.info(
             "Documento rechazado exitosamente",

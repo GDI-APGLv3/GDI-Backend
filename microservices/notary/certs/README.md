@@ -55,9 +55,9 @@ Variables de entorno en GDI-Notary:
 - **NUNCA** commits certificados de producción al repositorio
 - Los archivos `.p12` y `passwords.json` deben estar en `.gitignore`
 - En producción, usar:
-  - Secrets manager (Fly.io Secrets, AWS Secrets Manager, etc.) para passwords
+  - Gestor de secrets para passwords
   - Volúmenes o secrets para certificados
-  - Storage encriptado (Cloudflare R2 + clave maestra) para los .p12
+  - Cloudflare R2 encriptado (fase futura)
 
 ## Verificar certificado
 

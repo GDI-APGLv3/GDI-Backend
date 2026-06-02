@@ -31,7 +31,7 @@ logger = get_logger(__name__)
 
 # Mismas variables que GDI-BackOffice-Back para reutilizar la API key
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "GDI <noreply@example.com>")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "GDI Latam <noreply@example.com>")
 ALERT_TO_EMAIL = os.getenv("ALERT_TO_EMAIL", "alerts@example.com")
 
 RESEND_API_URL = "https://api.resend.com/emails"

@@ -49,11 +49,11 @@ SYSTEM_THRESHOLDS = {
 
 async def check_postgresql() -> Dict[str, Any]:
     """Verificar estado de PostgreSQL"""
-    from database import execute_query, connection_pool, DB_HOST, DB_PORT, DB_NAME, USE_PGBOUNCER
+    from database import fetch_val, get_pool, DB_HOST, DB_PORT, DB_NAME, USE_PGBOUNCER
 
     try:
         start_time = time.time()
-        result = execute_query("SELECT 1 as test", fetch=True, schema_name="public")
+        result = await fetch_val("SELECT 1", schema_name="public")
         latency_ms = (time.time() - start_time) * 1000
 
         # Determinar status basado en latencia
@@ -64,15 +64,13 @@ async def check_postgresql() -> Dict[str, Any]:
         else:
             status = "unhealthy"
 
-        # Obtener información del pool
+        # Obtener información del pool asyncpg
         pool_info = "N/A"
-        if connection_pool:
-            # SimpleConnectionPool no expone métricas directamente,
-            # pero podemos intentar obtener info básica
-            try:
-                pool_info = f"Active (minconn=5, maxconn=50)"
-            except Exception:
-                pool_info = "Active (details unavailable)"
+        try:
+            p = get_pool()
+            pool_info = f"Active (min={p.get_min_size()}, max={p.get_max_size()}, size={p.get_size()})"
+        except Exception:
+            pool_info = "Active (details unavailable)"
 
         # Detectar tipo de conexión
         connection_type = "PgBouncer" if USE_PGBOUNCER else "Direct PostgreSQL"
@@ -88,7 +86,7 @@ async def check_postgresql() -> Dict[str, Any]:
                 "database": DB_NAME,
                 "pool": pool_info,
                 "query": "SELECT 1",
-                "result": "OK" if result else "FAIL"
+                "result": "OK" if result == 1 else "FAIL"
             }
         }
     except Exception as e:

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
-from database import execute_query
+from database import fetch_all
 from shared.exceptions import exception_to_http_exception, NotFoundError, AuthorizationError
 from shared.utils import get_authenticated_user
 from shared.dependencies import get_tenant_schema
@@ -112,7 +112,7 @@ async def prepare_assignment(
     try:
         logger.info(f"Preparing assignment for case {case_id}")
 
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # 1. Obtener sectores del usuario donde puede EDITAR (principal + permissions con can_edit=true)
         user_sectors_query = """
@@ -120,7 +120,7 @@ async def prepare_assignment(
             SELECT s.id as sector_id
             FROM users u
             JOIN sectors s ON u.sector_id = s.id
-            WHERE u.id = %s AND s.is_active = true
+            WHERE u.id = $1 AND s.is_active = true
 
             UNION
 
@@ -129,9 +129,9 @@ async def prepare_assignment(
             FROM users u
             JOIN user_sector_permissions usp ON u.id = usp.user_id
             JOIN sectors s2 ON usp.sector_id = s2.id
-            WHERE u.id = %s AND s2.is_active = true AND usp.can_edit = true
+            WHERE u.id = $2 AND s2.is_active = true AND usp.can_edit = true
         """
-        user_sectors_result = execute_query(user_sectors_query, (db_user_id, db_user_id), schema_name=schema_name)
+        user_sectors_result = await fetch_all(user_sectors_query, db_user_id, db_user_id, schema_name=schema_name)
         user_sector_ids = [str(row['sector_id']) for row in user_sectors_result if row['sector_id']]
 
         # Continuar para obtener available_sectors aunque user_sector_ids esté vacío
@@ -146,13 +146,13 @@ async def prepare_assignment(
             FROM case_movements cm
             JOIN sectors s ON cm.admin_sector_id = s.id
             JOIN departments d ON s.department_id = d.id
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $1
               AND cm.is_active = false
               AND cm.type IN ('creation', 'transfer')
             ORDER BY cm.closed_at DESC
             LIMIT 1
         """
-        admin_sector_result = execute_query(admin_sector_query, (case_id,), schema_name=schema_name)
+        admin_sector_result = await fetch_all(admin_sector_query, case_id, schema_name=schema_name)
 
         admin_sector_id = None
         admin_sector_data = None
@@ -169,11 +169,11 @@ async def prepare_assignment(
             FROM case_movements cm
             JOIN sectors s ON cm.assigned_sector_id = s.id
             JOIN departments d ON s.department_id = d.id
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $1
               AND cm.is_active = true
               AND cm.assigned_sector_id IS NOT NULL
         """
-        assigned_sectors_result = execute_query(assigned_sectors_query, (case_id,), schema_name=schema_name)
+        assigned_sectors_result = await fetch_all(assigned_sectors_query, case_id, schema_name=schema_name)
 
         assigned_sector_ids = []
         assigned_sectors_data = {}
@@ -229,7 +229,7 @@ async def prepare_assignment(
             WHERE s.is_active = true
             ORDER BY sector_acronym
         """
-        available_sectors_result = execute_query(available_sectors_query, schema_name=schema_name)
+        available_sectors_result = await fetch_all(available_sectors_query, schema_name=schema_name)
 
         available_sectors = []
         if available_sectors_result:
@@ -290,7 +290,7 @@ async def prepare_transfer(
     try:
         logger.info(f"Preparing transfer for case {case_id}")
 
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # 1. Obtener sectores del usuario donde puede EDITAR (principal + permissions con can_edit=true)
         user_sectors_query = """
@@ -298,7 +298,7 @@ async def prepare_transfer(
             SELECT s.id as sector_id
             FROM users u
             JOIN sectors s ON u.sector_id = s.id
-            WHERE u.id = %s AND s.is_active = true
+            WHERE u.id = $1 AND s.is_active = true
 
             UNION
 
@@ -307,9 +307,9 @@ async def prepare_transfer(
             FROM users u
             JOIN user_sector_permissions usp ON u.id = usp.user_id
             JOIN sectors s2 ON usp.sector_id = s2.id
-            WHERE u.id = %s AND s2.is_active = true AND usp.can_edit = true
+            WHERE u.id = $2 AND s2.is_active = true AND usp.can_edit = true
         """
-        user_sectors_result = execute_query(user_sectors_query, (db_user_id, db_user_id), schema_name=schema_name)
+        user_sectors_result = await fetch_all(user_sectors_query, db_user_id, db_user_id, schema_name=schema_name)
         user_sector_ids = [str(row['sector_id']) for row in user_sectors_result if row['sector_id']]
 
         # Continuar para obtener available_sectors aunque user_sector_ids esté vacío
@@ -324,13 +324,13 @@ async def prepare_transfer(
             FROM case_movements cm
             JOIN sectors s ON cm.admin_sector_id = s.id
             JOIN departments d ON s.department_id = d.id
-            WHERE cm.case_id = %s
+            WHERE cm.case_id = $1
               AND cm.is_active = false
               AND cm.type IN ('creation', 'transfer')
             ORDER BY cm.closed_at DESC
             LIMIT 1
         """
-        admin_sector_result = execute_query(admin_sector_query, (case_id,), schema_name=schema_name)
+        admin_sector_result = await fetch_all(admin_sector_query, case_id, schema_name=schema_name)
 
         if not admin_sector_result:
             logger.error(f"Case {case_id} not found or has no admin sector")
@@ -368,7 +368,7 @@ async def prepare_transfer(
             WHERE s.is_active = true
             ORDER BY sector_acronym
         """
-        available_sectors_result = execute_query(available_sectors_query, schema_name=schema_name)
+        available_sectors_result = await fetch_all(available_sectors_query, schema_name=schema_name)
 
         available_sectors = []
         if available_sectors_result:

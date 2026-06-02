@@ -483,7 +483,7 @@ _cache_lock = Lock()
 CACHE_TTL_SECONDS = 3600  # 1 hora
 
 
-def get_tenant_settings(schema_name: str) -> Dict[str, str]:
+async def get_tenant_settings(schema_name: str) -> Dict[str, str]:
     """
     Obtiene configuración de buckets R2 desde la tabla settings del tenant.
 
@@ -496,21 +496,21 @@ def get_tenant_settings(schema_name: str) -> Dict[str, str]:
     Raises:
         ValueError: Si el tenant no tiene settings configurados
     """
-    from database import execute_query
+    from database import fetch_one
 
     query = "SELECT bucket_oficial, bucket_tosign FROM settings LIMIT 1"
-    result = execute_query(query, schema_name=schema_name)
+    result = await fetch_one(query, schema_name=schema_name)
 
-    if not result or not result[0].get('bucket_oficial'):
+    if not result or not result.get('bucket_oficial'):
         raise ValueError(f"Tenant {schema_name} no tiene buckets configurados en settings")
 
     return {
-        'bucket_oficial': result[0]['bucket_oficial'],
-        'bucket_tosign': result[0]['bucket_tosign']
+        'bucket_oficial': result['bucket_oficial'],
+        'bucket_tosign': result['bucket_tosign']
     }
 
 
-def get_tenant_r2_client(*, schema_name: str) -> CloudflareR2Client:
+async def get_tenant_r2_client(*, schema_name: str) -> CloudflareR2Client:
     """
     Obtiene cliente R2 específico para el tenant.
 
@@ -525,7 +525,7 @@ def get_tenant_r2_client(*, schema_name: str) -> CloudflareR2Client:
 
     Ejemplos:
         >>> from services.storage.cloudflare import get_tenant_r2_client
-        >>> client = get_tenant_r2_client(schema_name='100_test')
+        >>> client = await get_tenant_r2_client(schema_name='100_test')
         >>> url = client.get_oficial_url("DOC-123.pdf")  # Usa bucket del tenant
     """
     now = time.time()
@@ -540,7 +540,7 @@ def get_tenant_r2_client(*, schema_name: str) -> CloudflareR2Client:
 
     # Crear nuevo cliente (fuera del lock para no bloquear)
     logger.info(f"Creando nuevo cliente R2 para tenant {schema_name}")
-    settings = get_tenant_settings(schema_name)
+    settings = await get_tenant_settings(schema_name)
 
     new_client = CloudflareR2Client(
         bucket_oficial=settings['bucket_oficial'],

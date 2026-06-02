@@ -153,12 +153,12 @@ async def search_official_document(
 
     try:
         # Validar usuario y obtener flags de busqueda global
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
-        flags = get_user_global_search_flags(db_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        flags = await get_user_global_search_flags(db_user_id, schema_name=schema_name)
 
         # Llamar al servicio de búsqueda con flag de restriccion
         user_id_for_filter = None if flags["can_global_search_documents"] else db_user_id
-        result = search_official_document_by_number(doc_number, user_id=user_id_for_filter, schema_name=schema_name)
+        result = await search_official_document_by_number(doc_number, user_id=user_id_for_filter, schema_name=schema_name)
         
         logger.info(f"[SEARCH OFFICIAL] Resultado: {'Encontrado' if result['found'] else 'No encontrado'}")
         

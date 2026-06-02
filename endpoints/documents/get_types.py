@@ -56,7 +56,7 @@ async def get_document_types(
         # Cache key incluye schema para multi-tenant
         cache_key = f"document_types:{schema_name or 'default'}"
 
-        document_types = get_cached(
+        document_types = await get_cached(
             cache_key=cache_key,
             fetch_func=lambda: get_all_document_types(schema_name),
             ttl=3600

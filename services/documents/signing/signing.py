@@ -4,7 +4,7 @@ from shared.logging import get_logger
 import os
 import uuid
 from typing import Dict, Any, Optional, List
-from database import get_db_connection, execute_transaction, execute_single_update, execute_query
+from database import fetch_one, fetch_all, execute, get_conn
 from shared.exceptions import (
     DocumentNotFoundError, ValidationError, DocumentStateError,
     DocumentAlreadySignedError, InvalidSignatureOrderError, DocumentAlreadyRejectedError, AuthorizationError,
@@ -54,178 +54,170 @@ async def start_document_signing_process(document_id: str, user_id: str, *, sche
         ExternalServiceError: Si falla la generación del PDF
     """
     # Nota: Las validaciones de validate_document_id y validate_user_id fueron
-    # removidas porque son redundantes. La query principal (línea 67) ya verifica
-    # existencia del documento, y la validación del usuario se hace en línea 87.
+    # removidas porque son redundantes. La query principal ya verifica
+    # existencia del documento, y la validación del usuario se hace después.
     # Además, validate_document_id causaba bug 404 por problemas de ContextVar.
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            # Obtener información del documento y verificar estado
-            cursor.execute(get_document_for_signing_start_query(), (document_id,))
-            document = cursor.fetchone()
-            if not document:
-                raise DocumentNotFoundError(document_id)
+    # Obtener información del documento y verificar estado
+    document = await fetch_one(
+        get_document_for_signing_start_query(),
+        document_id,
+        schema_name=schema_name,
+    )
+    if not document:
+        raise DocumentNotFoundError(document_id)
 
-            logger.info(f"Iniciando proceso de firma para documento {document_id}")
+    logger.info(f"Iniciando proceso de firma para documento {document_id}")
 
-            if not document.get('type_acronym') or not document.get('type_name'):
-                logger.warning(
-                    f"Documento {document_id} sin datos de tipo de documento. "
-                    f"document_type_id: {document.get('document_type_id')}"
-                )
+    if not document.get('type_acronym') or not document.get('type_name'):
+        logger.warning(
+            f"Documento {document_id} sin datos de tipo de documento. "
+            f"document_type_id: {document.get('document_type_id')}"
+        )
 
-            if document['status'] not in EDITABLE_DOCUMENT_STATES:
-                raise DocumentStateError(
-                    f"Documento en estado '{document['status']}' no puede iniciarse para firma",
-                    current_state=document['status'],
-                    required_state=" o ".join(EDITABLE_DOCUMENT_STATES)
-                )
+    if document['status'] not in EDITABLE_DOCUMENT_STATES:
+        raise DocumentStateError(
+            f"Documento en estado '{document['status']}' no puede iniciarse para firma",
+            current_state=document['status'],
+            required_state=" o ".join(EDITABLE_DOCUMENT_STATES)
+        )
 
-            if document['created_by'] != user_id:
-                raise AuthorizationError(START_SIGNING_ONLY_CREATOR_ERROR)
+    if document['created_by'] != user_id:
+        raise AuthorizationError(START_SIGNING_ONLY_CREATOR_ERROR)
 
-            # Obtener logo del municipio desde settings
-            cursor.execute("SELECT logo_url FROM settings LIMIT 1")
-            settings_result = cursor.fetchone()
-            logo_url = settings_result['logo_url'] if settings_result and settings_result.get('logo_url') else None
+    # Obtener logo del municipio desde settings
+    settings_result = await fetch_one(
+        "SELECT logo_url FROM settings LIMIT 1",
+        schema_name=schema_name,
+    )
+    logo_url = settings_result['logo_url'] if settings_result and settings_result.get('logo_url') else None
 
-            document_data = {
-                "document_id": document_id,
-                "reference": document['reference'],
-                "content": document['content'],
-                "type_name": document['type_name'],
-                "type_acronym": document['type_acronym'],
-                "municipality_logo_url": logo_url
-            }
+    document_data = {
+        "document_id": document_id,
+        "reference": document['reference'],
+        "content": document['content'],
+        "type_name": document['type_name'],
+        "type_acronym": document['type_acronym'],
+        "municipality_logo_url": logo_url
+    }
 
-            # Si es NOTA, validar recipients antes de firmar
-            # (El header de recipients lo genera PDFComposer con /note/)
-            if document.get('type_acronym') == 'NOTA':
-                from services.notes.validation import validate_nota_recipients_for_signing
-                validate_nota_recipients_for_signing(document_id, schema_name=schema_name)
+    # Si es NOTA, validar recipients antes de firmar
+    if document.get('type_acronym') == 'NOTA':
+        from services.notes.validation import validate_nota_recipients_for_signing
+        await validate_nota_recipients_for_signing(document_id, schema_name=schema_name)
 
-            # Si es MEMO, validar recipients antes de firmar
-            elif document.get('type_acronym') == 'MEMO':
-                from services.memos.validation import validate_memo_recipients_for_signing
-                validate_memo_recipients_for_signing(document_id, schema_name=schema_name)
+    # Si es MEMO, validar recipients antes de firmar
+    elif document.get('type_acronym') == 'MEMO':
+        from services.memos.validation import validate_memo_recipients_for_signing
+        await validate_memo_recipients_for_signing(document_id, schema_name=schema_name)
 
-            # Obtener firmantes
-            cursor.execute(get_document_signers_for_pdf_query(), (document_id,))
-            all_signers = cursor.fetchall()
-            signers_for_pdf = [
-                {
-                    "user_id": signer['user_id'],
-                    "user_name": signer['user_name'],
-                    "signing_order": signer['signing_order'],
-                    "is_numerator": signer['is_numerator']
-                }
-                for signer in all_signers
-            ]
+    # Obtener firmantes
+    all_signers = await fetch_all(
+        get_document_signers_for_pdf_query(),
+        document_id,
+        schema_name=schema_name,
+    )
+    signers_for_pdf = [
+        {
+            "user_id": signer['user_id'],
+            "user_name": signer['user_name'],
+            "signing_order": signer['signing_order'],
+            "is_numerator": signer['is_numerator']
+        }
+        for signer in all_signers
+    ]
 
-            # Generar PDF
-            pdf_result = await generate_final_document_pdf(document_id, document_data, signers_for_pdf, schema_name=schema_name)
+    # Generar PDF
+    pdf_result = await generate_final_document_pdf(document_id, document_data, signers_for_pdf, schema_name=schema_name)
 
-            logger.info(f"PDF generado para documento {document_id}")
+    logger.info(f"PDF generado para documento {document_id}")
 
-            # Validar que el PDF se generó correctamente
-            if not pdf_result or not pdf_result.get('document_generate_id'):
+    # Validar que el PDF se generó correctamente
+    if not pdf_result or not pdf_result.get('document_generate_id'):
+        logger.error(
+            f"Error en generación de PDF. pdf_result: {pdf_result}, "
+            f"document_generate_id: {pdf_result.get('document_generate_id') if pdf_result else 'No pdf_result'}"
+        )
+        raise ExternalServiceError(START_SIGNING_PDF_GENERATION_ERROR)
+
+    # Validar que el PDF contiene el marker 'end-text' requerido por Notary
+    document_url = pdf_result.get('document_url')
+    if document_url:
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=30.0) as _client:
+                _pdf_response = await _client.get(document_url)
+                _pdf_response.raise_for_status()
+                _pdf_bytes = _pdf_response.content
+            if not has_end_text_marker(_pdf_bytes):
                 logger.error(
-                    f"Error en generación de PDF. pdf_result: {pdf_result}, "
-                    f"document_generate_id: {pdf_result.get('document_generate_id') if pdf_result else 'No pdf_result'}"
+                    f"PDF generado no contiene marker 'end-text'. "
+                    f"document_id={document_id}, schema={schema_name}"
                 )
-                raise ExternalServiceError(START_SIGNING_PDF_GENERATION_ERROR)
-
-            # Validar que el PDF contiene el marker 'end-text' requerido por Notary
-            document_url = pdf_result.get('document_url')
-            if document_url:
+                # Borrar el PDF de R2 tosign (no se va a usar, ahorra storage)
                 try:
-                    import httpx as _httpx
-                    async with _httpx.AsyncClient(timeout=30.0) as _client:
-                        _pdf_response = await _client.get(document_url)
-                        _pdf_response.raise_for_status()
-                        _pdf_bytes = _pdf_response.content
-                    if not has_end_text_marker(_pdf_bytes):
-                        logger.error(
-                            f"PDF generado no contiene marker 'end-text'. "
-                            f"document_id={document_id}, schema={schema_name}"
-                        )
-                        # Borrar el PDF de R2 tosign (no se va a usar, ahorra storage)
-                        try:
-                            from services.storage.cloudflare import get_tenant_r2_client
-                            _r2_client = get_tenant_r2_client(schema_name=schema_name)
-                            _filename = document_id.replace('-', '') + '.pdf'
-                            _r2_client.delete_tosign(_filename)
-                            logger.info(
-                                f"PDF invalido eliminado de R2 tosign: {_filename}"
-                            )
-                        except Exception as _del_e:
-                            logger.warning(
-                                f"No se pudo eliminar PDF invalido de R2 tosign "
-                                f"(soft-fail): {_del_e}"
-                            )
-                        raise ValidationError(
-                            "El PDF generado no tiene espacio correcto para la firma. "
-                            "Por favor agregue saltos de línea para generar otra página."
-                        )
-                    logger.info(f"Validación end-text OK para documento {document_id}")
-                except ValidationError:
-                    raise
-                except Exception as _e:
-                    logger.warning(
-                        f"No se pudo validar end-text del PDF (se continúa igualmente): {_e}"
+                    from services.storage.cloudflare import get_tenant_r2_client
+                    _r2_client = await get_tenant_r2_client(schema_name=schema_name)
+                    _filename = document_id.replace('-', '') + '.pdf'
+                    await run_in_threadpool(_r2_client.delete_tosign, _filename)
+                    logger.info(
+                        f"PDF invalido eliminado de R2 tosign: {_filename}"
                     )
-            else:
-                logger.warning(
-                    f"document_url no disponible en pdf_result, se omite validación end-text. "
-                    f"document_id={document_id}"
+                except Exception as _del_e:
+                    logger.warning(
+                        f"No se pudo eliminar PDF invalido de R2 tosign "
+                        f"(soft-fail): {_del_e}"
+                    )
+                raise ValidationError(
+                    "El PDF generado no tiene espacio correcto para la firma. "
+                    "Por favor agregue saltos de línea para generar otra página."
                 )
-
-            # Obtener usuarios inactivos para enviar invitaciones
-            cursor.execute(get_inactive_signers_query(), (document_id,))
-            inactive_signers = cursor.fetchall()
-
-            # Actualizar estado del documento
-            cursor.execute(
-                update_document_to_sent_to_sign_query(),
-                (user_id, document_id)
+            logger.info(f"Validación end-text OK para documento {document_id}")
+        except ValidationError:
+            raise
+        except Exception as _e:
+            logger.warning(
+                f"No se pudo validar end-text del PDF (se continúa igualmente): {_e}"
             )
-            conn.commit()
+    else:
+        logger.warning(
+            f"document_url no disponible en pdf_result, se omite validación end-text. "
+            f"document_id={document_id}"
+        )
 
-            # Enviar invitaciones a usuarios inactivos
-            invitations_sent = 0
-            if inactive_signers:
-                invitations_sent = await _send_user_invitations(inactive_signers, document_id, user_id, schema_name=schema_name)
+    # Obtener usuarios inactivos para enviar invitaciones
+    inactive_signers = await fetch_all(
+        get_inactive_signers_query(),
+        document_id,
+        schema_name=schema_name,
+    )
 
-            # Fire-and-forget: encola generación de resumen async
-            enqueue_resume_fire_and_forget(document_id, schema_name)
+    # Actualizar estado del documento
+    await execute(
+        update_document_to_sent_to_sign_query(),
+        user_id,
+        document_id,
+        schema_name=schema_name,
+    )
 
-            logger.info(f"Proceso de firma iniciado exitosamente para documento {document_id}")
+    # Enviar invitaciones a usuarios inactivos
+    invitations_sent = 0
+    if inactive_signers:
+        invitations_sent = await _send_user_invitations(inactive_signers, document_id, user_id, schema_name=schema_name)
 
-            return {
-                "success": True,
-                "message": START_SIGNING_SUCCESS_MESSAGE,
-                "document_generate_id": pdf_result.get('document_generate_id'),
-                "document_url": pdf_result.get('document_url'),
-                "api_mode": pdf_result.get('api_mode', 'unknown'),
-                "invitations_sent": invitations_sent
-            }
+    # Fire-and-forget: encola generación de resumen async
+    enqueue_resume_fire_and_forget(document_id, schema_name)
 
-def get_document_signature_details(document_id: str, user_id: str) -> Dict[str, Any]:
-    """
-    Obtiene los detalles necesarios para mostrar la pantalla de firma.
+    logger.info(f"Proceso de firma iniciado exitosamente para documento {document_id}")
 
-    Utiliza arquitectura modular delegando la construcción de respuesta
-    al servicio especializado signature_details_builder.
-
-    Args:
-        document_id: UUID del documento (ya validado por el endpoint)
-        user_id: UUID del usuario (ya validado por el endpoint)
-
-    Returns:
-        Dict con todos los datos para la pantalla de firma
-    """
-    from services.documents.signing.details_builder import build_signature_details_response
-    return build_signature_details_response(document_id, user_id)
+    return {
+        "success": True,
+        "message": START_SIGNING_SUCCESS_MESSAGE,
+        "document_generate_id": pdf_result.get('document_generate_id'),
+        "document_url": pdf_result.get('document_url'),
+        "api_mode": pdf_result.get('api_mode', 'unknown'),
+        "invitations_sent": invitations_sent
+    }
 
 async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
     """
@@ -247,73 +239,87 @@ async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> 
         schema_name: Schema del tenant (multi-tenant)
 
     Returns:
-        Dict con el resultado de la operación:
-        - success: bool
-        - message: str
-        - signature_id: str
-        - document_status: str (siempre 'sent_to_sign')
+        Dict con el resultado de la operación
 
     Raises:
         ValidationError: Si falla descarga, firma, o actualización
         AuthorizationError: Si el usuario no es firmante o ya firmó
     """
-    import httpx
+    import hashlib
 
     logger.info(f"Iniciando firma de firmante común para documento {document_id[:8]}... por usuario {user_id[:8]}...")
+
+    from services.documents.signing.r2_lock import (
+        acquire_signing_lock_R2,
+        release_signing_lock_R2_success,
+        release_signing_lock_R2_fail,
+    )
+    from services.documents.signing.audit_logger import log_signature_event
+    from services.r2_client import r2_get_object, R2KeyNotFound
+
+    _lock_acquired = False
+    _sign_result = "fail"
+    _failure_reason: str | None = None
+    _signed_pdf_bytes: bytes | None = None
 
     try:
         # ============================================================
         # PASO 0: VALIDAR QUE USUARIO SEA FIRMANTE Y NO HAYA FIRMADO
         # ============================================================
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                # Verificar que el usuario existe en document_signers para este documento
-                cursor.execute(
-                    """
-                    SELECT signing_order, signed_at, is_numerator
-                    FROM document_signers
-                    WHERE document_id = %s AND user_id = %s
-                    """,
-                    (document_id, user_id)
-                )
-                signer_record = cursor.fetchone()
+        signer_record = await fetch_one(
+            """
+            SELECT signing_order, signed_at, is_numerator
+            FROM document_signers
+            WHERE document_id = $1 AND user_id = $2
+            """,
+            document_id,
+            user_id,
+            schema_name=schema_name,
+        )
 
-                if not signer_record:
-                    raise AuthorizationError(
-                        f"Usuario {user_id} no es firmante del documento {document_id}"
-                    )
+        if not signer_record:
+            raise AuthorizationError(
+                f"Usuario {user_id} no es firmante del documento {document_id}"
+            )
 
-                # Verificar que no haya firmado ya
-                if signer_record['signed_at'] is not None:
-                    raise DocumentAlreadySignedError(
-                        f"Usuario {user_id} ya firmó este documento"
-                    )
+        # Verificar que no haya firmado ya
+        if signer_record['signed_at'] is not None:
+            raise DocumentAlreadySignedError(
+                f"Usuario {user_id} ya firmó este documento"
+            )
 
-                logger.info(f"Validación OK: usuario es firmante y no ha firmado aún")
-                logger.info(f"  signing_order: {signer_record['signing_order']}, is_numerator: {signer_record['is_numerator']}")
+        logger.info(f"Validación OK: usuario es firmante y no ha firmado aún")
+        logger.info(f"  signing_order: {signer_record['signing_order']}, is_numerator: {signer_record['is_numerator']}")
 
         # ============================================================
-        # PASO 1: DESCARGAR PDF DESDE R2 TOSIGN
+        # PASO 1: ADQUIRIR LOCK R2 (mueve PDF a tosign/inprocess/)
         # ============================================================
-        logger.info("Descargando PDF desde R2 bucket tosign...")
+        logger.info("Adquiriendo lock R2 para firma...")
+        _lock_acquired = await acquire_signing_lock_R2(
+            schema_name=schema_name,
+            doc_id=document_id,
+        )
+        if not _lock_acquired:
+            _failure_reason = "document_already_signing"
+            raise ValidationError(
+                f"El documento {document_id} ya está siendo firmado por otro proceso (lock R2 activo)"
+            )
+        logger.info("Lock R2 adquirido correctamente")
 
-        from services.storage.cloudflare import get_tenant_r2_client
-        r2_client = get_tenant_r2_client(schema_name=schema_name)
+        # ============================================================
+        # PASO 2: DESCARGAR PDF DESDE R2 tosign/inprocess/
+        # ============================================================
+        logger.info("Descargando PDF desde R2 tosign/inprocess/...")
 
-        # Filename: document_id sin guiones
-        filename = document_id.replace('-', '') + '.pdf'
-
-        # Obtener URL firmada temporal
-        pdf_url = await run_in_threadpool(r2_client.get_tosign_url, filename)
-        if not pdf_url:
-            raise ValidationError(f"No se pudo obtener URL del PDF desde R2 tosign: {filename}")
-
-        logger.info(f"Descargando: {filename}")
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            pdf_response = await client.get(pdf_url)
-            pdf_response.raise_for_status()
-            pdf_bytes = pdf_response.content
+        inprocess_key = f"inprocess/{document_id.replace('-', '')}.pdf"
+        try:
+            pdf_bytes = await r2_get_object(
+                schema_name=schema_name,
+                key=inprocess_key,
+                bucket="tosign",
+            )
+        except R2KeyNotFound:
+            raise ValidationError(f"No se encontró el PDF en R2 inprocess: {inprocess_key}")
 
         logger.info(f"PDF descargado: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
 
@@ -322,8 +328,7 @@ async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> 
         # ============================================================
         logger.info("Paso 2/4: Obteniendo datos del firmante...")
 
-        # Obtener datos del firmante usando función compartida
-        signer_data = get_signer_data(user_id, schema_name=schema_name)
+        signer_data = await get_signer_data(user_id, schema_name=schema_name)
         signer_name = signer_data['full_name']
         signer_seal = signer_data['seal']
         signer_department = signer_data['department_name']
@@ -336,32 +341,50 @@ async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> 
         # ============================================================
         # PASO 3: FIRMAR CON NOTARY API
         # ============================================================
-        logger.info("Paso 3/4: Firmando con Notary API...")
+        logger.info("Paso 3/5: Firmando con Notary API...")
 
         from services.shared.notary_api import call_notary_sign_pdf
 
-        # Firmante común: official_number="" y city=""
-        signed_pdf_bytes = await call_notary_sign_pdf(
-            pdf_bytes=pdf_bytes,
-            signer_name=signer_name,
-            signer_seal=signer_seal,
-            signer_department=signer_department,
-            signer_municipality=signer_municipality,
-            official_number="",  # Vacío para firmante común
-            city="",             # Vacío para firmante común
-            tenant_id=schema_name,  # Para firma PAdES
-            schema_name=schema_name  # Para resolver certificado de R2
+        try:
+            # Firmante común: official_number="" y city=""
+            _signed_pdf_bytes = await call_notary_sign_pdf(
+                pdf_bytes=pdf_bytes,
+                signer_name=signer_name,
+                signer_seal=signer_seal,
+                signer_department=signer_department,
+                signer_municipality=signer_municipality,
+                official_number="",  # Vacío para firmante común
+                city="",             # Vacío para firmante común
+                tenant_id=schema_name,  # Para firma PAdES
+                schema_name=schema_name  # Para resolver certificado de R2
+            )
+        except Exception as _notary_err:
+            # Notary falló: liberar lock (rollback inprocess/ → tosign/)
+            _failure_reason = f"notary_error: {str(_notary_err)[:200]}"
+            logger.error(f"Notary falló, liberando lock R2: {_notary_err}")
+            await release_signing_lock_R2_fail(
+                schema_name=schema_name,
+                doc_id=document_id,
+            )
+            _lock_acquired = False  # ya liberado
+            raise
+
+        logger.info(f"PDF firmado: {len(_signed_pdf_bytes)} bytes ({len(_signed_pdf_bytes)/1024:.2f} KB)")
+
+        # ============================================================
+        # PASO 4: LIBERAR LOCK R2 - ÉXITO (sube PDF firmado a tosign/)
+        # ============================================================
+        logger.info("Paso 4/5: Liberando lock R2 (subiendo PDF firmado a tosign/)...")
+
+        await release_signing_lock_R2_success(
+            schema_name=schema_name,
+            doc_id=document_id,
+            signed_pdf=_signed_pdf_bytes,
+            is_numerator=False,
+            number=None,
         )
-
-        logger.info(f"PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
-
-        # ============================================================
-        # PASO 4: SOBRESCRIBIR PDF EN R2 TOSIGN
-        # ============================================================
-        logger.info("Paso 4/4: Sobrescribiendo PDF en R2 tosign...")
-
-        await run_in_threadpool(r2_client.upload_tosign, signed_pdf_bytes, filename)
-        logger.info(f"PDF sobrescrito en R2 tosign: {filename}")
+        _lock_acquired = False  # liberado correctamente
+        logger.info("Lock R2 liberado y PDF firmado guardado en tosign/")
 
         # ============================================================
         # PASO 5: ACTUALIZAR SOLO ESTADO DEL FIRMANTE
@@ -370,28 +393,41 @@ async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> 
 
         signature_id = str(uuid.uuid4())
 
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                # Actualizar estado del firmante
-                cursor.execute(
-                    update_signer_status_to_signed_query(),
-                    (document_id, user_id)
-                )
+        status_str = await execute(
+            update_signer_status_to_signed_query(),
+            document_id,
+            user_id,
+            schema_name=schema_name,
+        )
 
-                if cursor.rowcount == 0:
-                    raise ValidationError("No se pudo actualizar el estado del firmante")
+        # asyncpg execute() returns status string like "UPDATE 1"
+        rows_affected = int(status_str.split()[-1]) if status_str else 0
+        if rows_affected == 0:
+            raise ValidationError("No se pudo actualizar el estado del firmante")
 
-                # Confirmar cambios
-                conn.commit()
-
-                # Obtener estado del documento (NO lo cambia, solo lo lee)
-                cursor.execute(get_document_draft_status_query(), (document_id,))
-                doc_result = cursor.fetchone()
-                final_status = doc_result['status'] if doc_result else 'unknown'
+        # Obtener estado del documento (NO lo cambia, solo lo lee)
+        doc_result = await fetch_one(
+            get_document_draft_status_query(),
+            document_id,
+            schema_name=schema_name,
+        )
+        final_status = doc_result['status'] if doc_result else 'unknown'
 
         logger.info("Firmante actualizado a 'signed'")
         logger.info(f"Documento permanece en estado: {final_status}")
         logger.info("Proceso de firma común completado exitosamente")
+
+        _sign_result = "ok"
+
+        # Audit log (Fase 1 - firma electrónica)
+        await log_signature_event(
+            schema_name=schema_name,
+            document_id=document_id,
+            user_id=user_id,
+            signature_method="electronic",
+            result="ok",
+            r2_object_key=inprocess_key,
+        )
 
         return {
             "success": True,
@@ -401,13 +437,55 @@ async def sign_document(document_id: str, user_id: str, *, schema_name: str) -> 
             "signing_result": {
                 "success": True,
                 "api_mode": "direct_notary",
-                "signed_pdf_size": len(signed_pdf_bytes)
+                "signed_pdf_size": len(_signed_pdf_bytes)
             }
         }
 
-    except ValidationError:
+    except (ValidationError, AuthorizationError, DocumentAlreadySignedError) as e:
+        # Errores de negocio conocidos: liberar lock si está activo
+        if _lock_acquired:
+            try:
+                await release_signing_lock_R2_fail(
+                    schema_name=schema_name,
+                    doc_id=document_id,
+                )
+                _lock_acquired = False  # ya liberado
+            except Exception as _rel_err:
+                logger.warning(f"No se pudo liberar lock R2 en except: {_rel_err}")
+        # Asegurar que _failure_reason quede poblado para el audit
+        _failure_reason = _failure_reason or str(e)[:300]
+        # Audit log de todos los fallos, incluyendo document_already_signing
+        if _failure_reason:
+            await log_signature_event(
+                schema_name=schema_name,
+                document_id=document_id,
+                user_id=user_id,
+                signature_method="electronic",
+                result="fail",
+                failure_reason=_failure_reason,
+            )
         raise
     except Exception as e:
+        _failure_reason = _failure_reason or str(e)[:300]
+        # Liberar lock si quedó activo
+        if _lock_acquired:
+            try:
+                await release_signing_lock_R2_fail(
+                    schema_name=schema_name,
+                    doc_id=document_id,
+                )
+                _lock_acquired = False  # ya liberado
+            except Exception as _rel_err:
+                logger.warning(f"No se pudo liberar lock R2 en except genérico: {_rel_err}")
+        # Audit log del fallo
+        await log_signature_event(
+            schema_name=schema_name,
+            document_id=document_id,
+            user_id=user_id,
+            signature_method="electronic",
+            result="fail",
+            failure_reason=_failure_reason,
+        )
         logger.error(f"Error: {str(e)}")
         raise ValidationError(f"Error al firmar documento: {str(e)}")
 
@@ -441,15 +519,16 @@ async def _send_user_invitations(inactive_signers: List[Dict], document_id: str,
     # Obtener el nombre del usuario que inició el proceso de firma
     creator_full_name = "Usuario creador"  # Valor por defecto
     try:
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(get_user_full_name_query(), (creator_user_id,))
-                creator_result = cursor.fetchone()
-                if creator_result:
-                    creator_full_name = creator_result['full_name']
-                    logger.debug(f"Usuario creador encontrado: {creator_full_name}")
-                else:
-                    logger.warning(f"No se encontró usuario creador con ID: {creator_user_id}")
+        creator_result = await fetch_one(
+            get_user_full_name_query(),
+            creator_user_id,
+            schema_name=schema_name,
+        )
+        if creator_result:
+            creator_full_name = creator_result['full_name']
+            logger.debug(f"Usuario creador encontrado: {creator_full_name}")
+        else:
+            logger.warning(f"No se encontró usuario creador con ID: {creator_user_id}")
     except Exception as e:
         logger.error(f"Error obteniendo nombre del creador: {str(e)}")
 
@@ -557,7 +636,7 @@ async def _send_user_invitations(inactive_signers: List[Dict], document_id: str,
                     "from_name": "GDI Latam"
                 }
 
-                logger.info(f"Enviando a {signer['email']} ({signer['full_name']})")
+                logger.info(f"Enviando invitacion a user_id={signer['user_id']}")
 
                 # Hacer llamada HTTP a la API de emails
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -571,21 +650,20 @@ async def _send_user_invitations(inactive_signers: List[Dict], document_id: str,
                     )
 
                     if response.status_code == 200:
-                        logger.info(f"Email enviado exitosamente a {signer['email']}")
+                        logger.info(f"Invitacion enviada exitosamente a user_id={signer['user_id']}")
                         invitations_sent += 1
                     else:
-                        logger.error(f"Error HTTP {response.status_code} al enviar a {signer['email']}")
+                        logger.error(f"Error HTTP {response.status_code} al enviar invitacion a user_id={signer['user_id']}")
                         logger.error(f"Respuesta: {response.text}")
 
             except Exception as e:
-                logger.error(f"Error enviando a {signer['email']}: {str(e)}")
+                logger.error(f"Error enviando invitacion a user_id={signer['user_id']}: {str(e)}")
                 # Continuar con el siguiente usuario sin detener el proceso
                 continue
 
     except Exception as e:
         logger.error(f"Error general en envío de invitaciones: {str(e)}")
         # No propagar el error - las invitaciones son "best effort"
-        # El proceso de firma debe continuar aunque fallen las invitaciones
 
     logger.info(f"Total invitaciones enviadas exitosamente: {invitations_sent}/{len(inactive_signers)}")
     return invitations_sent

@@ -3,7 +3,7 @@ Consultas SQL centralizadas para el modulo de documentos.
 Facilita el mantenimiento y reutilizacion de consultas.
 
 UBICACION: services/documents/core/queries.py
-MIGRADO: Fase 2.2 del refactoring
+MIGRADO: Fase 6 asyncpg
 """
 
 from config.constants import EXCLUDED_DOCUMENT_TYPES
@@ -43,11 +43,11 @@ def autocomplete_official_documents_query() -> str:
             o.reference
         FROM official_documents o
         JOIN document_types dt ON o.document_type_id = dt.id
-        WHERE o.official_number ILIKE %s
+        WHERE o.official_number ILIKE $1
           AND o.signed_at IS NOT NULL
           {excluded_clause}
         ORDER BY o.official_number
-        LIMIT %s OFFSET %s
+        LIMIT $2 OFFSET $3
     """
 
     return query
@@ -63,7 +63,7 @@ def get_document_type_query() -> str:
     return """
         SELECT id AS document_type_id, name
         FROM document_types
-        WHERE acronym = %s
+        WHERE acronym = $1
     """
 
 
@@ -79,7 +79,7 @@ def insert_document_draft_query() -> str:
             id, document_type_id, reference, created_by,
             last_modified_at, status
         ) VALUES (
-            %s, %s, %s, %s,
+            $1, $2, $3, $4,
             CURRENT_TIMESTAMP, 'draft'
         )
         RETURNING id AS document_id, last_modified_at
@@ -99,7 +99,7 @@ def insert_document_signer_query() -> str:
             user_id,
             signing_order,
             is_numerator
-        ) VALUES (%s, %s, %s, %s)
+        ) VALUES ($1, $2, $3, $4)
     """
 
 
@@ -132,7 +132,7 @@ def get_document_details_for_editing_query() -> str:
             LEFT JOIN users u ON d.created_by = u.id
             LEFT JOIN sectors sec ON u.sector_id = sec.id
             LEFT JOIN departments dep ON sec.department_id = dep.id
-        WHERE d.id = %s
+        WHERE d.id = $1
     """
 
 
@@ -157,7 +157,7 @@ def get_document_signers_query() -> str:
         JOIN users u ON ds.user_id = u.id
         LEFT JOIN sectors sec ON u.sector_id = sec.id
         LEFT JOIN departments dep ON sec.department_id = dep.id
-        WHERE ds.document_id = %s
+        WHERE ds.document_id = $1
         ORDER BY ds.signing_order
     """
 
@@ -177,7 +177,7 @@ def get_document_rejection_info_query() -> str:
             u.full_name as rejected_by_name
         FROM document_rejections r
         JOIN users u ON r.rejected_by = u.id
-        WHERE r.document_id = %s
+        WHERE r.document_id = $1
         ORDER BY r.rejected_at DESC
         LIMIT 1
     """
@@ -190,7 +190,7 @@ def get_document_status_query() -> str:
     Returns:
         str: Query SQL para obtener status
     """
-    return "SELECT id AS document_id, status FROM document_draft WHERE id = %s"
+    return "SELECT id AS document_id, status FROM document_draft WHERE id = $1"
 
 
 def delete_document_signers_query() -> str:
@@ -200,7 +200,7 @@ def delete_document_signers_query() -> str:
     Returns:
         str: Query SQL para eliminar firmantes
     """
-    return "DELETE FROM document_signers WHERE document_id = %s"
+    return "DELETE FROM document_signers WHERE document_id = $1"
 
 
 def insert_document_signer_ordered_query() -> str:
@@ -210,7 +210,7 @@ def insert_document_signer_ordered_query() -> str:
     Returns:
         str: Query SQL para insertar firmante con orden
     """
-    return "INSERT INTO document_signers (document_id, user_id, signing_order, is_numerator) VALUES (%s, %s, %s, %s)"
+    return "INSERT INTO document_signers (document_id, user_id, signing_order, is_numerator) VALUES ($1, $2, $3, $4)"
 
 
 def get_official_document_info_query() -> str:
@@ -222,7 +222,7 @@ def get_official_document_info_query() -> str:
             dd.status
         FROM official_documents od
         INNER JOIN document_draft dd ON od.id = dd.id
-        WHERE od.id = %s
+        WHERE od.id = $1
           AND od.signed_at IS NOT NULL
     """
 
@@ -239,7 +239,7 @@ def get_display_state_by_code_query() -> str:
     return """
         SELECT display_state_name
         FROM document_display_states
-        WHERE display_state_code = %s
+        WHERE display_state_code = $1
     """
 
 def get_all_state_mappings_query() -> str:
@@ -292,7 +292,7 @@ def get_preview_document_info_query() -> str:
             dt.type as source_type
         FROM document_draft d
         LEFT JOIN document_types dt ON d.document_type_id = dt.id
-        WHERE d.id = %s
+        WHERE d.id = $1
     """
 
 
@@ -305,14 +305,14 @@ def get_document_for_deletion_query() -> str:
     return """
         SELECT id, status, created_by, is_deleted, reference
         FROM document_draft
-        WHERE id = %s
+        WHERE id = $1
     """
 
 def unlink_document_from_cases_query() -> str:
     """Query para desvincular documento de expedientes (proposed documents)."""
     return """
         DELETE FROM case_proposed_documents
-        WHERE document_draft_id = %s
+        WHERE document_draft_id = $1
     """
 
 def soft_delete_document_query() -> str:
@@ -320,7 +320,7 @@ def soft_delete_document_query() -> str:
     return """
         UPDATE document_draft
         SET is_deleted = true, last_modified_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        WHERE id = $1
     """
 
 def get_user_info_for_deletion_query() -> str:
@@ -328,7 +328,7 @@ def get_user_info_for_deletion_query() -> str:
     return """
         SELECT full_name, email
         FROM users
-        WHERE id = %s
+        WHERE id = $1
     """
 
 
@@ -345,16 +345,16 @@ def get_document_info_for_rejection_query() -> str:
         FROM document_draft d
         JOIN document_types dt ON d.document_type_id = dt.id
         JOIN users creator ON d.created_by = creator.id
-        WHERE d.id = %s
+        WHERE d.id = $1
     """
 
 def check_document_is_official_query() -> str:
     """Query para verificar si un documento es oficial."""
-    return "SELECT COUNT(*) as count FROM official_documents WHERE id = %s AND signed_at IS NOT NULL"
+    return "SELECT COUNT(*) as count FROM official_documents WHERE id = $1 AND signed_at IS NOT NULL"
 
 def get_document_generate_id_query() -> str:
     """Query para obtener document_generate_id (usa el id del documento)."""
-    return "SELECT id as document_generate_id FROM document_draft WHERE id = %s"
+    return "SELECT id as document_generate_id FROM document_draft WHERE id = $1"
 
 def update_document_to_rejected_query() -> str:
     """Query para actualizar documento a estado rechazado."""
@@ -365,14 +365,14 @@ def update_document_to_rejected_query() -> str:
             sent_to_sign_at = NULL,
             sent_by = NULL,
             resume = NULL
-        WHERE id = %s
+        WHERE id = $1
     """
 
 def insert_rejection_record_query() -> str:
     """Query para insertar registro de rechazo."""
     return """
         INSERT INTO document_rejections (id, document_id, rejected_by, reason)
-        VALUES (%s, %s, %s, %s)
+        VALUES ($1, $2, $3, $4)
     """
 
 def update_signers_to_rejected_query() -> str:
@@ -380,14 +380,14 @@ def update_signers_to_rejected_query() -> str:
     return """
         UPDATE document_signers
         SET status = 'rejected'
-        WHERE document_id = %s AND signed_at IS NULL
+        WHERE document_id = $1 AND signed_at IS NULL
     """
 
 def get_rejector_info_query() -> str:
     """Query para obtener informacion del usuario que rechazo."""
     return """
         SELECT full_name, email
-        FROM users WHERE id = %s
+        FROM users WHERE id = $1
     """
 
 def check_user_is_signer_query() -> str:
@@ -395,7 +395,7 @@ def check_user_is_signer_query() -> str:
     return """
         SELECT user_id, signing_order, is_numerator
         FROM document_signers
-        WHERE document_id = %s AND user_id = %s
+        WHERE document_id = $1 AND user_id = $2
     """
 
 
@@ -407,24 +407,24 @@ def update_document_reference_query() -> str:
     """Query para actualizar solo la referencia del documento."""
     return """
         UPDATE document_draft
-        SET reference = %s, last_modified_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        SET reference = $1, last_modified_at = CURRENT_TIMESTAMP
+        WHERE id = $2
     """
 
 def update_document_content_query() -> str:
     """Query para actualizar solo el contenido del documento."""
     return """
         UPDATE document_draft
-        SET content = %s, last_modified_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        SET content = $1::jsonb, last_modified_at = CURRENT_TIMESTAMP
+        WHERE id = $2
     """
 
 def update_document_reference_and_content_query() -> str:
     """Query para actualizar referencia y contenido del documento."""
     return """
         UPDATE document_draft
-        SET reference = %s, content = %s, last_modified_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        SET reference = $1, content = $2::jsonb, last_modified_at = CURRENT_TIMESTAMP
+        WHERE id = $3
     """
 
 def reset_document_to_draft_query() -> str:
@@ -432,7 +432,7 @@ def reset_document_to_draft_query() -> str:
     return """
         UPDATE document_draft
         SET status = 'draft', last_modified_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        WHERE id = $1
     """
 
 # ============================================================================
@@ -444,7 +444,7 @@ def get_user_by_id_query() -> str:
     return """
         SELECT u.id as user_id, u.full_name
         FROM users u
-        WHERE u.id = %s
+        WHERE u.id = $1
     """
 
 def get_document_basic_info_for_signature_query() -> str:
@@ -462,13 +462,14 @@ def get_document_basic_info_for_signature_query() -> str:
             d.sent_by,
             dt.name as document_type_name,
             dt.acronym as document_type_acronym,
+            dt.signature_policy,
             COALESCE(od.resume, d.resume) as resume,
             COALESCE(od.short_resume, d.short_resume) as short_resume,
             od.official_number
         FROM document_draft d
         JOIN document_types dt ON d.document_type_id = dt.id
         LEFT JOIN official_documents od ON od.id = d.id AND od.signed_at IS NOT NULL
-        WHERE d.id = %s
+        WHERE d.id = $1
     """
 
 def check_document_has_official_number_query() -> str:
@@ -477,7 +478,7 @@ def check_document_has_official_number_query() -> str:
         SELECT EXISTS(
             SELECT 1
             FROM official_documents
-            WHERE id = %s
+            WHERE id = $1
               AND signed_at IS NOT NULL
         ) as has_official_number
     """
@@ -488,7 +489,7 @@ def check_user_exists_query() -> str:
         SELECT EXISTS(
             SELECT 1
             FROM users
-            WHERE id = %s
+            WHERE id = $1
         ) as user_exists
     """
 
@@ -498,7 +499,7 @@ def check_user_is_document_signer_query() -> str:
         SELECT EXISTS(
             SELECT 1
             FROM document_signers
-            WHERE document_id = %s AND user_id = %s
+            WHERE document_id = $1 AND user_id = $2
         ) as is_signer
     """
 
@@ -513,7 +514,7 @@ def get_document_for_signing_start_query() -> str:
                d.document_type_id, dt.name as type_name, dt.acronym as type_acronym
         FROM document_draft d
         LEFT JOIN document_types dt ON d.document_type_id = dt.id
-        WHERE d.id = %s
+        WHERE d.id = $1
     """
 
 def get_document_signers_for_pdf_query() -> str:
@@ -523,7 +524,7 @@ def get_document_signers_for_pdf_query() -> str:
                u.full_name as user_name
         FROM document_signers ds
         JOIN users u ON ds.user_id = u.id
-        WHERE ds.document_id = %s
+        WHERE ds.document_id = $1
         ORDER BY ds.signing_order
     """
 
@@ -533,7 +534,7 @@ def get_inactive_signers_query() -> str:
         SELECT u.id as user_id, u.email, u.full_name
         FROM document_signers ds
         JOIN users u ON ds.user_id = u.id
-        WHERE ds.document_id = %s AND u.estado = 2
+        WHERE ds.document_id = $1 AND u.estado = 2
     """
 
 def update_document_to_sent_to_sign_query() -> str:
@@ -542,9 +543,9 @@ def update_document_to_sent_to_sign_query() -> str:
         UPDATE document_draft
         SET status = 'sent_to_sign',
             last_modified_at = CURRENT_TIMESTAMP,
-            sent_by = %s,
+            sent_by = $1,
             sent_to_sign_at = CURRENT_TIMESTAMP
-        WHERE id = %s
+        WHERE id = $2
     """
 
 
@@ -557,7 +558,7 @@ def get_document_status_query_v2() -> str:
     return """
         SELECT status
         FROM document_draft
-        WHERE id = %s
+        WHERE id = $1
     """
 
 
@@ -573,7 +574,7 @@ def get_document_rejections_history_query() -> str:
                u.email as rejected_by_email
         FROM document_rejections dr
         JOIN users u ON dr.rejected_by = u.id
-        WHERE dr.document_id = %s
+        WHERE dr.document_id = $1
         ORDER BY dr.rejected_at DESC
     """
 
@@ -583,15 +584,15 @@ def get_rejected_documents_for_user_query() -> str:
         SELECT DISTINCT d.id as document_id, d.reference, d.status, d.created_at, d.last_modified_at,
                dt.name as document_type_name, dt.acronym as document_type_acronym,
                creator.full_name as creator_name,
-               (d.created_by = %s) as is_creator
+               (d.created_by = $1) as is_creator
         FROM document_draft d
         JOIN document_types dt ON d.document_type_id = dt.id
         JOIN users creator ON d.created_by = creator.id
         LEFT JOIN document_signers ds ON d.id = ds.document_id
         WHERE d.status = 'rejected'
-          AND (d.created_by = %s OR ds.user_id = %s)
+          AND (d.created_by = $2 OR ds.user_id = $3)
         ORDER BY d.last_modified_at DESC
-        LIMIT %s OFFSET %s
+        LIMIT $4 OFFSET $5
     """
 
 def count_rejected_documents_for_user_query() -> str:
@@ -601,29 +602,29 @@ def count_rejected_documents_for_user_query() -> str:
         FROM document_draft d
         LEFT JOIN document_signers ds ON d.id = ds.document_id
         WHERE d.status = 'rejected'
-          AND (d.created_by = %s OR ds.user_id = %s)
+          AND (d.created_by = $1 OR ds.user_id = $2)
     """
 
 # === QUERIES PARA START_SIGNING ===
 
 def update_document_signers_order_query() -> str:
     """Query para actualizar el orden de firmantes de un documento."""
-    return "UPDATE document_signers SET signing_order = %s WHERE document_id = %s AND user_id = %s"
+    return "UPDATE document_signers SET signing_order = $1 WHERE document_id = $2 AND user_id = $3"
 
 def get_document_draft_status_query() -> str:
     """Query para obtener el status de un documento draft."""
-    return "SELECT status FROM document_draft WHERE id = %s"
+    return "SELECT status FROM document_draft WHERE id = $1"
 
 def get_user_full_name_query() -> str:
     """Query para obtener el nombre completo de un usuario."""
-    return "SELECT full_name FROM users WHERE id = %s"
+    return "SELECT full_name FROM users WHERE id = $1"
 
 def update_signer_status_to_signed_query() -> str:
     """Query para actualizar el estado de un firmante a 'signed'."""
     return """
         UPDATE document_signers
         SET status = 'signed', signed_at = CURRENT_TIMESTAMP
-        WHERE document_id = %s AND user_id = %s
+        WHERE document_id = $1 AND user_id = $2
     """
 
 # === QUERIES PARA SUPER_SIGN ===
@@ -633,7 +634,7 @@ def get_user_info_for_signing_query() -> str:
     return """
         SELECT u.id as user_id, u.full_name
         FROM users u
-        WHERE u.id = %s
+        WHERE u.id = $1
     """
 
 def get_signer_role_and_document_status_query() -> str:
@@ -644,12 +645,12 @@ def get_signer_role_and_document_status_query() -> str:
             ds.status as signer_status,
             dd.status as doc_status,
             (SELECT COUNT(*) FROM document_signers
-             WHERE document_id = %s
+             WHERE document_id = $1
              AND is_numerator = false
              AND (status = 'pending' OR status IS NULL)) as pending_common_signers
         FROM document_signers ds
         JOIN document_draft dd ON ds.document_id = dd.id
-        WHERE ds.document_id = %s AND ds.user_id = %s
+        WHERE ds.document_id = $2 AND ds.user_id = $3
     """
 
 # === QUERIES PARA SEARCH_OFFICIAL ===
@@ -680,7 +681,7 @@ def search_official_document_by_number_query() -> str:
         LEFT JOIN users creator ON dd.created_by = creator.id
         -- Join con users para obtener numerador
         LEFT JOIN users numerator ON od.numerator_id = numerator.id
-        WHERE od.official_number = %s
+        WHERE od.official_number = $1
           AND od.signed_at IS NOT NULL
         LIMIT 1
     """
@@ -699,7 +700,7 @@ def check_document_has_embeddings_query() -> str:
     return """
         SELECT EXISTS(
             SELECT 1 FROM document_chunks
-            WHERE official_document_id = %s
+            WHERE official_document_id = $1
               AND embedding IS NOT NULL
             LIMIT 1
         ) as has_embeddings
@@ -720,21 +721,21 @@ def get_proposed_cases_for_document_query() -> str:
             cpd.proposing_date
         FROM case_proposed_documents cpd
         JOIN cases c ON cpd.case_id = c.id
-        WHERE cpd.document_draft_id = %s
+        WHERE cpd.document_draft_id = $1
           AND cpd.is_active = true
         ORDER BY cpd.proposing_date DESC
     """
 
 def delete_proposed_cases_for_document_query() -> str:
     """Query para eliminar todas las propuestas de un documento."""
-    return "DELETE FROM case_proposed_documents WHERE document_draft_id = %s"
+    return "DELETE FROM case_proposed_documents WHERE document_draft_id = $1"
 
 def insert_proposed_case_query() -> str:
     """Query para insertar una propuesta de vinculación documento-expediente."""
     return """
         INSERT INTO case_proposed_documents (
             id, case_id, document_draft_id, proposing_user_id, proposing_date, is_active
-        ) VALUES (%s, %s, %s, %s, NOW(), true)
+        ) VALUES ($1, $2, $3, $4, NOW(), true)
     """
 
 def validate_case_exists_query() -> str:
@@ -742,5 +743,5 @@ def validate_case_exists_query() -> str:
     return """
         SELECT id
         FROM cases
-        WHERE id = %s AND status != 'archived'
+        WHERE id = $1 AND status != 'archived'
     """

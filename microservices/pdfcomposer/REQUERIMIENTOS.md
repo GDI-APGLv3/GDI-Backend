@@ -36,7 +36,7 @@ Sistema generador de PDF basado en FastAPI que permite crear tres tipos de docum
 ## Especificaciones de Endpoints
 
 ### Todos los endpoints requieren:
-- **Header**: `X-API-Key: miapikey`
+- **Header**: `X-API-Key: your-api-key-here`
 - **Content-Type**: `multipart/form-data`
 - **Response**: PDF file with UUID filename
 
@@ -57,7 +57,7 @@ Sistema generador de PDF basado en FastAPI que permite crear tres tipos de docum
 
 ### Configuración de Entorno
 ```ini
-API_KEY=miapikey
+API_KEY=your-api-key-here
 ```
 
 ### Arquitectura de Templates

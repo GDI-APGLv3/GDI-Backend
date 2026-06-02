@@ -65,7 +65,7 @@ fly secrets set \
   PDFCOMPOSER_API_KEY=xxx \
   NOTARY_URL=http://<your-notary-app>.internal:8080 \
   NOTARY_API_KEY=xxx \
-  FRONTEND_URL=https://<your-frontend-domain> \
+  FRONTEND_URL=https://your-frontend.vercel.app \
   AGENTE_URL=http://<your-agent-app>.internal:8080 \
   INTERNAL_API_KEY=xxx
 ```

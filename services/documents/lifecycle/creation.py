@@ -3,12 +3,13 @@ Servicios para la creacion de documentos.
 Maneja la logica de negocio para crear nuevos documentos.
 
 Ubicacion real: services/documents/lifecycle/creation.py
+MIGRADO: Fase 6 asyncpg
 """
 
 from typing import Dict, Any, Optional
 import uuid
 from shared.logging import get_logger
-from database import get_db_connection
+from database import get_conn
 from shared.exceptions import ValidationError, DatabaseError
 from shared.audit_context import set_audit_context
 from shared.validation import validate_document_type_acronym, validate_required_string, validate_uuid
@@ -53,35 +54,7 @@ def _validate_creation_inputs(document_type_acronym: str, reference: str, creato
         raise ValidationError("; ".join(errors))
 
 
-def _get_document_type(cursor, document_type_acronym: str) -> Dict[str, Any]:
-    """Obtiene y valida el tipo de documento."""
-    cursor.execute(get_document_type_query(), (document_type_acronym,))
-    document_type = cursor.fetchone()
-
-    if not document_type:
-        raise ValidationError(f"Tipo de documento '{document_type_acronym}' no encontrado")
-
-    return document_type
-
-
-def _insert_document(cursor, document_id: str, document_type_id: str, reference: str, creator_id: str) -> Dict[str, Any]:
-    """Inserta el documento en la base de datos."""
-    cursor.execute(
-        insert_document_draft_query(),
-        (document_id, document_type_id, reference, creator_id)
-    )
-    return cursor.fetchone()
-
-
-def _assign_creator_as_signer(cursor, document_id: str, creator_id: str) -> None:
-    """Asigna al creador como firmante numerador."""
-    cursor.execute(
-        insert_document_signer_query(),
-        (document_id, creator_id, 1, True)
-    )
-
-
-def create_document(
+async def create_document(
     document_type_acronym: str,
     reference: str,
     creator_id: str,
@@ -139,84 +112,85 @@ def create_document(
         # Si no es NOTA ni MEMO pero se enviaron recipients, ignorar con warning
         logger.warning(f"Se enviaron recipients para documento tipo '{document_type_acronym}' que no es NOTA ni MEMO - ignorados")
 
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            try:
-                # Inyectar contexto de auditoría
-                if creator_id or auth_source:
-                    set_audit_context(cursor, user_id=creator_id, auth_source=auth_source)
+    try:
+        async with get_conn(schema_name=schema_name, user_id=creator_id, auth_source=auth_source) as conn:
+            async with conn.transaction():
+                # Obtener tipo de documento
+                doc_type_row = await conn.fetchrow(get_document_type_query(), document_type_acronym)
+                if not doc_type_row:
+                    raise ValidationError(f"Tipo de documento '{document_type_acronym}' no encontrado")
 
-                document_type = _get_document_type(cursor, document_type_acronym)
                 document_id = str(uuid.uuid4())
 
-                result = _insert_document(
-                    cursor, document_id, document_type['document_type_id'],
-                    reference, creator_id
+                # Insertar documento
+                result_row = await conn.fetchrow(
+                    insert_document_draft_query(),
+                    document_id, doc_type_row['document_type_id'], reference, creator_id
                 )
 
-                _assign_creator_as_signer(cursor, document_id, creator_id)
+                # Asignar creador como firmante numerador
+                await conn.execute(
+                    insert_document_signer_query(),
+                    document_id, creator_id, 1, True
+                )
 
                 # Si es NOTA con recipients, guardarlos en la misma transacción
                 recipients_count = 0
                 if is_nota and normalized_recipients:
-                    # Validar que los sectors existan (usa el mismo cursor)
-                    validate_recipients_exist(
-                        cursor, normalized_recipients, sender_sector_id,
+                    # Validar que los sectors existan (usa el mismo conn)
+                    await validate_recipients_exist(
+                        conn, normalized_recipients, sender_sector_id,
                         schema_name=schema_name
                     )
                     # Guardar recipients
-                    recipients_count = save_recipients(
-                        cursor, document_id, sender_sector_id, normalized_recipients,
+                    recipients_count = await save_recipients(
+                        conn, document_id, sender_sector_id, normalized_recipients,
                         schema_name=schema_name
                     )
 
                 # Si es MEMO con recipients, guardarlos en la misma transacción
                 if is_memo and normalized_recipients:
-                    # Validar que los users existan (usa el mismo cursor)
-                    validate_memo_recipients_exist(
-                        cursor, normalized_recipients, creator_id,
+                    # Validar que los users existan (usa el mismo conn)
+                    await validate_memo_recipients_exist(
+                        conn, normalized_recipients, creator_id,
                         schema_name=schema_name
                     )
                     # Guardar recipients (sender_user_id = creator_id)
-                    recipients_count = save_memo_recipients(
-                        cursor, document_id, creator_id, normalized_recipients,
+                    recipients_count = await save_memo_recipients(
+                        conn, document_id, creator_id, normalized_recipients,
                         schema_name=schema_name
                     )
 
-                conn.commit()
+        logger.info(f"Documento {document_id} creado exitosamente" + (f" con {recipients_count} recipients" if (is_nota or is_memo) else ""))
 
-                logger.info(f"Documento {document_id} creado exitosamente" + (f" con {recipients_count} recipients" if (is_nota or is_memo) else ""))
+        response = {
+            "success": True,
+            "document_id": result_row['document_id'],
+            "document_type_id": doc_type_row['document_type_id'],
+            "document_type_name": doc_type_row['name'],
+            "document_type_acronym": document_type_acronym,
+            "reference": reference,
+            "creator_id": creator_id,
+            "status": "draft",
+            "created_at": None,
+            "updated_at": result_row['last_modified_at'].isoformat() if result_row['last_modified_at'] else None,
+            "message": "Documento creado exitosamente"
+        }
 
-                response = {
-                    "success": True,
-                    "document_id": result['document_id'],
-                    "document_type_id": document_type['document_type_id'],
-                    "document_type_name": document_type['name'],
-                    "document_type_acronym": document_type_acronym,
-                    "reference": reference,
-                    "creator_id": creator_id,
-                    "status": "draft",
-                    "created_at": None,
-                    "updated_at": result['last_modified_at'].isoformat() if result['last_modified_at'] else None,
-                    "message": "Documento creado exitosamente"
-                }
+        # Agregar info de recipients si es NOTA
+        if is_nota:
+            response["is_nota"] = True
+            response["recipients_count"] = recipients_count
 
-                # Agregar info de recipients si es NOTA
-                if is_nota:
-                    response["is_nota"] = True
-                    response["recipients_count"] = recipients_count
+        # Agregar info de recipients si es MEMO
+        if is_memo:
+            response["is_memo"] = True
+            response["recipients_count"] = recipients_count
 
-                # Agregar info de recipients si es MEMO
-                if is_memo:
-                    response["is_memo"] = True
-                    response["recipients_count"] = recipients_count
+        return response
 
-                return response
-
-            except ValidationError:
-                conn.rollback()
-                raise
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"Error al crear documento: {str(e)}")
-                raise DatabaseError(f"Error al crear documento: {str(e)}")
+    except ValidationError:
+        raise
+    except Exception as e:
+        logger.error(f"Error al crear documento: {str(e)}")
+        raise DatabaseError(f"Error al crear documento: {str(e)}")

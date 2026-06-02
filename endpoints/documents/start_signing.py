@@ -2,6 +2,7 @@
 Endpoint para iniciar el proceso de firma de documentos.
 Optimizado siguiendo principios de Clean Code.
 """
+from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
 from models.documents.signing import StartSigningProcessResponse
@@ -64,7 +65,7 @@ Despues de iniciar el proceso de firma, cada firmante debe llamar a:
 )
 async def start_signing_process(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento"),
+    document_id: UUID = Path(..., description="UUID del documento"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> StartSigningProcessResponse:
@@ -81,6 +82,7 @@ async def start_signing_process(
     Raises:
         HTTPException: Para errores de validación, autorización o servicios externos
     """
+    document_id = str(document_id)
     try:
         logger.info(f"Usuario {request.state.tenant_user_id} iniciando proceso de firma para documento {document_id}")
 

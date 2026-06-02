@@ -39,9 +39,9 @@ async def get_stats(
         logger.info(f"Getting stats - User: {tenant_user_id[:8]}")
 
         # Obtener usuario validado
-        db_user_id = get_authenticated_user(tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
-        result = DashboardService.get_stats(
+        result = await DashboardService.get_stats(
             user_id=db_user_id,
             schema_name=schema_name
         )

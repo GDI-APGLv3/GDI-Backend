@@ -121,6 +121,10 @@ async def get_user_documents(
         description="Filtrar documentos con mínimo N firmantes (ej: 2 para docs con 2+ firmas)",
         ge=1
     ),
+    sector_filter: Optional[str] = Query(
+        None,
+        description="Filtrar por origen: 'mine' = solo propios (creator/signer/numerator), 'sector' = solo documentos de mi sector"
+    ),
     page: int = Query(
         1,
         description="Número de página (inicia en 1)",
@@ -209,7 +213,7 @@ async def get_user_documents(
 
         # Llamar al servicio para obtener documentos
         logger.debug(f"Calling document_service.get_user_documents with filters: status={status_filter}, date={date_filter}, search={search}")
-        response_data = document_service.get_user_documents(
+        response_data = await document_service.get_user_documents(
             user_id,
             status_filter,
             date_filter,
@@ -221,6 +225,7 @@ async def get_user_documents(
             doc_number,
             search=search,
             min_signers=min_signers,
+            sector_filter=sector_filter,
             schema_name=schema_name
         )
 
@@ -258,7 +263,12 @@ async def get_user_documents(
                 "last_editor_profile_picture_url": doc.get("last_editor_profile_picture_url"),
                 "official_number": doc["official_number"],
                 "creator_sector": f"{doc.get('creator_dept_acronym', '')}#{doc.get('creator_sector_acronym', '')}" if doc.get('creator_sector_acronym') else None,
-                "sent_by_name": doc.get("sent_by_name")
+                "sent_by_name": doc.get("sent_by_name"),
+                "short_resume": doc.get("short_resume"),
+                "resume": doc.get("resume"),
+                "linked_cases": doc.get("linked_cases") or [],
+                "linked_records": doc.get("linked_records") or [],
+                "signers": doc.get("signers") or [],
             })
 
         logger.info(f"Returning {len(formatted_documents)} documents (page {page}/{total_pages})")

@@ -3,21 +3,25 @@
 from shared.logging import get_logger
 from typing import Dict, Any
 from shared.exceptions import ValidationError, NotFoundError
-from services.case_queries import (
-    get_user_validation_query,
-    get_template_validation_query,
-    get_department_permissions_query,
-    get_sector_validation_query
-)
 
 logger = get_logger(__name__)
 
 
-def validate_and_get_user(connection, user_id: str) -> Dict[str, Any]:
+async def validate_and_get_user(connection, user_id: str) -> Dict[str, Any]:
     """Valida que el usuario existe y retorna sus datos completos."""
-    cursor = connection.cursor()
-    cursor.execute(get_user_validation_query(), (user_id,))
-    result = cursor.fetchone()
+    result = await connection.fetchrow(
+        """
+        SELECT
+            u.id as user_id,
+            u.full_name,
+            u.sector_id,
+            s.department_id
+        FROM users u
+        LEFT JOIN sectors s ON u.sector_id = s.id
+        WHERE u.id = $1 AND u.estado = 1
+        """,
+        user_id
+    )
 
     if not result:
         logger.info(f"Usuario {user_id[:8]}... no encontrado")
@@ -34,18 +38,28 @@ def validate_and_get_user(connection, user_id: str) -> Dict[str, Any]:
     return user_data
 
 
-def validate_and_get_template(connection, template_id: str) -> Dict[str, Any]:
+async def validate_and_get_template(connection, template_id: str) -> Dict[str, Any]:
     """Valida que el template existe, está activo y retorna sus datos."""
-    cursor = connection.cursor()
-    cursor.execute(get_template_validation_query(), (template_id,))
-    result = cursor.fetchone()
+    result = await connection.fetchrow(
+        """
+        SELECT
+            ct.id,
+            ct.filing_department_id,
+            ct.type_name,
+            ct.acronym,
+            ct.is_active
+        FROM case_templates ct
+        WHERE ct.id = $1
+        """,
+        template_id
+    )
 
     if not result:
         logger.info(f"Template {template_id[:8]}... no encontrado")
-        raise NotFoundError(f"Plantilla de expediente {template_id} no encontrada")
+        raise ValidationError("Plantilla de expediente no encontrada. Verificá que el ID sea correcto.")
 
-    if not result.get('is_active'):
-        logger.info(f"⚠️ Usando template INACTIVO: {result['type_name']} ({result['acronym']})")
+    if not result['is_active']:
+        logger.info(f"Usando template INACTIVO: {result['type_name']} ({result['acronym']})")
 
     template_data = {
         'id': result['id'],
@@ -58,15 +72,28 @@ def validate_and_get_template(connection, template_id: str) -> Dict[str, Any]:
     return template_data
 
 
-def validate_department_permissions(
+async def validate_department_permissions(
     connection,
     user_id: str,
     department_id: str
 ) -> None:
     """Valida que el usuario tenga permisos en el departamento especificado."""
-    cursor = connection.cursor()
-    cursor.execute(get_department_permissions_query(), (user_id, department_id, department_id))
-    result = cursor.fetchone()
+    result = await connection.fetchrow(
+        """
+        SELECT 1
+        FROM users u
+        LEFT JOIN sectors s ON u.sector_id = s.id
+        WHERE u.id = $1
+        AND (
+            s.department_id = $2
+            OR EXISTS (
+                SELECT 1 FROM user_departments
+                WHERE user_id = u.id AND department_id = $3
+            )
+        )
+        """,
+        user_id, department_id, department_id
+    )
 
     if not result:
         logger.info(f"Usuario {user_id[:8]}... no tiene permisos en departamento {department_id[:8]}...")
@@ -77,15 +104,20 @@ def validate_department_permissions(
     logger.info(f"Permisos de departamento validados")
 
 
-def validate_owner_sector_belongs_to_department(
+async def validate_owner_sector_belongs_to_department(
     connection,
     owner_sector_id: str,
     filing_department_id: str
 ) -> None:
     """Valida que el sector propietario pertenezca al departamento correcto."""
-    cursor = connection.cursor()
-    cursor.execute(get_sector_validation_query(), (owner_sector_id,))
-    result = cursor.fetchone()
+    result = await connection.fetchrow(
+        """
+        SELECT id as sector_id, acronym as name, department_id
+        FROM sectors
+        WHERE id = $1 AND is_active = true
+        """,
+        owner_sector_id
+    )
 
     if not result:
         logger.info(f"Sector {owner_sector_id[:8]}... no encontrado o inactivo")

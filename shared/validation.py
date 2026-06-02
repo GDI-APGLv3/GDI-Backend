@@ -54,7 +54,7 @@ def validate_required_string(value: Any, field_name: str, min_length: int = 1, m
     
     return None
 
-def validate_user_id(user_id: str, *, schema_name: str) -> Optional[str]:
+async def validate_user_id(user_id: str, *, schema_name: str) -> Optional[str]:
     """
     Valida que un user_id sea UUID válido y que el usuario exista.
 
@@ -70,12 +70,12 @@ def validate_user_id(user_id: str, *, schema_name: str) -> Optional[str]:
         return "user_id debe ser un UUID válido"
 
     # Validar que el usuario existe
-    if not check_user_exists(user_id, schema_name=schema_name):
+    if not await check_user_exists(user_id, schema_name=schema_name):
         return f"Usuario con ID '{user_id}' no encontrado"
 
     return None
 
-def validate_document_id(document_id: str, *, schema_name: str) -> Optional[str]:
+async def validate_document_id(document_id: str, *, schema_name: str) -> Optional[str]:
     """
     Valida que un document_id sea UUID válido y que el documento exista.
 
@@ -91,7 +91,7 @@ def validate_document_id(document_id: str, *, schema_name: str) -> Optional[str]
         return "document_id debe ser un UUID válido"
 
     # Validar que el documento existe
-    if not check_document_exists(document_id, schema_name=schema_name):
+    if not await check_document_exists(document_id, schema_name=schema_name):
         return f"Documento con ID '{document_id}' no encontrado"
 
     return None
@@ -186,7 +186,7 @@ def validate_pagination_params(page: int, page_size: int) -> Optional[str]:
     
     return None
 
-def validate_document_signers(signers: List[Dict[str, Any]], *, schema_name: str) -> Optional[str]:
+async def validate_document_signers(signers: List[Dict[str, Any]], *, schema_name: str) -> Optional[str]:
     """
     Valida una lista de firmantes de documento.
 
@@ -218,7 +218,7 @@ def validate_document_signers(signers: List[Dict[str, Any]], *, schema_name: str
         is_numerator = signer["is_numerator"]
         
         # Validar user_id
-        user_error = validate_user_id(user_id, schema_name=schema_name)
+        user_error = await validate_user_id(user_id, schema_name=schema_name)
         if user_error:
             return f"Firmante {i+1}: {user_error}"
         
@@ -268,7 +268,10 @@ def sanitize_html(html_content: str) -> str:
     }
 
     allowed_attributes = {
-        "*": {"class", "id"},
+        # SEC-29: "id" removido — el atributo id en HTML de usuario habilita DOM clobbering
+        # (puede sobreescribir referencias window/document.getElementById en el frontend).
+        # El editor no depende de IDs en el contenido persistido.
+        "*": {"class"},
         "a": {"href", "title", "target"},  # rel lo maneja link_rel automaticamente
         "img": {"src", "alt", "title", "width", "height"},
         "td": {"colspan", "rowspan"},

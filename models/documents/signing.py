@@ -82,6 +82,7 @@ class DocumentSignatureDetailsResponse(BaseModel):
     is_sector_viewer: bool = Field(False, description="True si usuario solo puede ver por permisos de sector")
     recipients: Optional[Dict[str, Any]] = Field(None, description="Destinatarios para documentos NOTA")
     proposed_cases: Optional[List[ProposedCaseInfo]] = Field(None, description="Expedientes propuestos para vincular")
+    signature_policy: Optional[str] = Field(None, description="Política de firma: electronic | digital_all | digital_num")
 
 class NumeratorInfo(BaseModel):
     """Información del numerador asignado."""

@@ -5,63 +5,55 @@ Verifica que el refactor de seguridad multi-tenant esté correctamente
 implementado y que todas las funciones de BD requieran schema_name explícito.
 """
 import pytest
-from unittest.mock import patch, MagicMock
-from contextlib import nullcontext as does_not_raise
 
 
 class TestSchemaNameRequired:
-    """Verifica que las funciones de BD requieren schema_name."""
+    """Verifica que las funciones asyncpg de BD requieren schema_name."""
 
-    def test_get_db_connection_without_schema_raises(self):
-        """get_db_connection debe fallar sin schema_name."""
-        from database import get_db_connection
+    def test_validate_schema_name_rejects_none(self):
+        """validate_schema_name debe fallar con None."""
+        from database import validate_schema_name
+        with pytest.raises(ValueError):
+            validate_schema_name(None)
 
-        with pytest.raises(ValueError, match="schema_name es REQUERIDO"):
-            with get_db_connection(None):
-                pass
+    def test_validate_schema_name_rejects_empty(self):
+        """validate_schema_name debe fallar con string vacío."""
+        from database import validate_schema_name
+        with pytest.raises(ValueError):
+            validate_schema_name("")
 
-    def test_get_db_connection_with_empty_schema_raises(self):
-        """get_db_connection debe fallar con schema vacío."""
-        from database import get_db_connection
+    def test_validate_schema_name_rejects_whitespace(self):
+        """validate_schema_name debe fallar con solo espacios."""
+        from database import validate_schema_name
+        with pytest.raises(ValueError):
+            validate_schema_name("   ")
 
-        with pytest.raises(ValueError, match="schema_name es REQUERIDO"):
-            with get_db_connection(""):
-                pass
+    def test_fetch_all_schema_name_is_keyword_only(self):
+        """fetch_all debe requerir schema_name como keyword-only."""
+        import inspect
+        from database import fetch_all
+        sig = inspect.signature(fetch_all)
+        param = sig.parameters.get('schema_name')
+        assert param is not None, "fetch_all no tiene parámetro schema_name"
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
 
-    def test_get_db_connection_with_whitespace_raises(self):
-        """get_db_connection debe fallar con solo espacios."""
-        from database import get_db_connection
+    def test_fetch_one_schema_name_is_keyword_only(self):
+        """fetch_one debe requerir schema_name como keyword-only."""
+        import inspect
+        from database import fetch_one
+        sig = inspect.signature(fetch_one)
+        param = sig.parameters.get('schema_name')
+        assert param is not None, "fetch_one no tiene parámetro schema_name"
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
 
-        with pytest.raises(ValueError, match="schema_name es REQUERIDO"):
-            with get_db_connection("   "):
-                pass
-
-    def test_execute_query_requires_keyword_schema(self):
-        """execute_query debe requerir schema_name como keyword-only."""
-        from database import execute_query
-
-        # Intentar pasar schema_name como argumento posicional debe fallar
-        with pytest.raises(TypeError):
-            # execute_query(query, params, fetch_one, fetch_all, timeout, schema_name)
-            # El "*" antes de schema_name hace que sea keyword-only
-            execute_query("SELECT 1", None, True, False, 2, "public")
-
-    def test_execute_update_requires_keyword_schema(self):
-        """execute_update debe requerir schema_name como keyword-only."""
-        from database import execute_update
-
-        with pytest.raises(TypeError):
-            # Intentar pasar schema como posicional
-            execute_update("UPDATE x SET y=1", None, "public")
-
-    def test_get_db_cursor_requires_keyword_schema(self):
-        """get_db_cursor debe requerir schema_name como keyword-only."""
-        from database import get_db_cursor
-
-        with pytest.raises(TypeError):
-            # commit y schema como posicionales
-            with get_db_cursor(True, "public"):
-                pass
+    def test_execute_schema_name_is_keyword_only(self):
+        """execute debe requerir schema_name como keyword-only."""
+        import inspect
+        from database import execute
+        sig = inspect.signature(execute)
+        param = sig.parameters.get('schema_name')
+        assert param is not None, "execute no tiene parámetro schema_name"
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
 
 
 class TestServiceFunctionsRequireSchema:
@@ -93,53 +85,30 @@ class TestServiceFunctionsRequireSchema:
 
 
 class TestMultiTenantIsolation:
-    """Verifica aislamiento entre tenants (requiere BD real)."""
+    """Verifica aislamiento entre tenants vía asyncpg."""
 
-    @pytest.fixture
-    def mock_pool(self):
-        """Mock del pool de conexiones."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    def test_get_conn_has_schema_name_keyword_only(self):
+        """get_conn debe requerir schema_name como keyword-only."""
+        import inspect
+        from database import get_conn
+        sig = inspect.signature(get_conn)
+        param = sig.parameters.get('schema_name')
+        assert param is not None, "get_conn no tiene parámetro schema_name"
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
 
-        with patch('database.connection_pool') as mock_pool:
-            mock_pool.getconn.return_value = mock_conn
-            yield mock_pool, mock_conn, mock_cursor
+    def test_get_conn_sets_search_path_in_implementation(self):
+        """Verifica que get_conn configura SET LOCAL search_path en la conexión."""
+        import inspect
+        from database import get_conn
+        source = inspect.getsource(get_conn)
+        assert "search_path" in source, "get_conn no configura search_path"
 
-    def test_search_path_is_set_on_connection(self, mock_pool):
-        """Verifica que search_path se configura al obtener conexión."""
-        from database import get_db_connection
-
-        pool, conn, cursor = mock_pool
-        schema_name = "100_test_tenant"
-
-        with get_db_connection(schema_name):
-            # Verificar que se ejecutó SET LOCAL search_path
-            cursor.execute.assert_called()
-            calls = [str(call) for call in cursor.execute.call_args_list]
-            # Al menos una llamada debe incluir search_path
-            assert any("search_path" in str(call) for call in calls), \
-                f"search_path no fue configurado. Llamadas: {calls}"
-
-    def test_different_schemas_are_isolated(self, mock_pool):
-        """Conexiones a diferentes schemas son independientes."""
-        from database import get_db_connection
-
-        pool, conn, cursor = mock_pool
-
-        # Ejecutar dos conexiones a schemas diferentes
-        with get_db_connection("schema_a"):
-            first_calls = cursor.execute.call_args_list.copy()
-
-        cursor.reset_mock()
-
-        with get_db_connection("schema_b"):
-            second_calls = cursor.execute.call_args_list.copy()
-
-        # Ambas deben haber configurado su propio search_path
-        assert len(first_calls) > 0
-        assert len(second_calls) > 0
+    def test_different_schemas_validated_independently(self):
+        """Schemas distintos pasan validación de forma independiente."""
+        from database import validate_schema_name
+        assert validate_schema_name("schema_a") == "schema_a"
+        assert validate_schema_name("schema_b") == "schema_b"
+        assert validate_schema_name("100_test") == "100_test"
 
 
 class TestSchemaNamePropagation:

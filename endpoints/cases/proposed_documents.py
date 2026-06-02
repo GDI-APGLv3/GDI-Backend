@@ -9,8 +9,11 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
+from database import fetch_one
 from services.case_service import CaseService
-from shared.exceptions import exception_to_http_exception, NotFoundError
+from services.cases.documents import propose_document_to_case
+from services.cases.permissions import can_user_view_case
+from shared.exceptions import exception_to_http_exception, NotFoundError, AuthorizationError
 from shared.utils import get_authenticated_user
 from shared.dependencies import get_tenant_schema
 from config.constants import (
@@ -59,6 +62,25 @@ class RejectProposedDocumentResponse(BaseModel):
     message: str = Field(..., example="Documento propuesto rechazado exitosamente")
 
 
+class ProposeDocumentRequest(BaseModel):
+    document_draft_id: str = Field(
+        ...,
+        description="UUID del documento borrador a proponer",
+        example="550e8400-e29b-41d4-a716-446655440000",
+    )
+
+
+class ProposeDocumentData(BaseModel):
+    case_id: str = Field(..., example="case-456")
+    document_draft_id: str = Field(..., example="doc-789")
+
+
+class ProposeDocumentResponse(BaseModel):
+    success: bool = Field(True, example=True)
+    data: ProposeDocumentData
+    message: str = Field(..., example="Documento propuesto para vincular al expediente")
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -83,21 +105,20 @@ async def accept_proposed_document(
     try:
         logger.info(f"Accept proposed document: case={case_id}, proposed={proposed_id}")
 
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Obtener sector y nombre del usuario
-        from database import execute_query
-        user_query = "SELECT sector_id, full_name FROM users WHERE id = %s"
-        user_result = execute_query(user_query, (db_user_id,), schema_name=schema_name)
+        user_query = "SELECT sector_id, full_name FROM users WHERE id = $1"
+        user_result = await fetch_one(user_query, db_user_id, schema_name=schema_name)
 
         if not user_result:
             raise NotFoundError(LINK_DOCUMENT_USER_NOT_FOUND)
 
-        user_sector_id = str(user_result[0]['sector_id'])
-        user_full_name = user_result[0]['full_name']
+        user_sector_id = str(user_result['sector_id'])
+        user_full_name = user_result['full_name']
 
         # Aceptar propuesta (vincula + desactiva)
-        link_result = CaseService.accept_proposed_document(
+        link_result = await CaseService.accept_proposed_document(
             case_id=case_id,
             proposed_id=proposed_id,
             user_id=db_user_id,
@@ -122,7 +143,7 @@ async def accept_proposed_document(
                 "case_number": link_result['case_number'],
                 "official_document_id": link_result['official_document_id'],
                 "official_number": link_result['official_number'],
-                "document_reference": link_result.get('document_reference'),
+                "document_reference": link_result['document_reference'],
                 "order_number": formatted_order,
                 "linking_date": linking_date_str,
                 "linked_by": user_full_name
@@ -155,16 +176,15 @@ async def reject_proposed_document(
     try:
         logger.info(f"Reject proposed document: case={case_id}, proposed={proposed_id}")
 
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Obtener sector del usuario para historial
-        from database import execute_query
-        user_query = "SELECT sector_id FROM users WHERE id = %s"
-        user_result = execute_query(user_query, (db_user_id,), schema_name=schema_name)
-        user_sector_id = str(user_result[0]['sector_id']) if user_result else None
+        user_query = "SELECT sector_id FROM users WHERE id = $1"
+        user_result = await fetch_one(user_query, db_user_id, schema_name=schema_name)
+        user_sector_id = str(user_result['sector_id']) if user_result else None
 
         # Rechazar propuesta (desactiva + registra historial)
-        result = CaseService.reject_proposed_document(
+        result = await CaseService.reject_proposed_document(
             case_id=case_id,
             proposed_id=proposed_id,
             user_id=db_user_id,
@@ -182,4 +202,57 @@ async def reject_proposed_document(
 
     except Exception as e:
         logger.error(f"Error in reject_proposed_document endpoint: {str(e)}")
+        raise exception_to_http_exception(e)
+
+
+@router.post(
+    "/{case_id}/documents/propose",
+    response_model=ProposeDocumentResponse,
+)
+async def propose_document(
+    request: Request,
+    body: ProposeDocumentRequest,
+    case_id: str = Path(..., description="UUID del expediente"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    schema_name: str = Depends(get_tenant_schema),
+):
+    """
+    Proponer un documento borrador para vincular a un expediente.
+
+    Crea una propuesta activa en el expediente. Un responsable del expediente
+    podra luego aceptarla (vinculando el documento oficial) o rechazarla.
+
+    Equivalente al endpoint REST del Gateway (SET B) `cases.propose_document`,
+    expuesto aqui en el Backend (SET A) y accesible por JWT y por API Key.
+
+    Requiere permiso de visualizacion sobre el expediente.
+    """
+    try:
+        logger.info(f"Propose document: case={case_id}, draft={body.document_draft_id}")
+
+        db_user_id = await get_authenticated_user(
+            request.state.tenant_user_id, schema_name=schema_name
+        )
+
+        if not await can_user_view_case(case_id, db_user_id, schema_name=schema_name):
+            raise AuthorizationError("Sin permisos para ver este expediente")
+
+        result = await propose_document_to_case(
+            case_id=case_id,
+            document_draft_id=body.document_draft_id,
+            proposing_user_id=db_user_id,
+            schema_name=schema_name,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "case_id": result["case_id"],
+                "document_draft_id": result["document_draft_id"],
+            },
+            "message": result["message"],
+        }
+
+    except Exception as e:
+        logger.error(f"Error in propose_document endpoint: {str(e)}")
         raise exception_to_http_exception(e)

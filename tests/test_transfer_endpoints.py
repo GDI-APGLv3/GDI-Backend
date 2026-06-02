@@ -9,7 +9,7 @@ No se ejecutan transferencias/asignaciones reales para no alterar datos.
 """
 import pytest
 
-REAL_CASE_ID = "f615d581-a73a-48fc-b4e5-363938da3e1c"
+REAL_CASE_ID = "5130f93f-28c1-4ea3-8830-19e6822ea630"
 
 
 class TestTransferEndpoints:

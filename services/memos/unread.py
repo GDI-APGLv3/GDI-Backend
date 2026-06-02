@@ -4,13 +4,13 @@ Modulo nuevo sin equivalente en NOTAS.
 """
 
 from shared.logging import get_logger
-from database import get_db_connection
+from database import fetch_one
 from .queries import get_unread_memo_count_query
 
 logger = get_logger(__name__)
 
 
-def get_unread_memo_count(user_id: str, *, schema_name: str) -> int:
+async def get_unread_memo_count(user_id: str, *, schema_name: str) -> int:
     """
     Obtiene la cantidad de memos no leidos para un usuario.
     Util para mostrar badge/contador en el frontend.
@@ -21,19 +21,15 @@ def get_unread_memo_count(user_id: str, *, schema_name: str) -> int:
     - No ha sido abierto (opened_at IS NULL)
     - El documento esta oficializado (existe en official_documents)
 
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-
     Returns:
         Cantidad de memos no leidos (int)
     """
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_unread_memo_count_query(), (user_id,))
-            result = cursor.fetchone()
-            count = result['unread_count'] if result else 0
+    result = await fetch_one(
+        get_unread_memo_count_query(), user_id,
+        schema_name=schema_name
+    )
+    count = result['unread_count'] if result else 0
 
-            logger.debug(f"[{schema_name}] User {user_id}: {count} memos no leidos")
+    logger.debug(f"[{schema_name}] User {user_id}: {count} memos no leidos")
 
-            return count
+    return count

@@ -61,19 +61,19 @@ async def get_case_by_number(
         logger.info(f"Searching for case by number: {case_number}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         case_service = CaseService()
 
         # Verificar flag de busqueda global de expedientes
-        flags = get_user_global_search_flags(db_user_id, schema_name=schema_name)
+        flags = await get_user_global_search_flags(db_user_id, schema_name=schema_name)
 
         if flags["can_global_search_cases"]:
             # Busqueda global sin restricciones
-            result = case_service.get_case_by_exact_number_unrestricted(case_number=case_number, schema_name=schema_name)
+            result = await case_service.get_case_by_exact_number_unrestricted(case_number=case_number, schema_name=schema_name)
         else:
             # Busqueda restringida a sectores del usuario
-            result = case_service.get_case_by_exact_number_unrestricted(
+            result = await case_service.get_case_by_exact_number_unrestricted(
                 case_number=case_number, user_id=db_user_id, schema_name=schema_name
             )
         

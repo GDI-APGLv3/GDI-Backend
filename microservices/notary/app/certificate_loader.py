@@ -15,6 +15,7 @@ Versión: 1.0.0
 
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
@@ -298,6 +299,27 @@ def list_available_certificates() -> list:
     ]
 
 
+def _secure_tmp_dir() -> str:
+    """
+    Devuelve el directorio más seguro disponible para tempfiles con material clave.
+
+    Preferencia:
+    1. /dev/shm  — tmpfs en memoria (Linux/Fly.io). El archivo NUNCA toca disco.
+    2. tempfile.gettempdir() — fallback para Windows/dev-local.
+
+    En ambos casos el caller debe aplicar chmod 0o600 antes de escribir contenido.
+    """
+    shm = "/dev/shm"
+    if os.path.isdir(shm) and os.access(shm, os.W_OK):
+        return shm
+    fallback = tempfile.gettempdir()
+    logger.debug(
+        f"/dev/shm no disponible o no escribible; usando fallback {fallback}. "
+        "Asegurate de que el entorno de ejecucion sea Linux para maxima seguridad."
+    )
+    return fallback
+
+
 def load_certificate_from_bytes(p12_bytes: bytes, password: str, tenant_id: str = "") -> LoadedCertificate:
     """
     Carga certificado PKCS#12 desde bytes en memoria (sin filesystem).
@@ -324,23 +346,43 @@ def load_certificate_from_bytes(p12_bytes: bytes, password: str, tenant_id: str 
         if certificate is None:
             raise CertificateLoadError("El .p12 no contiene certificado")
 
-        # pyHanko necesita un path al archivo .p12
-        tmp = tempfile.NamedTemporaryFile(suffix=".p12", delete=False)
-        tmp.write(p12_bytes)
-        tmp.close()
+        # pyHanko necesita un path al archivo .p12.
+        # Escribimos en /dev/shm (tmpfs en memoria, nunca toca disco) cuando está
+        # disponible — caso nominal en Linux/Fly.io. En Windows/dev-local caemos a
+        # tempfile.gettempdir(). En ambos casos aplicamos chmod 0o600 inmediatamente
+        # antes de escribir el contenido sensible.
+        tmp_dir = _secure_tmp_dir()
+        fd, tmp_path = tempfile.mkstemp(suffix=".p12", dir=tmp_dir)
+        try:
+            os.chmod(tmp_path, 0o600)  # owner-only ANTES de escribir la clave
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(p12_bytes)
+        except Exception:
+            # Si algo falla al preparar el file, cerramos el fd (si sigue abierto,
+            # ej. chmod fallo antes del fdopen) y limpiamos antes de re-lanzar.
+            # Si fdopen ya consumio el fd, os.close lanza OSError -> se ignora.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         logger.info(f"Certificado cargado desde bytes para tenant '{tenant_id}'")
         logger.debug(f"  - Subject: {certificate.subject}")
-        logger.debug(f"  - Temp file: {tmp.name}")
+        logger.debug(f"  - Temp file: {tmp_path} (dir={tmp_dir})")
 
         return LoadedCertificate(
             private_key=private_key,
             certificate=certificate,
             additional_certs=list(additional_certs) if additional_certs else None,
             tenant_id=tenant_id,
-            path=Path(tmp.name),
+            path=Path(tmp_path),
             _password=password,
-            _temp_file=tmp.name,
+            _temp_file=tmp_path,
         )
 
     except (CertificateLoadError, CertificateError):

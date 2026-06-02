@@ -129,7 +129,7 @@ async def subsanar_document(
         logger.info(f"Justifying document: {body.official_document_id_justifica[:8]}...")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         # Validar UUIDs básicos
         validate_uuid(case_id)

@@ -2,6 +2,7 @@
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
+from uuid import UUID
 from models.documents.editing import DocumentDetailResponse
 from models.tags import Tags
 from auth import get_current_user, AuthenticatedUser
@@ -30,11 +31,12 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def get_document_editor_details(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento a editar"),
+    document_id: UUID = Path(..., description="UUID del documento a editar"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> DocumentDetailResponse:
     """Obtiene detalles completos de un documento editable."""
+    document_id = str(document_id)
     logger.info(
         "Obteniendo detalles de documento para edición",
         extra={
@@ -47,10 +49,10 @@ async def get_document_editor_details(
 
     try:
         from services.documents.permissions import can_user_view_document
-        if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+        if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
             from shared.exceptions import AuthorizationError
             raise AuthorizationError("No tiene permisos para ver este documento")
-        result = get_document_details_for_editing(document_id, schema_name=schema_name)
+        result = await get_document_details_for_editing(document_id, schema_name=schema_name)
 
         logger.info(
             "Detalles de documento obtenidos exitosamente",

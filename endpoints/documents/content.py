@@ -5,6 +5,7 @@ Usado por frontend/integraciones que necesitan el contenido completo.
 from shared.logging import get_logger
 from fastapi import APIRouter, HTTPException, Path, Request, status, Depends
 from typing import Dict, Any
+from uuid import UUID
 
 from auth import get_current_user
 from shared.dependencies import get_tenant_schema
@@ -26,7 +27,7 @@ router = APIRouter(tags=[Tags.DOCUMENTOS])
 )
 async def get_document_content(
     request: Request,
-    document_id: str = Path(..., description="UUID del documento oficial"),
+    document_id: UUID = Path(..., description="UUID del documento oficial"),
     current_user: Dict = Depends(get_current_user),
     schema_name: str = Depends(get_tenant_schema)
 ) -> Dict[str, Any]:
@@ -36,15 +37,16 @@ async def get_document_content(
     Requiere autenticación Auth0 y valida permisos de visualización
     del usuario sobre el documento.
     """
+    document_id = str(document_id)
     # SEC-11: Verificar permisos de visualizacion
     from services.documents.permissions import can_user_view_document
-    if not can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+    if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tiene permisos para ver este documento")
 
     logger.info(f"[GET CONTENT] Usuario {current_user.get('id', '')[:8] if current_user.get('id') else 'unknown'} solicitando contenido de {document_id[:8]}")
 
     try:
-        result = get_official_document_content(document_id, schema_name)
+        result = await get_official_document_content(document_id, schema_name)
         logger.info(f"[GET CONTENT] Contenido obtenido exitosamente")
         return result
 
@@ -56,5 +58,5 @@ async def get_document_content(
         logger.error(f"[GET CONTENT] Error inesperado: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error obteniendo contenido del documento: {str(e)}"
+            detail="Error al obtener el contenido del documento"
         )

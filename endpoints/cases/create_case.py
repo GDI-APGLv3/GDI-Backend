@@ -88,7 +88,7 @@ async def create_case(
         logger.info(f"Creating case - User: {current_user.user_id[:8]}, Template: {request.case_template_id[:8]}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
         result = await create_case_with_cover_service(
             case_template_id=request.case_template_id,
@@ -110,7 +110,7 @@ async def create_case(
         )
 
     except (ValidationError, NotFoundError) as e:
-        logger.error(f"Error creating case: {str(e)}")
+        logger.error(f"Error creating case: {str(e)}", exc_info=True)
         raise exception_to_http_exception(e)
     except Exception as e:
         logger.error(f"Unexpected error creating case: {str(e)}", exc_info=True)
@@ -126,9 +126,9 @@ async def get_case_templates(
         logger.info(f"Fetching case templates for user: {current_user.user_id[:8]}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        templates = get_cached(
+        templates = await get_cached(
             cache_key=f"case_templates:all:{schema_name}",
             fetch_func=lambda: CaseService.get_available_templates(db_user_id, schema_name=schema_name),
             ttl=CACHE_TTL_TEMPLATES
@@ -151,5 +151,5 @@ async def get_case_templates(
     except Exception as e:
         logger.error(f"Unexpected error fetching templates: {str(e)}", exc_info=True)
         raise exception_to_http_exception(
-            BusinessLogicError(CASE_TEMPLATES_ERROR.format(error=str(e)))
+            BusinessLogicError("Error al obtener las plantillas de expedientes")
         )

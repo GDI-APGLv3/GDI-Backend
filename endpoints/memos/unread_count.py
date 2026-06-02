@@ -40,7 +40,7 @@ async def get_unread_count(
     Retorna la cantidad de memos no leidos para el usuario actual.
     """
     try:
-        count = get_unread_memo_count(
+        count = await get_unread_memo_count(
             current_user.user_id,
             schema_name=schema_name
         )

@@ -15,10 +15,7 @@ from .states import (
     DEFAULT_STATES,
     STATE_CODE_MAPPING
 )
-from .metadata import (
-    map_display_status,
-    get_document_basic_info
-)
+from .metadata import get_document_basic_info
 
 __all__ = [
     # Types
@@ -30,6 +27,5 @@ __all__ = [
     "DEFAULT_STATES",
     "STATE_CODE_MAPPING",
     # Metadata
-    "map_display_status",
     "get_document_basic_info"
 ]

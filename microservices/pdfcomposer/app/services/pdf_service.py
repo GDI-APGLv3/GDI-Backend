@@ -15,6 +15,7 @@ import ipaddress
 import logging
 import pdfplumber
 import nh3
+import concurrent.futures
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 from typing import Union, Optional, Tuple
@@ -25,7 +26,7 @@ from weasyprint.text.fonts import FontConfiguration
 from weasyprint.urls import default_url_fetcher
 from app.models.pdf_models import PDFRequest, CaseRequest, MoveRequest, ImportRequest, NoteRequest, IFRLMRequest
 from datetime import datetime, timezone
-from app.config import DEFAULT_TIMEOUT, LOGO_FETCH_TIMEOUT
+from app.config import DEFAULT_TIMEOUT, LOGO_FETCH_TIMEOUT, PDF_GENERATION_TIMEOUT, WEASYPRINT_RESOURCE_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -123,12 +124,40 @@ def sanitize_html(html_content: str) -> str:
         attributes=ALLOWED_ATTRIBUTES,
     )
 
-def safe_url_fetcher(url, timeout=10, ssl_context=None):
-    """URL fetcher para WeasyPrint que valida SSRF antes de descargar recursos."""
+def safe_url_fetcher(url, timeout=None, ssl_context=None):
+    """
+    URL fetcher para WeasyPrint que valida SSRF y aplica timeout propio.
+
+    S6-003: WeasyPrint puede pasar timeout=None (sin limite). Se ignora el valor
+    que pase WeasyPrint y se usa WEASYPRINT_RESOURCE_TIMEOUT para garantizar que
+    un recurso externo caido no bloquee la generacion del PDF completo.
+
+    Si el fetch falla por red (timeout, conexion, SSL), se loguea y se re-raise
+    para que WeasyPrint omita el recurso sin colgar el worker.
+    """
+    # data: URIs (fuentes embebidas, imagenes base64) -> directo, sin red
     if url.startswith("data:"):
-        return default_url_fetcher(url, timeout=timeout, ssl_context=ssl_context)
-    validate_url_safety(url)
-    return default_url_fetcher(url, timeout=timeout, ssl_context=ssl_context)
+        return default_url_fetcher(url, timeout=WEASYPRINT_RESOURCE_TIMEOUT, ssl_context=ssl_context)
+
+    # file: URIs -> bloqueado (no se necesitan recursos del filesystem)
+    if url.startswith("file:"):
+        raise ValueError(f"URI file: bloqueada por seguridad: {url}")
+
+    # Validar SSRF antes de cualquier conexion
+    try:
+        validate_url_safety(url)
+    except ValueError as e:
+        logger.warning(f"[S6-003] safe_url_fetcher: URL bloqueada SSRF url={url} err={e}")
+        raise
+
+    # Fetch con timeout propio (ignora el valor que pase WeasyPrint, que puede ser None)
+    try:
+        return default_url_fetcher(url, timeout=WEASYPRINT_RESOURCE_TIMEOUT, ssl_context=ssl_context)
+    except Exception as e:
+        # Loguear y re-raise: WeasyPrint ignorara el recurso fallido pero
+        # continuara generando el PDF en lugar de quedar colgado esperando.
+        logger.warning(f"[S6-003] safe_url_fetcher: fetch fallido url={url} timeout={WEASYPRINT_RESOURCE_TIMEOUT}s err={type(e).__name__}: {e}")
+        raise
 
 
 # --- Cache de logos (Paso 3 Mejora-PDFComposer) -------------------------------
@@ -230,25 +259,62 @@ def get_image_as_base64(url: str) -> Union[str, None]:
         logger.error(f"Error al obtener la imagen: {e}")
         return None
 
-def generate_pdf_from_html(html_content: str) -> bytes:
+def generate_pdf_from_html(html_content: str, pdf_variant: Optional[str] = None) -> bytes:
     """
     Convierte contenido HTML a PDF usando WeasyPrint.
 
+    S6-003: La generacion corre en un ThreadPoolExecutor con un timeout maximo
+    de PDF_GENERATION_TIMEOUT segundos. Si WeasyPrint se cuelga (ej. loop
+    infinito en el motor Pango/Cairo, recurso externo que no responde), el
+    worker no queda bloqueado indefinidamente: se cancela y se propaga
+    TimeoutError como HTTP 500 al caller.
+
+    Nota sobre cancelacion: concurrent.futures no puede interrumpir un hilo
+    en ejecucion (Python no tiene cancelacion cooperativa de hilos). El hilo
+    de WeasyPrint puede seguir corriendo en background hasta que termine o el
+    proceso se recicle. El timeout protege el worker de Gunicorn para que
+    pueda devolver error y recibir el siguiente request, no para matar el hilo.
+
+    S6-005: Soporte PDF/A via el parametro pdf_variant. Cuando se pasa
+    "pdf/a-3b" (o cualquier variante valida), WeasyPrint >= 60 agrega los
+    metadatos XMP requeridos por ISO 19005-3 y garantiza conformidad PDF/A.
+    Los previews (con marca de agua) usan pdf_variant=None (PDF 1.7 regular)
+    porque no son documentos oficiales y no requieren archivo a largo plazo.
+
     Args:
         html_content (str): El contenido HTML a convertir.
+        pdf_variant (Optional[str]): Variante PDF/A a generar. Opciones:
+            "pdf/a-1b", "pdf/a-2b", "pdf/a-3b". None = PDF regular.
 
     Returns:
         bytes: El contenido del archivo PDF generado.
 
     Raises:
-        Exception: Si la conversion falla.
+        TimeoutError: Si la generacion supera PDF_GENERATION_TIMEOUT segundos.
+        Exception: Si la conversion falla por otro motivo.
     """
-    try:
+    def _do_generate():
         html = HTML(string=html_content, url_fetcher=safe_url_fetcher)
-        return html.write_pdf(font_config=FONT_CONFIG)
-    except Exception as e:
-        logger.error(f"Error al generar PDF con WeasyPrint: {e}")
-        raise Exception("Fallo al generar el PDF.") from e
+        kwargs = {"font_config": FONT_CONFIG}
+        if pdf_variant is not None:
+            kwargs["pdf_variant"] = pdf_variant
+        return html.write_pdf(**kwargs)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_generate)
+        try:
+            return future.result(timeout=PDF_GENERATION_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                f"[S6-003] WeasyPrint excedio timeout de {PDF_GENERATION_TIMEOUT}s — "
+                f"HTML size={len(html_content)} bytes"
+            )
+            raise TimeoutError(
+                f"La generacion del PDF excedio el limite de {PDF_GENERATION_TIMEOUT} segundos."
+            )
+        except Exception as e:
+            logger.error(f"[S6-005] Error al generar PDF con WeasyPrint (variant={pdf_variant}): {e}")
+            raise Exception("Fallo al generar el PDF.") from e
 
 def generate_preview_pdf(request_data: PDFRequest) -> bytes:
     """
@@ -280,6 +346,7 @@ def generate_preview_pdf(request_data: PDFRequest) -> bytes:
     )
 
     # Generar el PDF desde el HTML usando WeasyPrint
+    # Preview: PDF regular (sin PDF/A — no es documento oficial)
     pdf_content = generate_pdf_from_html(html_content)
 
     return pdf_content
@@ -316,7 +383,8 @@ def generate_case_pdf(request_data: CaseRequest) -> bytes:
         caratulador=request_data.creator
     )
 
-    pdf_content = generate_pdf_from_html(html_content)
+    # S6-005: PDF/A-3b para carátulas (documentos oficiales de archivo)
+    pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 def generate_ifrlm_pdf(request_data: IFRLMRequest) -> bytes:
@@ -352,7 +420,8 @@ def generate_ifrlm_pdf(request_data: IFRLMRequest) -> bytes:
         snapshot_html=snapshot_html_clean,
     )
 
-    pdf_content = generate_pdf_from_html(html_content)
+    # S6-005: PDF/A-3b para informes de legajo (documentos oficiales de archivo)
+    pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 def generate_general_pdf(request_data: PDFRequest) -> bytes:
@@ -385,7 +454,8 @@ def generate_general_pdf(request_data: PDFRequest) -> bytes:
     )
 
     # Generar el PDF desde el HTML usando WeasyPrint
-    pdf_content = generate_pdf_from_html(html_content)
+    # S6-005: PDF/A-3b para documentos finales (sin marca de agua = documentos oficiales)
+    pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
 
     return pdf_content
 
@@ -416,7 +486,8 @@ def generate_move_pdf(request_data: MoveRequest) -> bytes:
         motivo=request_data.motivo
     )
 
-    pdf_content = generate_pdf_from_html(html_content)
+    # S6-005: PDF/A-3b para pases de expediente (documentos oficiales de archivo)
+    pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 
@@ -443,7 +514,8 @@ def generate_import_pdf(request_data: ImportRequest) -> bytes:
         cantidad_paginas=request_data.cantidad_paginas
     )
 
-    pdf_content = generate_pdf_from_html(html_content)
+    # S6-005: PDF/A-3b para documentos importados (documentos oficiales de archivo)
+    pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 
@@ -475,7 +547,8 @@ def generate_note_pdf(request_data: NoteRequest) -> bytes:
         text_html=text_html
     )
 
-    pdf_content = generate_pdf_from_html(html_content)
+    # S6-005: PDF/A-3b para notas finales (documentos oficiales de archivo)
+    pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 

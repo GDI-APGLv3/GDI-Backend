@@ -9,7 +9,7 @@ from auth import decode_jwt_from_request
 from shared.tenant_validation import get_user_tenants, invalidate_user_cache
 from models.tenant_models import OnboardingResponse, OnboardingUser, TenantAccess, UserProfile
 from models.tags import Tags
-from database import execute_query, execute_update, DEMO_MODE
+from database import fetch_one, execute, DEMO_MODE
 
 router = APIRouter(prefix="/api/auth", tags=[Tags.USERS])
 logger = get_logger(__name__)
@@ -51,17 +51,17 @@ logger = get_logger(__name__)
                         },
                         "tenants": [
                             {
-                                "schema_name": "san_miguel",
-                                "display_name": "Municipalidad de San Miguel",
+                                "municipality_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                                "display_name": "Municipalidad del Futuro",
                                 "is_default": True
                             },
                             {
-                                "schema_name": "puente_alto",
-                                "display_name": "Municipalidad de Puente Alto",
+                                "municipality_id": "b2c3d4e5-f6a7-8901-bcde-f01234567891",
+                                "display_name": "Municipalidad del Futuro",
                                 "is_default": False
                             }
                         ],
-                        "default_tenant": "san_miguel",
+                        "default_tenant": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                         "default_profile": {
                             "user_id": "550e8400-e29b-41d4-a716-446655440000",
                             "email": "juan.perez@example.com",
@@ -100,17 +100,14 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
         email = (
             jwt_payload.get("email")
             or jwt_payload.get("https://gdilatam.com/email")
-            or request.headers.get("X-User-Email")
         )
 
         if email:
-            source = "JWT" if jwt_payload.get("email") else (
-                "namespace claim" if jwt_payload.get("https://gdilatam.com/email") else "header X-User-Email"
-            )
-            logger.info(f"Email obtenido de {source}: {email}")
+            source = "JWT" if jwt_payload.get("email") else "namespace claim"
+            logger.info(f"Email obtenido de {source} para auth_id={jwt_payload.get('sub')}")
 
         if not email:
-            logger.error("No se pudo obtener email del JWT, namespace claim, ni del header X-User-Email")
+            logger.error("No se pudo obtener email del JWT ni del namespace claim")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="No se pudo identificar el email del usuario"
@@ -132,16 +129,16 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
         if not picture:
             picture = request.headers.get("X-User-Picture")
 
-        logger.info(f"Procesando onboarding para usuario: {email}")
+        logger.info(f"Procesando onboarding para auth_id={jwt_payload.get('sub')}")
         logger.info(f"Auth0 metadata - name: {full_name}, picture: {picture or 'NULL'}")
 
         # 3. Obtener tenants del usuario
-        tenants_data = get_user_tenants(email)
+        tenants_data = await get_user_tenants(email)
 
         # 4. Si no tiene tenants, decidir según DEMO_MODE
         if not tenants_data:
             if not DEMO_MODE:
-                logger.warning(f"Usuario {email} sin acceso a ninguna municipalidad")
+                logger.warning(f"auth_id={jwt_payload.get('sub')} sin acceso a ninguna municipalidad")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No tiene acceso a ninguna municipalidad. Contacte al administrador."
@@ -149,19 +146,18 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
 
             # --- DEMO_MODE: auto-crear usuario SOLO en 100_test ---
             # Verificar si el schema 100_test existe en la BD
-            schema_check = execute_query(
+            schema_check = await fetch_one(
                 "SELECT 1 FROM information_schema.schemata WHERE schema_name = '100_test'",
-                fetch_one=True,
-                schema_name="public"
+                schema_name="public",
             )
             if not schema_check:
-                logger.warning(f"Usuario {email} sin acceso a ninguna municipalidad (schema 100_test no existe)")
+                logger.warning(f"auth_id={jwt_payload.get('sub')} sin acceso a ninguna municipalidad (schema 100_test no existe)")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No tiene acceso a ninguna municipalidad. Contacte al administrador."
                 )
 
-            logger.info(f"Usuario {email} sin tenants - creando en 100_test automáticamente")
+            logger.info(f"auth_id={jwt_payload.get('sub')} sin tenants - creando en 100_test automáticamente")
 
             real_auth_id = jwt_payload.get("sub")
 
@@ -173,33 +169,33 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
             create_user_query = """
                 INSERT INTO users (email, full_name, auth_id, estado, sector_id, profile_picture_url)
                 SELECT
-                    %s,
-                    %s,
-                    %s,
+                    $1,
+                    $2,
+                    $3,
                     1,
                     (SELECT id FROM sectors WHERE is_active = true ORDER BY RANDOM() LIMIT 1),
-                    %s
-                WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = %s)
+                    $4
+                WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = $5)
             """
             try:
-                execute_update(
+                await execute(
                     create_user_query,
-                    (email.lower(), full_name, real_auth_id, picture, email.lower()),
-                    schema_name=DEFAULT_TENANT_SCHEMA
+                    email.lower(), full_name, real_auth_id, picture, email.lower(),
+                    schema_name=DEFAULT_TENANT_SCHEMA,
                 )
-                logger.info(f"Usuario {email} creado en {DEFAULT_TENANT_SCHEMA}.users")
+                logger.info(f"auth_id={real_auth_id} creado en {DEFAULT_TENANT_SCHEMA}.users")
             except Exception as e:
-                logger.warning(f"Usuario {email} ya existe o error creando: {e}")
+                logger.warning(f"auth_id={real_auth_id} ya existe o error creando: {e}")
 
             # 4.2 Registrar en user_registry (foto de perfil se obtiene de {schema}.users)
             register_query = """
                 INSERT INTO public.user_registry (email, schema_name, is_default)
-                VALUES (%s, '100_test', true)
+                VALUES ($1, '100_test', true)
                 ON CONFLICT (email, schema_name) DO NOTHING
             """
             try:
-                execute_update(register_query, (email.lower(),), schema_name="public")
-                logger.info(f"Usuario {email} registrado en user_registry para 100_test")
+                await execute(register_query, email.lower(), schema_name="public")
+                logger.info(f"auth_id={real_auth_id} registrado en user_registry para 100_test")
             except Exception as e:
                 logger.warning(f"Error registrando en user_registry: {e}")
 
@@ -208,14 +204,14 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                 INSERT INTO user_seals (user_id, city_seal_id)
                 SELECT u.id, cs.id
                 FROM users u, city_seals cs
-                WHERE u.email = %s
+                WHERE u.email = $1
                 ORDER BY RANDOM()
                 LIMIT 1
                 ON CONFLICT DO NOTHING;
             """
             try:
-                execute_update(assign_seal_query, (email.lower(),), schema_name=DEFAULT_TENANT_SCHEMA)
-                logger.info(f"Sello asignado al usuario {email}")
+                await execute(assign_seal_query, email.lower(), schema_name=DEFAULT_TENANT_SCHEMA)
+                logger.info(f"Sello asignado al usuario auth_id={real_auth_id}")
             except Exception as e:
                 logger.warning(f"Error asignando sello: {e}")
 
@@ -226,23 +222,23 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                 SELECT u.id, s.id, true, true
                 FROM users u
                 CROSS JOIN sectors s
-                WHERE u.email = %s
+                WHERE u.email = $1
                   AND s.is_active = true
                   AND s.id != u.sector_id
                 ON CONFLICT (user_id, sector_id) DO NOTHING
             """
             try:
-                execute_update(assign_view_query, (email.lower(),), schema_name=DEFAULT_TENANT_SCHEMA)
-                logger.info(f"Permisos VIEW y EDIT asignados a todos los sectores para {email}")
+                await execute(assign_view_query, email.lower(), schema_name=DEFAULT_TENANT_SCHEMA)
+                logger.info(f"Permisos VIEW y EDIT asignados a todos los sectores para auth_id={real_auth_id}")
             except Exception as e:
                 logger.warning(f"Error asignando permisos VIEW: {e}")
 
             # 4.4 Invalidar cache y re-obtener tenants después de crear
             invalidate_user_cache(email)
-            tenants_data = get_user_tenants(email)
+            tenants_data = await get_user_tenants(email)
 
             if not tenants_data:
-                logger.error(f"Falló crear usuario {email} en 100_test")
+                logger.error(f"Falló crear usuario auth_id={real_auth_id} en 100_test")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Error creando usuario en tenant de pruebas"
@@ -253,14 +249,14 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
         if tenants_data and (auth_id_from_jwt or picture):
             for tenant in tenants_data:
                 try:
-                    execute_update(
+                    await execute(
                         """UPDATE users
-                           SET auth_id = COALESCE(auth_id, %s),
-                               profile_picture_url = COALESCE(profile_picture_url, %s)
-                           WHERE LOWER(email) = %s
+                           SET auth_id = COALESCE(auth_id, $1),
+                               profile_picture_url = COALESCE(profile_picture_url, $2)
+                           WHERE LOWER(email) = $3
                              AND (auth_id IS NULL OR profile_picture_url IS NULL)""",
-                        (auth_id_from_jwt, picture, email.lower()),
-                        schema_name=tenant["schema_name"]
+                        auth_id_from_jwt, picture, email.lower(),
+                        schema_name=tenant["schema_name"],
                     )
                 except Exception as e:
                     logger.warning(f"Error actualizando datos de usuario en {tenant['schema_name']}: {e}")
@@ -268,13 +264,14 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
         # 6. Construir respuesta
         tenants = [TenantAccess(**t) for t in tenants_data]
 
-        # Encontrar tenant por defecto
+        # SEC-31 (revertido por hotfix): default_tenant vuelve a ser schema_name,
+        # que es lo que el frontend usa como X-Tenant-Schema y el middleware valida.
         default_tenant = next(
             (t.schema_name for t in tenants if t.is_default),
             tenants[0].schema_name if tenants else None
         )
 
-        logger.info(f"Usuario {email} tiene acceso a {len(tenants)} tenant(s). Default: {default_tenant}")
+        logger.info(f"auth_id={jwt_payload.get('sub')} tiene acceso a {len(tenants)} tenant(s). Default schema: {default_tenant}")
 
         return OnboardingResponse(
             user=OnboardingUser(

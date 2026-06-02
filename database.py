@@ -1,653 +1,478 @@
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from psycopg2.pool import SimpleConnectionPool
 import os
-import sys
 import re
-from contextlib import contextmanager
-from contextvars import ContextVar
-from typing import Optional, Dict, Any
+import json as _json
+import asyncpg
+from contextlib import asynccontextmanager
+from typing import Optional, Any
 from dotenv import load_dotenv
 import logging
+import asyncio
 
-# Cargar variables de entorno desde .env
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# MULTI-TENANT: Schema se pasa explícitamente via request.state.schema_name
+# Config de conexión (idéntica al anterior — solo fuente de env vars)
 # ============================================================================
-# El TenantMiddleware setea request.state.schema_name en cada request.
-# Las funciones de base de datos reciben schema_name como parámetro explícito.
-# Este enfoque es más robusto que ContextVar para contextos async/sync mixtos.
-
-# ============================================================================
-# PGBOUNCER TRANSACTION MODE: Reutilización de conexiones en llamadas anidadas
-# ============================================================================
-# Para soportar 300-500 conexiones concurrentes usamos PgBouncer en transaction mode.
-# ContextVar permite reutilizar la misma conexión en llamadas anidadas (ej: service → service).
-# SET LOCAL en lugar de SET garantiza que search_path se resetea al final de la transacción.
-_current_connection: ContextVar[Optional[Any]] = ContextVar('db_conn', default=None)
-
-# Configuración básica para conectar a PostgreSQL
-# Lee credenciales desde variables de entorno para seguridad
-
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "railway")
 
-# Detectar si estamos usando PgBouncer (puerto 6432) o PostgreSQL directo (puerto 5432)
-# PgBouncer no soporta parámetros "options" en la URL, usa SERVER_RESET_QUERY en su lugar
+# asyncpg usa DSN estándar. El search_path se setea por conexión con SET LOCAL,
+# no en la URL (a diferencia del psycopg2 anterior con ?options=).
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# Apuntamos directo a Postgres (asyncpg tiene su propio pool). El pool fuerza
+# statement_cache_size=0 siempre (ver init_pool): es obligatorio en multi-tenant
+# por el search_path dinámico, no solo por PgBouncer.
 USE_PGBOUNCER = DB_PORT == "6432"
 
-# Modo transaccional de PgBouncer (requiere SET LOCAL en lugar de SET)
-# CRITICAL: En transaction mode, SET persiste entre requests → riesgo de seguridad multi-tenant
-# SET LOCAL se resetea automáticamente al final de cada transacción
-PGBOUNCER_TRANSACTION_MODE = os.getenv("PGBOUNCER_TRANSACTION_MODE", "false").lower() == "true"
+# Defaults conservadores. El consumo real es max_size × num_workers (ver Plan §5.2).
+# ARIES/ARG Backend → setear ASYNCPG_MAX_SIZE=8 por secret explícito.
+ASYNCPG_MIN_SIZE = int(os.getenv("ASYNCPG_MIN_SIZE", "2"))
+ASYNCPG_MAX_SIZE = int(os.getenv("ASYNCPG_MAX_SIZE", "8"))
+ASYNCPG_COMMAND_TIMEOUT = int(os.getenv("ASYNCPG_COMMAND_TIMEOUT", "60"))
 
-if USE_PGBOUNCER:
-    # PgBouncer: Sin options (usa PGBOUNCER_SERVER_RESET_QUERY a nivel de PgBouncer)
-    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    logger.info("Usando PgBouncer - search_path configurado via SERVER_RESET_QUERY")
-else:
-    # PostgreSQL directo: Con search_path en URL para desarrollo local
-    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?options=-c%20search_path%3Dpublic"
-    logger.info("Usando PostgreSQL directo - search_path en URL")
-
-# Configuración de Auth0 (desde variables de entorno)
+# ============================================================================
+# Auth0 / modos de operación (sin cambios — otros módulos los importan)
+# ============================================================================
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")
 AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "")
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "")
-AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")  # REQUERIDO en producción
+AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
 AUTH0_ALGORITHMS = ["RS256"]
 
-# Modo de testing (permite usar header X-User-ID en lugar de Auth0)
-# SECURITY: Default es false para evitar bypass de autenticación en producción
-# En desarrollo local, configurar TESTING_MODE=true en .env
 TESTING_MODE = os.getenv("TESTING_MODE", "false").lower() == "true"
-
 if TESTING_MODE:
-    # Bloquear TESTING_MODE en ambientes de producción
-    railway_env = os.getenv("RAILWAY_ENVIRONMENT_NAME", "").lower()
-    if "production" in railway_env or "prod" in railway_env:
-        logger.warning("TESTING_MODE=true detectado en producción Railway - DESACTIVANDO")
-        TESTING_MODE = False
-    elif os.getenv("FLY_APP_NAME"):
+    if os.getenv("FLY_APP_NAME"):
         fly_app = os.getenv("FLY_APP_NAME", "")
-        # Apps donde TESTING_MODE esta permitido: dev y demo (playground)
         allowed = "-dev" in fly_app or fly_app.startswith("demo-")
         if not allowed:
             TESTING_MODE = False
             logger.warning(f"TESTING_MODE desactivado: Fly.io producción ({fly_app})")
         else:
             logger.warning(f"TESTING_MODE habilitado en Fly.io ({fly_app})")
+    elif os.getenv("ALLOW_TESTING_MODE_LOCAL", "false").lower() == "true":
+        # Fail-closed: en entornos sin FLY_APP_NAME ni RAILWAY_ENVIRONMENT_NAME
+        # (VPS, Docker plano, plataforma desconocida) el bypass de JWT solo se
+        # permite si se opta-in EXPLÍCITAMENTE con ALLOW_TESTING_MODE_LOCAL=true.
+        # Esto evita que un secret TESTING_MODE=true olvidado abra auth en un
+        # entorno productivo no reconocido.
+        logger.warning("TESTING_MODE habilitado (ALLOW_TESTING_MODE_LOCAL=true) - Auth0 bypass activo. NO usar en producción.")
     else:
-        logger.warning("TESTING_MODE está habilitado - Auth0 bypass activo. NO usar en producción.")
+        TESTING_MODE = False
+        logger.warning(
+            "TESTING_MODE solicitado pero entorno NO reconocido como seguro "
+            "(sin FLY_APP_NAME dev/demo ni ALLOW_TESTING_MODE_LOCAL=true). "
+            "DESACTIVADO por seguridad (fail-closed)."
+        )
 
-# Modo demo: permite auto-crear usuarios en onboarding
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
-# Configuración del sistema de expedientes
-MUNICIPIO_PRINCIPAL_ID = "550e8400-e29b-41d4-a716-446655440000"  # San Miguel
+# ============================================================================
+# Constantes del negocio (sin cambios)
+# ============================================================================
+MUNICIPIO_PRINCIPAL_ID = "550e8400-e29b-41d4-a716-446655440000"
 MUNICIPIO_ACRONYM = "SMG"
-
-# Configuración de numeración de expedientes
-EXPEDIENTE_PREFIX = "EE"  # Prefijo para expedientes
-
-# Configuración de paginación
+EXPEDIENTE_PREFIX = "EE"
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 
-# Pool de conexiones (inicializada más tarde)
-connection_pool: Optional[SimpleConnectionPool] = None
-
-def init_db_pool():
-    """Inicializar pool de conexiones a la base de datos"""
-    global connection_pool
-    try:
-        connection_pool = SimpleConnectionPool(
-            minconn=5,   # Aumentado de 2 a 5 para mejor rendimiento
-            maxconn=50,  # Aumentado de 20 a 50 (seguro para Fly.io Postgres con 100 max)
-            dsn=DATABASE_URL,
-            cursor_factory=RealDictCursor
-        )
-        logger.info("Pool de conexiones PostgreSQL inicializado correctamente")
-        return True
-    except Exception as e:
-        logger.error(f"Error inicializando pool de conexiones: {e}")
-        return False
-
+# ============================================================================
+# Validación de schema (S1-011: unificada con BackOffice-Back)
+# ============================================================================
+_SCHEMA_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]+$')
+_RESERVED_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast"}
 
 def validate_schema_name(schema_name: str) -> str:
     """
-    Valida que schema_name sea seguro para usar en SQL.
-
-    SECURITY: Previene SQL injection en SET search_path.
-    Solo permite: letras, números, guión bajo.
-    Ejemplos válidos: "100_test", "public", "municipio_abc"
-
-    Args:
-        schema_name: Nombre del schema a validar
-
-    Returns:
-        El schema_name validado (sin cambios si es válido)
-
-    Raises:
-        ValueError: Si el schema_name contiene caracteres no permitidos
+    Valida schema_name contra SQL injection.
+    - Elimina espacios (NO baja a minúsculas: los schemas pueden tener mayúsculas, ej. 100_INTE).
+    - Solo permite letras (may/min), números y guión bajo.
+    - Máximo 63 caracteres (límite PostgreSQL).
+    - Bloquea schemas reservados de PostgreSQL.
+    Ejemplos válidos: "100_test", "100_INTE", "municipio_abc".
     """
     if not schema_name or not schema_name.strip():
         raise ValueError(
             "schema_name es REQUERIDO. "
-            "Obtener de request.state.schema_name o pasar 'public' explícitamente."
+            "Obtener de request.state.schema_name o pasar explícitamente."
         )
-
-    # SECURITY: Solo permitir caracteres seguros para nombres de schema PostgreSQL
-    # Patrón: letras, números, guión bajo (típico: "100_san_miguel", "public")
-    if not re.match(r'^[a-zA-Z0-9_]+$', schema_name):
+    # NO bajar a minusculas: los schemas de municipios pueden tener mayusculas
+    # (ej. 100_INTE). El .lower() de S1-011 rompia el SET search_path en PRD.
+    schema_name = schema_name.strip()
+    if not _SCHEMA_NAME_PATTERN.match(schema_name):
         raise ValueError(
             f"schema_name inválido: '{schema_name}'. "
             "Solo se permiten letras, números y guión bajo."
         )
-
+    if len(schema_name) > 63:
+        raise ValueError(
+            f"schema_name demasiado largo: {len(schema_name)} caracteres (max 63)."
+        )
+    if schema_name in _RESERVED_SCHEMAS:
+        raise ValueError(
+            f"schema_name reservado: '{schema_name}' no está permitido."
+        )
     return schema_name
 
+# ============================================================================
+# Constantes de retry ante conexiones muertas post-resume (MejoraArranque FIX B)
+# ============================================================================
+# Excepciones que pueden disparar el pre-flight SELECT 1 cuando la conexion del
+# pool murio durante la suspension de Fly.io (TCP cortado silenciosamente que
+# asyncpg.Connection.is_closed() NO detecta — solo chequea estado local del
+# protocolo). El pre-flight las atrapa y descarta la conn antes del yield.
+_DEAD_CONNECTION_ERRORS = (
+    asyncpg.exceptions.ConnectionDoesNotExistError,
+    asyncpg.exceptions.InterfaceError,
+    ConnectionResetError,
+    OSError,                     # incluye BrokenPipeError, ConnectionAbortedError, etc.
+    asyncio.TimeoutError,        # pre-flight excedio _CONN_HEALTHCHECK_TIMEOUT
+)
+# Maximo de reintentos para adquirir una conexion viva. 2 es suficiente: el primer
+# reintento ya pide una conexion nueva al pool (el pool descarta automaticamente
+# las conns marcadas como closed/aborted al release).
+_CONN_MAX_RETRIES = 2
+# Pausa minima entre reintentos (segundos). Corta para no impactar latencia.
+_CONN_RETRY_DELAY = 0.05
+# Timeout del pre-flight SELECT 1. Conns sanas en red local Fly responden en <1ms.
+# Si tarda mas de 500ms, asumimos TCP roto post-suspend.
+_CONN_HEALTHCHECK_TIMEOUT = 0.5
 
-@contextmanager
-def get_db_connection(schema_name: str):
+
+async def _acquire_healthy_conn() -> asyncpg.Connection:
     """
-    Context manager para obtener conexión de la pool con schema multi-tenant.
+    Adquiere una conexion del pool, valida que este viva con SELECT 1 pre-flight,
+    y la devuelve. Si la conn esta muerta, la termina, la libera al pool (que la
+    descarta automaticamente al verla closed/aborted), y reintenta hasta
+    _CONN_MAX_RETRIES veces.
 
-    IMPORTANTE: schema_name es REQUERIDO (sin default).
-    Esto garantiza que TODAS las operaciones tienen SET LOCAL.
+    IMPORTANTE: Este helper NO es un contextmanager. El caller la libera con
+    `await get_pool().release(conn)` despues del yield. El retry de acquire DEBE
+    estar separado del yield para evitar RuntimeError("generator didn't stop after
+    athrow()") cuando una excepcion entra post-yield (caller con conn rota a
+    mitad de query, o COMMIT que falla).
 
-    Cambios para PgBouncer transaction mode:
-    - Reutiliza conexión activa en llamadas anidadas (via ContextVar)
-    - Usa SET LOCAL en lugar de SET para search_path (se resetea automáticamente)
-    - Reset explícito de search_path antes de putconn() para compatibilidad
-
-    Args:
-        schema_name: Schema del tenant (REQUERIDO). Ejemplos:
-                     - "100_san_miguel" para tenant específico
-                     - "public" para operaciones de sistema/DDL
-                     Se obtiene de request.state.schema_name en endpoints.
-
-    Raises:
-        ValueError: Si schema_name está vacío o es None
-
-    Yields:
-        Conexión de PostgreSQL con search_path configurado al schema.
-    """
-    global connection_pool
-
-    # SECURITY: Validar schema_name contra SQL injection
-    # Esto también valida que no esté vacío
-    validated_schema = validate_schema_name(schema_name)
-
-    # Si ya hay una conexión activa en este contexto (llamadas anidadas), reutilizarla
-    existing_conn = _current_connection.get()
-    if existing_conn is not None:
-        logger.debug("Reutilizando conexión existente (llamada anidada)")
-        # IMPORTANTE: NO hacer yield directamente, necesitamos configurar search_path
-        # porque podría ser un schema diferente al de la llamada padre
-        set_command = "SET LOCAL" if PGBOUNCER_TRANSACTION_MODE else "SET"
-        with existing_conn.cursor() as setup_cursor:
-            setup_cursor.execute(f'{set_command} search_path TO "{validated_schema}", public')
-        logger.debug(f"{set_command} search_path TO \"{validated_schema}\", public (nested)")
-        yield existing_conn
-        return
-
-    # Nueva conexión
-    if connection_pool is None:
-        init_db_pool()
-
-    if connection_pool is None:
-        raise psycopg2.OperationalError("No hay pool de conexiones disponible. La base de datos no está accesible.")
-
-    connection = None
-    connection_is_bad = False
-    try:
-        connection = connection_pool.getconn()
-
-        # Verificar que la conexión esté viva antes de usarla
+    Patron de uso (en get_conn/transaction):
+        conn = await _acquire_healthy_conn()
         try:
-            with connection.cursor() as test_cursor:
-                test_cursor.execute("SELECT 1")
-        except (psycopg2.OperationalError, psycopg2.InterfaceError):
-            # Conexión cerrada por PgBouncer o timeout - marcar como mala
-            connection_is_bad = True
-            connection_pool.putconn(connection, close=True)
-            # Obtener una nueva conexión
-            connection = connection_pool.getconn()
-
-        # Configurar search_path
-        # CRITICAL: SET LOCAL en transaction mode para evitar bleed entre requests
-        # validated_schema ya pasó validación contra SQL injection
-        set_command = "SET LOCAL" if PGBOUNCER_TRANSACTION_MODE else "SET"
-        with connection.cursor() as setup_cursor:
-            setup_cursor.execute(f'{set_command} search_path TO "{validated_schema}", public')
-        logger.debug(f"{set_command} search_path TO \"{validated_schema}\", public")
-
-        # Registrar conexión en ContextVar para reutilización en llamadas anidadas
-        token = _current_connection.set(connection)
-        try:
-            yield connection
-            # Commit exitoso (fuera del except)
-            if not connection.closed:
-                try:
-                    connection.commit()
-                except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                    connection_is_bad = True
+            async with conn.transaction():
+                ... setup ...
+                yield conn      # yield UNICO, no retryable
         finally:
-            # Limpiar ContextVar
-            _current_connection.reset(token)
-
-    except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-        # Conexión cerrada - marcarla para que no vuelva al pool
-        connection_is_bad = True
-        raise e
-    except Exception as e:
-        if connection:
-            try:
-                connection.rollback()
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                # Conexión ya cerrada, no se puede hacer rollback
-                connection_is_bad = True
-        raise e
-    finally:
-        if connection and not connection.closed:
-            # CRITICAL: Reset search_path antes de devolver al pool (defense in depth)
-            # SET LOCAL se resetea automáticamente, pero hacemos reset explícito por seguridad
-            try:
-                with connection.cursor() as reset_cursor:
-                    reset_cursor.execute("RESET search_path")
-                logger.debug("RESET search_path (antes de putconn)")
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                # Conexión cerrada, marcar como mala
-                connection_is_bad = True
-
-        if connection:
-            connection_pool.putconn(connection, close=connection_is_bad)
-
-@contextmanager
-def get_db_cursor(
-    *,
-    commit: bool = False,
-    schema_name: str,
-    user_id: Optional[str] = None,
-    auth_source: Optional[str] = None
-):
+            await get_pool().release(conn)
     """
-    Context manager para obtener cursor con auto-commit opcional.
-
-    Args:
-        commit: Si True, hace commit al finalizar
-        schema_name: Schema a usar (obligatorio para multi-tenant).
-                     Se obtiene de request.state.schema_name en el endpoint.
-        user_id: UUID del usuario que realiza la acción (para auditoría).
-                 Si se pasa, se inyecta como GUC app.user_id para los triggers.
-        auth_source: Origen de la autenticación (jwt, api_key, mcp_oauth, testing, system).
-                     Si se pasa, se inyecta como GUC app.auth_source para los triggers.
-
-    Note:
-        El schema_name debe pasarse explícitamente desde el endpoint/service.
-        Este enfoque es más robusto que ContextVar para contextos async/sync mixtos.
-
-        Para auditoría, pasar user_id y auth_source:
-        ```
-        with get_db_cursor(
-            commit=True,
-            schema_name=schema_name,
-            user_id=creator_id,
-            auth_source="jwt"
-        ) as cursor:
-            cursor.execute("INSERT INTO ...")
-        ```
-    """
-    # get_db_connection ya maneja el SET search_path
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
+    pool_ref = get_pool()
+    last_exc: Optional[Exception] = None
+    for attempt in range(_CONN_MAX_RETRIES + 1):
+        conn = await pool_ref.acquire()
         try:
-            # Inyectar contexto de auditoría si se proporciona
-            if user_id or auth_source:
-                from shared.audit_context import set_audit_context
-                set_audit_context(cursor, user_id=user_id, auth_source=auth_source)
-
-            yield cursor
-            if commit:
-                conn.commit()
-        except (psycopg2.OperationalError, psycopg2.InterfaceError):
-            # Conexión cerrada, no intentar rollback
-            raise
-        except Exception as e:
+            # Pre-flight: SELECT 1 con timeout corto. Detecta TCP cortado durante
+            # el suspend que is_closed() no ve (asyncpg solo chequea estado local
+            # del protocolo, no la salud real del socket).
+            await asyncio.wait_for(
+                conn.fetchval("SELECT 1"),
+                timeout=_CONN_HEALTHCHECK_TIMEOUT,
+            )
+            return conn
+        except _DEAD_CONNECTION_ERRORS as exc:
+            last_exc = exc
+            # Conn muerta: terminate() (abort inmediato, no intenta flush como close)
+            # y release() para que el pool la descarte. release() con conn cerrada
+            # libera el holder sin reusar la conn (asyncpg internamente chequea
+            # is_closed() y descarta).
             try:
-                conn.rollback()
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                # Conexión ya cerrada, ignorar error de rollback
+                conn.terminate()
+            except Exception:
                 pass
-            raise e
-        finally:
             try:
-                cursor.close()
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                # Conexión cerrada, cursor ya no existe
+                await pool_ref.release(conn)
+            except Exception:
                 pass
-
-def execute_query(query: str, params: tuple = None, fetch: bool = True, fetch_one: bool = False, retry_count: int = 2, *, schema_name: str) -> Optional[list]:
-    """
-    Ejecutar consulta SQL y retornar resultados con retry automático.
-
-    Args:
-        query: Query SQL
-        params: Parámetros
-        fetch: Si True, hace fetch (ignorado si fetch_one=True)
-        fetch_one: Si True, retorna solo 1 registro (dict)
-        retry_count: Intentos en caso de error de conexión
-        schema_name: Schema del tenant (obligatorio para multi-tenant).
-                     Debe pasarse desde request.state.schema_name.
-
-    Returns:
-        dict (si fetch_one=True) o list[dict] (si fetch=True) o None
-    """
-    last_error = None
-
-    for attempt in range(retry_count):
-        try:
-            with get_db_cursor(schema_name=schema_name) as cursor:
-                cursor.execute(query, params)
-
-                if fetch_one:
-                    # INSERT ... RETURNING sin match (ej. WHERE NOT EXISTS falso)
-                    # deja al cursor sin resultset: cursor.fetchone() lanza
-                    # ProgrammingError "no results to fetch". Devolver None.
-                    if cursor.description is None:
-                        return None
-                    try:
-                        return cursor.fetchone()
-                    except psycopg2.ProgrammingError:
-                        return None
-                elif fetch:
-                    if cursor.description is None:
-                        return []
-                    return cursor.fetchall()
-                else:
-                    return None
-        except psycopg2.OperationalError as e:
-            last_error = e
-            error_msg = str(e).lower()
-            # Retry solo si es un error de conexión cerrada o perdida
-            if "closed" in error_msg or "lost" in error_msg or "terminated" in error_msg:
-                logger.warning(f"Intento {attempt + 1}/{retry_count} falló (conexión cerrada), reintentando...")
-                # NOTA: No cerrar todo el pool (closeall) porque afectaría otros requests en curso.
-                # La conexión fallida ya fue cerrada con putconn(close=True) en get_db_connection.
-                # El pool creará una nueva conexión automáticamente en el siguiente getconn().
-                continue
+            if attempt < _CONN_MAX_RETRIES:
+                logger.warning(
+                    "_acquire_healthy_conn: conexion muerta en pre-flight "
+                    "(intento %d/%d), reintentando — %s",
+                    attempt + 1, _CONN_MAX_RETRIES, exc,
+                )
+                await asyncio.sleep(_CONN_RETRY_DELAY)
             else:
-                # Si no es error de conexión, no reintentar
+                logger.error(
+                    "_acquire_healthy_conn: pool no entrego conexion sana tras "
+                    "%d reintentos — %s",
+                    _CONN_MAX_RETRIES, exc,
+                )
                 raise
-        except Exception as e:
-            logger.error(f"Error ejecutando consulta: {e}")
-            raise
-
-    # Si llegamos aquí, todos los intentos fallaron
-    logger.error(f"Error ejecutando consulta después de {retry_count} intentos: {last_error}")
-    raise last_error
-
-def execute_update(
-    query: str,
-    params: tuple = None,
-    *,
-    schema_name: str,
-    user_id: Optional[str] = None,
-    auth_source: Optional[str] = None
-) -> bool:
-    """Ejecutar consulta de actualización (INSERT, UPDATE, DELETE)
-
-    Args:
-        query: Query SQL
-        params: Parámetros
-        schema_name: Schema del tenant (multi-tenant)
-        user_id: UUID del usuario que realiza la acción (para auditoría)
-        auth_source: Origen de la autenticación (jwt, api_key, etc.)
-    """
-    try:
-        with get_db_cursor(
-            commit=True,
-            schema_name=schema_name,
-            user_id=user_id,
-            auth_source=auth_source
-        ) as cursor:
-            cursor.execute(query, params)
-            return True
-    except Exception as e:
-        logger.error(f"Error ejecutando actualización: {e}")
-        raise
-
-@contextmanager
-def execute_transaction(
-    *,
-    schema_name: str,
-    user_id: Optional[str] = None,
-    auth_source: Optional[str] = None
-):
-    """
-    Context manager para ejecutar múltiples operaciones en una transacción atómica.
-    Usa connection pool.
-
-    Args:
-        schema_name: Schema del tenant (multi-tenant). Si se especifica, ejecuta SET search_path.
-        user_id: UUID del usuario que realiza la acción (para auditoría).
-        auth_source: Origen de la autenticación (jwt, api_key, mcp_oauth, testing, system).
-
-    Uso:
-        with execute_transaction(
-            schema_name="100_test",
-            user_id=creator_id,
-            auth_source="jwt"
-        ) as (conn, cursor):
-            cursor.execute("INSERT INTO ...", params1)
-            cursor.execute("UPDATE ...", params2)
-            # Auto-commit si no hay excepciones
-            # Auto-rollback en caso de error
-
-    Yields:
-        tuple: (connection, cursor)
-    """
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
+        except Exception:
+            # Cualquier otra excepcion: liberar la conn (no es problema de salud,
+            # es un bug real) y propagar.
             try:
-                # Inyectar contexto de auditoría si se proporciona
-                if user_id or auth_source:
-                    from shared.audit_context import set_audit_context
-                    set_audit_context(cursor, user_id=user_id, auth_source=auth_source)
+                await pool_ref.release(conn)
+            except Exception:
+                pass
+            raise
+    # Inalcanzable por la logica del raise dentro del loop, pero mypy lo pide:
+    raise last_exc if last_exc is not None else RuntimeError("acquire failed")
 
-                yield (conn, cursor)
-                conn.commit()
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                # Conexión cerrada, no intentar rollback
-                raise
-            except Exception as e:
-                try:
-                    conn.rollback()
-                except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                    # Conexión ya cerrada
-                    pass
-                raise e
+# ============================================================================
+# Pool asyncpg
+# ============================================================================
+pool: Optional[asyncpg.Pool] = None
 
-def execute_single_update(
-    query: str,
-    params: tuple = None,
-    returning: bool = False,
+
+async def _init_conn(conn: asyncpg.Connection) -> None:
+    """Registra codecs para que asyncpg decodifique automáticamente."""
+    await conn.set_type_codec(
+        'json', encoder=_json.dumps, decoder=_json.loads, schema='pg_catalog'
+    )
+    await conn.set_type_codec(
+        'jsonb', encoder=_json.dumps, decoder=_json.loads, schema='pg_catalog'
+    )
+    # UUID como str — restaura comportamiento psycopg2 y es compatible con Pydantic str fields
+    await conn.set_type_codec(
+        'uuid', encoder=str, decoder=str, schema='pg_catalog'
+    )
+
+
+async def init_pool() -> asyncpg.Pool:
+    """Inicializar pool asyncpg. Llamar en el lifespan de FastAPI."""
+    global pool
+    if pool is not None:
+        return pool
+    pool = await asyncpg.create_pool(
+        dsn=DATABASE_URL,
+        min_size=ASYNCPG_MIN_SIZE,
+        max_size=ASYNCPG_MAX_SIZE,
+        command_timeout=ASYNCPG_COMMAND_TIMEOUT,
+        init=_init_conn,
+        # CRITICO multi-tenant: search_path dinamico por SET LOCAL es incompatible
+        # con el cache de prepared statements de asyncpg (un statement preparado para
+        # un schema se reusa en otro -> "relation does not exist" / leak cross-tenant).
+        # En DEV no se nota (1 solo schema); en PRD con schemas por municipio revienta.
+        statement_cache_size=0,
+        # MejoraArranque FIX B: max_inactive_connection_lifetime acotado a 60s.
+        # NO resuelve el caso post-resume de Fly.io: durante el suspend el event
+        # loop esta detenido y asyncpg no recicla nada; ademas el timer solo se
+        # evalua al hacer release(), no en background. Pero sigue ayudando en
+        # escenarios de conn idle cortada por intermediarios de red entre
+        # requests cercanos. El mecanismo real anti-resume es el pre-flight
+        # SELECT 1 en _acquire_healthy_conn(). Ver get_conn() / transaction().
+        max_inactive_connection_lifetime=60,
+    )
+    logger.info(
+        "Pool asyncpg inicializado (min=%d max=%d max_inactive_lifetime=60s)",
+        ASYNCPG_MIN_SIZE,
+        ASYNCPG_MAX_SIZE,
+    )
+    return pool
+
+
+async def close_pool() -> None:
+    """Cerrar el pool al apagar la aplicación."""
+    global pool
+    if pool is not None:
+        await pool.close()
+        pool = None
+
+
+def get_pool() -> asyncpg.Pool:
+    if pool is None:
+        raise RuntimeError("Pool asyncpg no inicializado. Verificar lifespan en main.py.")
+    return pool
+
+
+# ============================================================================
+# Contexto multi-tenant: adquiere conexión, setea search_path + GUC auditoría
+# ============================================================================
+@asynccontextmanager
+async def get_conn(
     *,
     schema_name: str,
     user_id: Optional[str] = None,
-    auth_source: Optional[str] = None
+    auth_source: Optional[str] = None,
 ):
     """
-    Ejecuta una operación de actualización única (INSERT/UPDATE/DELETE).
-    Usa connection pool.
+    Adquiere una conexión del pool con tenant context SEGURO.
+    Reemplaza a get_db_connection + get_db_cursor.
 
-    Args:
-        query: Query SQL a ejecutar
-        params: Parámetros para la query
-        returning: Si True, retorna el resultado de la cláusula RETURNING
-        schema_name: Schema del tenant (multi-tenant)
-        user_id: UUID del usuario que realiza la acción (para auditoría)
-        auth_source: Origen de la autenticación (jwt, api_key, etc.)
+    SEGURIDAD MULTI-TENANT (CRÍTICO):
+    Toda adquisición abre SIEMPRE una transacción y usa SET LOCAL search_path
+    + set_config(..., true). El scope transaccional garantiza que al COMMIT/ROLLBACK
+    (incluso por cancelación de corrutina), el search_path y los GUC vuelven al
+    default del pool. La conexión NUNCA regresa al pool contaminada con el tenant anterior.
 
-    Returns:
-        dict con status y rows_affected, o resultado si returning=True
+    NUNCA usar SET search_path sin LOCAL ni set_config(..., false) en asyncpg con pool.
+
+    MejoraArranque FIX B (resiliencia post-resume Fly.io):
+    El acquire+pre-flight se delega a _acquire_healthy_conn() con retry. El yield
+    de abajo es UNICO y NO retryable: si la conn muere DESPUES del yield (durante
+    una query del caller o en el COMMIT), el error original se propaga limpio.
+    Reintentar una TX parcial no tiene sentido y ademas rompe el contextmanager
+    con RuntimeError("generator didn't stop after athrow()").
     """
+    validated = validate_schema_name(schema_name)
+    conn = await _acquire_healthy_conn()
     try:
-        with get_db_cursor(
-            commit=True,
-            schema_name=schema_name,
-            user_id=user_id,
-            auth_source=auth_source
-        ) as cursor:
-            cursor.execute(query, params)
-            rows_affected = cursor.rowcount
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path TO "{validated}", public')
+            if user_id is not None:
+                await conn.execute("SELECT set_config('app.user_id', $1, true)", str(user_id))
+            if auth_source is not None:
+                await conn.execute("SELECT set_config('app.auth_source', $1, true)", auth_source)
+            yield conn
+        # Al cerrar conn.transaction(): COMMIT (o ROLLBACK si hubo excepción).
+        # search_path y GUC se revierten automáticamente. Conexión limpia al pool.
+    finally:
+        try:
+            await get_pool().release(conn)
+        except Exception as release_exc:
+            # No enmascarar la excepcion original del bloque: solo logear y seguir.
+            logger.warning("get_conn: error al liberar conn al pool — %s", release_exc)
 
-            if returning:
-                result = cursor.fetchone()
-                return {
-                    "status": "success",
-                    "rows_affected": rows_affected,
-                    "result": result
-                }
 
-            return {
-                "status": "success",
-                "rows_affected": rows_affected
-            }
-    except Exception as e:
-        logger.error(f"Error en execute_single_update: {e}")
-        raise
+async def with_tenant(
+    conn: asyncpg.Connection,
+    *,
+    schema_name: str,
+    user_id: Optional[str] = None,
+    auth_source: Optional[str] = None,
+) -> None:
+    """
+    Establece tenant context en una conexión que ya tiene una transacción abierta.
+    Usar cuando el caller pasa conn explícitamente (ej: servicios de cases).
+    SIEMPRE llamar dentro de async with conn.transaction().
+    """
+    validated = validate_schema_name(schema_name)
+    await conn.execute(f'SET LOCAL search_path TO "{validated}", public')
+    if user_id is not None:
+        await conn.execute("SELECT set_config('app.user_id', $1, true)", str(user_id))
+    if auth_source is not None:
+        await conn.execute("SELECT set_config('app.auth_source', $1, true)", auth_source)
 
-def test_connection() -> bool:
-    """Probar conexión a la base de datos"""
+
+# ============================================================================
+# Helpers públicos — reemplazan execute_query / execute_update / execute_single_update
+# ============================================================================
+async def fetch_all(sql: str, *params, schema_name: str) -> list[asyncpg.Record]:
+    """SELECT que devuelve múltiples filas. Reemplaza execute_query(fetch=True)."""
+    async with get_conn(schema_name=schema_name) as conn:
+        return await conn.fetch(sql, *params)
+
+
+async def fetch_one(sql: str, *params, schema_name: str) -> Optional[asyncpg.Record]:
+    """SELECT que devuelve una fila o None. Reemplaza execute_query(fetch_one=True)."""
+    async with get_conn(schema_name=schema_name) as conn:
+        return await conn.fetchrow(sql, *params)
+
+
+async def fetch_val(sql: str, *params, schema_name: str, column: int = 0) -> Any:
+    """Escalar de la primera columna. Reemplaza fetchone()[0] y INSERT ... RETURNING id."""
+    async with get_conn(schema_name=schema_name) as conn:
+        return await conn.fetchval(sql, *params, column=column)
+
+
+async def execute(
+    sql: str,
+    *params,
+    schema_name: str,
+    user_id: Optional[str] = None,
+    auth_source: Optional[str] = None,
+) -> str:
+    """INSERT/UPDATE/DELETE sin RETURNING. Devuelve el status (ej 'UPDATE 1').
+    Reemplaza execute_update y execute_single_update(returning=False)."""
+    async with get_conn(schema_name=schema_name, user_id=user_id, auth_source=auth_source) as conn:
+        return await conn.execute(sql, *params)
+
+
+# ============================================================================
+# Transacción atómica multi-statement
+# ============================================================================
+@asynccontextmanager
+async def transaction(
+    *,
+    schema_name: str,
+    user_id: Optional[str] = None,
+    auth_source: Optional[str] = None,
+):
+    """
+    Reemplaza execute_transaction. Uso:
+        async with transaction(schema_name=s, user_id=u, auth_source="jwt") as conn:
+            await conn.execute("INSERT ...", a, b)
+            doc_id = await conn.fetchval("INSERT ... RETURNING id", c)
+        # COMMIT automático al salir sin excepción; ROLLBACK si excepción.
+
+    MejoraArranque FIX B: comparte _acquire_healthy_conn() con get_conn. El yield
+    es unico, no retryable. Si la conn muere a mitad de TX o en el COMMIT, el
+    error original se propaga (sin enmascarar con RuntimeError, sin reintentar
+    una TX parcial).
+    """
+    validated = validate_schema_name(schema_name)
+    conn = await _acquire_healthy_conn()
     try:
-        result = execute_query("SELECT 1 as test", schema_name="public")
-        return result is not None and len(result) > 0
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path TO "{validated}", public')
+            if user_id is not None:
+                await conn.execute("SELECT set_config('app.user_id', $1, true)", str(user_id))
+            if auth_source is not None:
+                await conn.execute("SELECT set_config('app.auth_source', $1, true)", auth_source)
+            yield conn
+    finally:
+        try:
+            await get_pool().release(conn)
+        except Exception as release_exc:
+            logger.warning("transaction: error al liberar conn al pool — %s", release_exc)
+
+
+# ============================================================================
+# Funciones de validación y utilitarios (ahora async)
+# ============================================================================
+async def test_connection() -> bool:
+    """Probar conexión a la base de datos."""
+    try:
+        result = await fetch_val("SELECT 1", schema_name="public")
+        return result == 1
     except Exception as e:
-        logger.error(f"Error probando conexion: {e}")
+        logger.error(f"Error probando conexión: {e}")
         return False
 
-# Funciones específicas para expedientes
-def get_case_number_format(department_acronym: str, municipality_acronym: str, year: int = None) -> str:
-    """
-    Generar formato de número de expediente.
 
-    Args:
-        department_acronym: Acrónimo del departamento
-        municipality_acronym: Acrónimo del municipio (requerido)
-        year: Año para el número (opcional, usa año actual por defecto)
-
-    Returns:
-        Template string con formato: EE-{año}-{secuencia}-{municipio}-{dept}
-    """
-    from datetime import datetime
-    if year is None:
-        year = datetime.now().year
-    return f"{EXPEDIENTE_PREFIX}-{year}-{{sequence:06d}}-{municipality_acronym}-{department_acronym}"
-
-# Funciones de validación
-def check_user_exists(user_id: str, *, schema_name: str) -> bool:
-    """
-    Verifica si un usuario existe en la base de datos.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        True si existe, False en caso contrario
-    """
-    result = execute_query(
-        "SELECT id FROM users WHERE id = %s LIMIT 1",
-        (user_id,),
-        fetch=True,
-        schema_name=schema_name
+async def check_user_exists(user_id: str, *, schema_name: str) -> bool:
+    """Verifica si un usuario existe."""
+    row = await fetch_one(
+        "SELECT id FROM users WHERE id = $1 LIMIT 1",
+        user_id,
+        schema_name=schema_name,
     )
-    return result is not None and len(result) > 0
+    return row is not None
 
-def check_document_exists(document_id: str, *, schema_name: str) -> bool:
-    """
-    Verifica si un documento existe en la base de datos.
 
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        True si existe, False en caso contrario
-    """
-    result = execute_query(
-        "SELECT id FROM document_draft WHERE id = %s LIMIT 1",
-        (document_id,),
-        fetch=True,
-        schema_name=schema_name
+async def check_document_exists(document_id: str, *, schema_name: str) -> bool:
+    """Verifica si un documento existe."""
+    row = await fetch_one(
+        "SELECT id FROM document_draft WHERE id = $1 LIMIT 1",
+        document_id,
+        schema_name=schema_name,
     )
-    return result is not None and len(result) > 0
+    return row is not None
 
-def check_case_exists(case_id: str, *, schema_name: str) -> bool:
-    """
-    Verifica si un expediente existe en la base de datos.
 
-    Args:
-        case_id: UUID del expediente
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        True si existe, False en caso contrario
-    """
-    result = execute_query(
-        "SELECT id FROM cases WHERE id = %s LIMIT 1",
-        (case_id,),
-        fetch=True,
-        schema_name=schema_name
+async def check_case_exists(case_id: str, *, schema_name: str) -> bool:
+    """Verifica si un expediente existe."""
+    row = await fetch_one(
+        "SELECT id FROM cases WHERE id = $1 LIMIT 1",
+        case_id,
+        schema_name=schema_name,
     )
-    return result is not None and len(result) > 0
+    return row is not None
 
-def get_user_basic_info(user_id: str, *, schema_name: str):
-    """
-    Obtiene información básica de un usuario.
 
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con información básica del usuario o None si no existe
-    """
-    return execute_query(
-        """
-        SELECT
-            user_id,
-            full_name,
-            profile_picture_id
-        FROM users
-        WHERE user_id = %s
-        """,
-        (user_id,),
-        fetch_one=True,
-        schema_name=schema_name
-    )
-
-def get_document_basic_info(document_id: str, *, schema_name: str):
-    """
-    Obtiene información básica de un documento.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con información básica del documento o None si no existe
-    """
-    return execute_query(
+async def get_document_basic_info(document_id: str, *, schema_name: str) -> Optional[asyncpg.Record]:
+    """Información básica de un documento."""
+    return await fetch_one(
         """
         SELECT
             dd.id as document_id,
@@ -658,9 +483,20 @@ def get_document_basic_info(document_id: str, *, schema_name: str):
             dt.name as document_type_name
         FROM document_draft dd
         LEFT JOIN document_types dt ON dd.document_type_id = dt.id
-        WHERE dd.id = %s
+        WHERE dd.id = $1
         """,
-        (document_id,),
-        fetch_one=True,
-        schema_name=schema_name
+        document_id,
+        schema_name=schema_name,
     )
+
+
+def get_case_number_format(
+    department_acronym: str,
+    municipality_acronym: str,
+    year: int = None,
+) -> str:
+    """Genera template de número de expediente (sin BD, no cambia)."""
+    from datetime import datetime
+    if year is None:
+        year = datetime.now().year
+    return f"{EXPEDIENTE_PREFIX}-{year}-{{sequence:06d}}-{municipality_acronym}-{department_acronym}"

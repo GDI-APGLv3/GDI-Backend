@@ -1,6 +1,4 @@
-# Plantilla Fly.io para el Backend GDI.
-# Renombrar valores marcados con <...> para tu propio deploy.
-app = "<YOUR_BACKEND_APP_NAME>"
+app = "<your-backend-app>"
 primary_region = "gru"
 
 [build]
@@ -12,15 +10,15 @@ primary_region = "gru"
   PYTHONUNBUFFERED = "1"
   DB_PORT = "5432"
   DB_USER = "postgres"
-  DB_NAME = "<YOUR_DB_NAME>"
-  AUTH0_DOMAIN = "<YOUR_TENANT>.auth0.com"
-  AUTH0_AUDIENCE = "https://<YOUR_TENANT>.auth0.com/api/v2/"
+  DB_NAME = "railway"
+  AUTH0_DOMAIN = "<your-tenant>.auth0.com"
+  AUTH0_AUDIENCE = "https://<your-tenant>.auth0.com/api/v2/"
   CF_R2_SIGN_EXPIRATION = "600"
-  # URLs de microservicios internos (Fly.io private networking)
-  PDFCOMPOSER_URL = "http://<YOUR_PDFCOMPOSER_APP>.internal:8080"
-  NOTARY_URL = "http://<YOUR_NOTARY_APP>.internal:8080"
-  AGENT_URL = "http://<YOUR_AGENT_APP>.internal:8080"
-  FRONTEND_URL = "https://<YOUR_FRONTEND_DOMAIN>"
+  PDFCOMPOSER_URL = "http://<your-pdfcomposer-app>.internal:8080"
+  NOTARY_URL = "http://<your-notary-app>.internal:8080"
+  EMAIL_SERVICE_URL = "http://<your-email-service>.internal:8080"
+  AGENT_URL = "http://<your-agent-app>.internal:8080"
+  FRONTEND_URL = "https://your-frontend.vercel.app"
 
 [http_service]
   internal_port = 8080

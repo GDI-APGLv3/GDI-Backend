@@ -3,14 +3,14 @@ Servicio para gestión de sectores.
 """
 
 from typing import Dict, List, Any, Optional
-from database import execute_query
+from database import fetch_all
 
 
 class SectorService:
     """Servicio para operaciones relacionadas con sectores."""
-    
+
     @staticmethod
-    def get_all_sectors_with_departments(*, schema_name: str) -> Dict[str, Any]:
+    async def get_all_sectors_with_departments(*, schema_name: str) -> Dict[str, Any]:
         """
         Obtener todos los sectores activos con sus respectivos departamentos.
         Incluye IDs, acronimos y nombre del departamento.
@@ -39,7 +39,7 @@ class SectorService:
             # Query centralizada para obtener sectores activos con nombres
             query = get_all_sectors_with_departments_query()
 
-            results = execute_query(query, schema_name=schema_name)
+            results = await fetch_all(query, schema_name=schema_name)
 
             sectors = []
             for row in results:

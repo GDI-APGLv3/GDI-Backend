@@ -5,7 +5,7 @@ Maneja el mapping de municipality_id -> schema_name.
 import logging
 from dataclasses import dataclass
 from typing import Optional
-from database import execute_query
+from database import fetch_one
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class MCPContext:
     user_id: Optional[str] = None  # Requerido para REST API con X-User-ID
 
 
-def get_schema_from_municipality(municipality_id: str) -> Optional[str]:
+async def get_schema_from_municipality(municipality_id: str) -> Optional[str]:
     """
     Obtiene el schema_name correspondiente a un municipality_id.
 
@@ -48,13 +48,12 @@ def get_schema_from_municipality(municipality_id: str) -> Optional[str]:
         query = """
             SELECT schema_name
             FROM public.municipalities
-            WHERE id = %s AND is_active = true
+            WHERE id = $1 AND is_active = true
         """
 
-        result = execute_query(
+        result = await fetch_one(
             query,
-            (municipality_id,),
-            fetch_one=True,
+            municipality_id,
             schema_name="public"  # Tabla municipalities está en schema public
         )
 
@@ -72,7 +71,7 @@ def get_schema_from_municipality(municipality_id: str) -> Optional[str]:
         raise
 
 
-def create_context(
+async def create_context(
     api_key: str,
     municipality_id: str,
     auth_source: str = "api_key",
@@ -93,7 +92,7 @@ def create_context(
     Raises:
         ValueError: Si municipality_id no es válido
     """
-    schema_name = get_schema_from_municipality(municipality_id)
+    schema_name = await get_schema_from_municipality(municipality_id)
 
     if not schema_name:
         raise ValueError(f"Municipality ID '{municipality_id}' no válido o inactivo")

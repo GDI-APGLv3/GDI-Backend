@@ -78,10 +78,10 @@ async def get_case_detail(
         logger.info(f"Get case detail request - Case: {case_id[:8]}, User: {tenant_user_id[:8]}")
 
         # Obtener y validar usuario
-        db_user_id = get_authenticated_user(tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
         # Obtener detalle del expediente
-        case_detail = CaseService.get_case_detail(case_id, db_user_id, schema_name=schema_name)
+        case_detail = await CaseService.get_case_detail(case_id, db_user_id, schema_name=schema_name)
 
         if not case_detail:
             logger.warning(f"Case not found or access denied: {case_id[:8]}")
@@ -101,7 +101,7 @@ async def get_case_detail(
     except Exception as e:
         logger.error(f"Unexpected error in get_case_detail: {str(e)}", exc_info=True)
         raise exception_to_http_exception(
-            BusinessLogicError(CASE_DETAIL_ERROR.format(error=str(e)))
+            BusinessLogicError("Error al obtener el detalle del expediente")
         )
 
 # Pydantic models for movements endpoint
@@ -157,17 +157,17 @@ async def get_case_movements(
         logger.info(f"Fetching movements for case: {case_id}")
 
         # Obtener usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting movements for case {case_id}")
 
         # Verificar permisos (404 para no revelar existencia del expediente)
-        if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
+        if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener movimientos
-        movements = CaseService.get_case_movements(case_id, schema_name=schema_name)
+        movements = await CaseService.get_case_movements(case_id, schema_name=schema_name)
         
         logger.info(f"Successfully fetched {len(movements)} movements for case {case_id}")
         
@@ -248,20 +248,20 @@ async def get_case_documents(
         logger.info(f"Fetching documents for case: {case_id}")
 
         # Obtener usuario autenticado
-        db_user_id = get_authenticated_user(tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting documents for case {case_id}")
 
         # Verificar permisos (404 para no revelar existencia del expediente)
-        if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
+        if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener documentos (incluye URLs de PDFs)
-        documents = CaseService.get_case_documents(case_id, schema_name=schema_name)
+        documents = await CaseService.get_case_documents(case_id, schema_name=schema_name)
 
         # Filtrar proposed docs: solo usuarios con permiso de edición los ven
-        permissions = CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
+        permissions = await CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
         if not permissions.get('can_link_documents', False):
             documents['proposed'] = []
             documents['total_proposed'] = 0
@@ -325,17 +325,17 @@ async def get_user_case_permissions(
         logger.info(f"Fetching permissions for case: {case_id}")
 
         # Obtener usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting permissions for case {case_id}")
 
         # Verificar permisos (404 para no revelar existencia del expediente)
-        if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
+        if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener permisos calculados
-        permissions = CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
+        permissions = await CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
         
         logger.info(f"Successfully calculated permissions for user {db_user_id} on case {case_id}")
         
@@ -400,17 +400,17 @@ async def get_case_history(
         logger.info(f"Fetching history for case: {case_id}")
 
         # Validar usuario autenticado
-        db_user_id = get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting history for case {case_id}")
 
         # Verificar permisos (404 para no revelar existencia del expediente)
-        if not CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
+        if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
         # Obtener historial del expediente
-        history = CaseService.get_case_history(case_id, schema_name=schema_name)
+        history = await CaseService.get_case_history(case_id, schema_name=schema_name)
         
         logger.info(f"Successfully fetched history for case {case_id}: {len(history['movements'])} movements")
         

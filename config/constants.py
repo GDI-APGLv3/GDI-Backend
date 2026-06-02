@@ -2,8 +2,16 @@
 Archivo para centralizar constantes utilizadas en la aplicación.
 """
 
-# Tipos de documentos excluidos en las consultas
+import os
+
+# Tipos de documentos excluidos en las consultas (autocomplete, listados generales)
 EXCLUDED_DOCUMENT_TYPES = ('CAEX', 'PV', 'TST')
+
+# Tipos excluidos SOLO en búsqueda semántica: documentos de trámite sin valor
+# informativo para el usuario (boilerplate, carátulas, snapshots automáticos).
+# IFRLM se agrega aquí pero NO a EXCLUDED_DOCUMENT_TYPES porque sí aparece en
+# el autocomplete de documentos oficiales.
+SEMANTIC_SEARCH_EXCLUDED_TYPES = EXCLUDED_DOCUMENT_TYPES + ('IFRLM',)
 
 # Estados de documentos
 EDITABLE_DOCUMENT_STATES = ['draft', 'rejected']
@@ -13,7 +21,17 @@ SENT_TO_SIGN_STATE = 'sent_to_sign'
 REJECTED_STATE = 'rejected'
 
 # Configuración de URLs de Cloudflare
-CLOUDFLARE_URL_EXPIRATION = "15 minutes"
+# La expiracion REAL de las presigned URLs se controla con CF_R2_SIGN_EXPIRATION
+# (en segundos, default 600 = 10 minutos) y se usa en
+# services/storage/cloudflare.py (ExpiresIn). Derivamos el texto informativo de
+# esa misma fuente para que NUNCA quede desalineado con lo que recibe el frontend.
+CLOUDFLARE_URL_EXPIRATION_SECONDS = int(os.getenv("CF_R2_SIGN_EXPIRATION", "600"))
+# Texto legible: "N minutos" si es multiplo exacto de 60, si no "N segundos".
+CLOUDFLARE_URL_EXPIRATION = (
+    f"{CLOUDFLARE_URL_EXPIRATION_SECONDS // 60} minutos"
+    if CLOUDFLARE_URL_EXPIRATION_SECONDS % 60 == 0
+    else f"{CLOUDFLARE_URL_EXPIRATION_SECONDS} segundos"
+)
 
 # ============================================================================
 # CASE/EXPEDIENTE CONSTANTS
@@ -225,7 +243,7 @@ START_SIGNING_NO_NUMERATOR_ERROR = "El documento debe tener un numerador asignad
 
 UNIFIED_DETAILS_DOCUMENT_NOT_FOUND_MESSAGE = "Documento no encontrado"
 UNIFIED_DETAILS_STATE_NOT_SUPPORTED_MESSAGE = "No se pueden obtener detalles de documentos en estado '{status}'"
-UNIFIED_DETAILS_USER_ID_REQUIRED_MESSAGE = "El parámetro 'user_id' es requerido para documentos en proceso de firma"
+UNIFIED_DETAILS_USER_ID_REQUIRED_MESSAGE = "El parámetro 'user_id' es requerido para obtener detalles de un documento"
 UNIFIED_DETAILS_ERROR_MESSAGE = "Error al obtener detalles del documento"
 
 # UNIFIED DETAILS STATE MAPPING

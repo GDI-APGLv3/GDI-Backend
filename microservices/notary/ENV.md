@@ -14,7 +14,7 @@
 
 | Variable | Tipo | Requerida | Default | Descripcion | Donde configurar |
 |----------|------|-----------|---------|-------------|-----------------|
-| API_KEY | Secret | Si | miapikey | API Key autenticacion | Fly Secret |
+| API_KEY | Secret | Si | your-api-key-here | API Key autenticacion | Fly Secret |
 | ENVIRONMENT | Config | Si | test | Ambiente: test o prd | fly.toml [env] |
 | CERTS_DIR | Config | No | ./certs | Directorio certificados .p12 | fly.toml [env] |
 | TSA_URL | Config | No | http://timestamp.digicert.com | Timestamp Authority | fly.toml [env] |

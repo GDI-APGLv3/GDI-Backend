@@ -6,11 +6,10 @@ Usa jsonb_set atomico + SELECT FOR UPDATE para evitar race conditions
 cuando dos usuarios editan campos distintos del mismo legajo.
 """
 
-import json
 from datetime import datetime
 from typing import Optional, Any
 from shared.logging import get_logger
-from database import execute_query, execute_transaction, check_document_exists
+from database import fetch_one, execute, transaction, check_document_exists
 from shared.exceptions import ValidationError, NotFoundError, AuthorizationError
 from services.rlm.queries import (
     get_record_detail_query,
@@ -25,7 +24,7 @@ from services.rlm.permissions import check_permission
 logger = get_logger(__name__)
 
 
-def update_field(
+async def update_field(
     record_id: str,
     field_name: str,
     user_id: str,
@@ -61,18 +60,17 @@ def update_field(
         NotFoundError, AuthorizationError, ValidationError
     """
     # 1. Lectura sin lock para validaciones rapidas (permisos, schema)
-    record = execute_query(
+    record = await fetch_one(
         get_record_detail_query(),
-        (record_id,),
+        record_id,
         schema_name=schema_name,
-        fetch_one=True
     )
 
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
     # 2. Verificar permiso can_edit
-    if not check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
+    if not await check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para editar este legajo")
 
     # 3. Validar campo contra schema
@@ -80,21 +78,19 @@ def update_field(
     validate_field_update(field_name, {}, data_schema)
 
     # 4. Obtener info del usuario para historial (antes de la transaccion)
-    user_info = execute_query(
+    user_info = await fetch_one(
         get_user_sector_info_query(),
-        (user_id,),
+        user_id,
         schema_name=schema_name,
-        fetch_one=True
     )
 
     # 5. Transaccion atomica: SELECT FOR UPDATE + jsonb_set + historial
-    with execute_transaction(schema_name=schema_name, user_id=user_id) as (conn, cursor):
+    async with transaction(schema_name=schema_name, user_id=user_id) as conn:
         # 5a. Lockear la fila y obtener datos frescos
-        cursor.execute(
+        locked_record = await conn.fetchrow(
             get_record_detail_for_update_query(),
-            (record_id,)
+            record_id
         )
-        locked_record = cursor.fetchone()
 
         if not locked_record:
             raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
@@ -125,26 +121,21 @@ def update_field(
 
         # 5e. UPDATE atomico con jsonb_set (solo toca el campo modificado)
         jsonb_path = '{' + field_name + '}'
-        cursor.execute(
+        result = await conn.fetchrow(
             update_record_field_atomic_query(),
-            (jsonb_path, json.dumps(new_field, default=str), next_exp, record_id)
+            jsonb_path, new_field, next_exp, record_id
         )
-        result = cursor.fetchone()
 
         # 5f. Registrar en historial (misma transaccion)
-        before_json = json.dumps(old_field, default=str) if old_field else None
-        after_json = json.dumps(new_field, default=str)
-        cursor.execute(
+        await conn.execute(
             insert_history_query(),
-            (
-                record_id,
-                "field_updated",
-                field_name,
-                before_json,
-                after_json,
-                user_id,
-                user_info.get("sector_id") if user_info else None,
-            )
+            record_id,
+            "field_updated",
+            field_name,
+            old_field if old_field else None,
+            new_field,
+            user_id,
+            user_info.get("sector_id") if user_info else None,
         )
 
     logger.info(f"Field '{field_name}' updated on record {record_id[:8]}")
@@ -157,7 +148,7 @@ def update_field(
     }
 
 
-def verify_field(
+async def verify_field(
     record_id: str,
     field_name: str,
     user_id: str,
@@ -186,22 +177,21 @@ def verify_field(
         NotFoundError, AuthorizationError, ValidationError
     """
     # 1. Validar que el documento de respaldo existe
-    if not check_document_exists(document_id, schema_name=schema_name):
+    if not await check_document_exists(document_id, schema_name=schema_name):
         raise NotFoundError(f"Documento de respaldo con ID '{document_id}' no encontrado")
 
     # 2. Lectura sin lock para validaciones rapidas
-    record = execute_query(
+    record = await fetch_one(
         get_record_detail_query(),
-        (record_id,),
+        record_id,
         schema_name=schema_name,
-        fetch_one=True
     )
 
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
     # 3. Verificar permiso can_verify
-    if not check_permission(record["registry_family_id"], user_id, "can_verify", schema_name=schema_name):
+    if not await check_permission(record["registry_family_id"], user_id, "can_verify", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para verificar campos en este legajo")
 
     # 4. Validar que el campo existe y tiene has_verification
@@ -213,21 +203,19 @@ def verify_field(
         raise ValidationError(f"El campo '{field_name}' no admite verificacion")
 
     # 5. Obtener info del usuario (antes de la transaccion)
-    user_info = execute_query(
+    user_info = await fetch_one(
         get_user_sector_info_query(),
-        (user_id,),
+        user_id,
         schema_name=schema_name,
-        fetch_one=True
     )
 
     # 6. Transaccion atomica: SELECT FOR UPDATE + jsonb_set + historial
-    with execute_transaction(schema_name=schema_name, user_id=user_id) as (conn, cursor):
+    async with transaction(schema_name=schema_name, user_id=user_id) as conn:
         # 6a. Lockear la fila y obtener datos frescos
-        cursor.execute(
+        locked_record = await conn.fetchrow(
             get_record_detail_for_update_query(),
-            (record_id,)
+            record_id
         )
-        locked_record = cursor.fetchone()
 
         if not locked_record:
             raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
@@ -243,14 +231,13 @@ def verify_field(
         new_field["verified_by"] = user_id
         new_field["verified_by_name"] = user_info.get("full_name", "") if user_info else ""
         new_field["verified_document_id"] = document_id
-        # Fetch document info for display
-        doc_info = execute_query(
-            """SELECT COALESCE(od.official_number, '') as official_number,
-                      COALESCE(od.resume, '') as resume
-               FROM official_documents od WHERE od.id = %s AND od.signed_at IS NOT NULL""",
-            (document_id,),
-            schema_name=schema_name,
-            fetch_one=True
+
+        # Fetch document info for display (dentro de la transaccion usando conn)
+        doc_info = await conn.fetchrow(
+            """SELECT COALESCE(official_number, '') as official_number,
+                      COALESCE(resume, '') as resume
+               FROM official_documents WHERE id = $1 AND signed_at IS NOT NULL""",
+            document_id
         )
         if doc_info:
             new_field["verified_document_number"] = doc_info.get("official_number", "")
@@ -265,26 +252,21 @@ def verify_field(
 
         # 6e. UPDATE atomico con jsonb_set
         jsonb_path = '{' + field_name + '}'
-        cursor.execute(
+        result = await conn.fetchrow(
             update_record_field_atomic_query(),
-            (jsonb_path, json.dumps(new_field, default=str), next_exp, record_id)
+            jsonb_path, new_field, next_exp, record_id
         )
-        result = cursor.fetchone()
 
         # 6f. Registrar en historial (misma transaccion)
-        before_json = json.dumps(old_field, default=str) if old_field else None
-        after_json = json.dumps(new_field, default=str)
-        cursor.execute(
+        await conn.execute(
             insert_history_query(),
-            (
-                record_id,
-                "field_verified",
-                field_name,
-                before_json,
-                after_json,
-                user_id,
-                user_info.get("sector_id") if user_info else None,
-            )
+            record_id,
+            "field_verified",
+            field_name,
+            old_field if old_field else None,
+            new_field,
+            user_id,
+            user_info.get("sector_id") if user_info else None,
         )
 
     logger.info(f"Field '{field_name}' verified on record {record_id[:8]}")

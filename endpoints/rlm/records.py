@@ -43,9 +43,9 @@ async def create_new_record(
 ):
     """Crear un nuevo legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = create_record(
+        result = await create_record(
             registry_code=request.registry_code,
             data=request.data,
             display_name=request.display_name,
@@ -84,9 +84,9 @@ async def list_all_records(
 ):
     """Listar legajos con filtros y paginación."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = list_records(
+        result = await list_records(
             user_id=db_user_id,
             schema_name=schema_name,
             registry_code=registry,
@@ -116,8 +116,8 @@ async def autocomplete_records_endpoint(
 ):
     """Autocompletado de legajos por número."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = autocomplete_records(
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await autocomplete_records(
             user_id=db_user_id,
             query=q,
             schema_name=schema_name,
@@ -141,8 +141,8 @@ async def get_record_detail_endpoint(
 ):
     """Obtener detalle completo de un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = get_record(str(record_id), db_user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await get_record(str(record_id), db_user_id, schema_name=schema_name)
 
         return RecordResponse(
             success=True,
@@ -166,8 +166,8 @@ async def update_record_endpoint(
 ):
     """Actualizar estado y/o nombre de un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = update_record(
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await update_record(
             record_id=str(record_id),
             user_id=db_user_id,
             schema_name=schema_name,
@@ -204,7 +204,7 @@ async def generate_record_report(
     Requiere permiso can_edit sobre la familia del registro.
     """
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
         result = await generate_ifrlm(
             record_id=str(record_id),

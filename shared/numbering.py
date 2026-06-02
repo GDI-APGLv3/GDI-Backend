@@ -34,12 +34,12 @@ EJEMPLO DE USO:
     'CAEX-2025-00000001-SMG-ADGEN'
 """
 
-import json
-from typing import Tuple, Optional, List
-from database import get_db_connection
+from datetime import datetime, timezone
+from typing import Tuple, Optional
+import asyncpg
+from database import get_conn
 from shared.exceptions import ValidationError
 from shared.logging import get_logger
-from psycopg2.errors import UniqueViolation
 
 logger = get_logger(__name__)
 
@@ -49,26 +49,25 @@ logger = get_logger(__name__)
 OFFICIAL_DOCUMENTS_LOCK_ID = 888888
 
 
-def _get_city_acronym(cursor, schema_name: str) -> str:
+async def _get_city_acronym(conn, schema_name: str) -> str:
     """
     Obtiene el acrónimo del municipio desde public.municipalities.
 
     Args:
-        cursor: Cursor de psycopg2 activo.
+        conn: Conexión asyncpg activa.
         schema_name: Schema del tenant.
 
     Returns:
         Acrónimo del municipio, o 'UNK' si no se encuentra.
     """
-    cursor.execute(
-        "SELECT acronym as city_acronym FROM public.municipalities WHERE schema_name = %s",
-        (schema_name,)
+    row = await conn.fetchrow(
+        "SELECT acronym as city_acronym FROM public.municipalities WHERE schema_name = $1",
+        schema_name
     )
-    result = cursor.fetchone()
-    return result['city_acronym'] if result else 'UNK'
+    return row['city_acronym'] if row else 'UNK'
 
 
-def _get_user_department(cursor, user_id: str) -> Tuple[str, Optional[str]]:
+async def _get_user_department(conn, user_id: str) -> Tuple[str, Optional[str]]:
     """
     Obtiene el acrónimo y UUID del departamento del usuario.
 
@@ -76,7 +75,7 @@ def _get_user_department(cursor, user_id: str) -> Tuple[str, Optional[str]]:
     activo como fallback (comportamiento original).
 
     Args:
-        cursor: Cursor de psycopg2 activo.
+        conn: Conexión asyncpg activa.
         user_id: UUID del usuario numerador.
 
     Returns:
@@ -86,7 +85,7 @@ def _get_user_department(cursor, user_id: str) -> Tuple[str, Optional[str]]:
     Raises:
         ValidationError: Si el usuario no existe en la BD.
     """
-    cursor.execute(
+    user_info = await conn.fetchrow(
         """
         SELECT
             d.acronym as dept_acronym,
@@ -94,11 +93,10 @@ def _get_user_department(cursor, user_id: str) -> Tuple[str, Optional[str]]:
         FROM users u
         LEFT JOIN sectors s ON u.sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
-        WHERE u.id = %s
+        WHERE u.id = $1
         """,
-        (user_id,)
+        user_id
     )
-    user_info = cursor.fetchone()
 
     if not user_info:
         logger.error(f"Usuario {user_id[:8]}... no encontrado")
@@ -106,7 +104,7 @@ def _get_user_department(cursor, user_id: str) -> Tuple[str, Optional[str]]:
 
     if not user_info['dept_acronym']:
         logger.info("Usuario sin sector, usando departamento fallback")
-        cursor.execute(
+        fallback = await conn.fetchrow(
             """
             SELECT d.acronym as dept_acronym, d.id as department_id
             FROM departments d
@@ -114,7 +112,6 @@ def _get_user_department(cursor, user_id: str) -> Tuple[str, Optional[str]]:
             LIMIT 1
             """
         )
-        fallback = cursor.fetchone()
 
         if not fallback:
             raise ValidationError("No hay departamentos activos en el sistema")
@@ -197,52 +194,50 @@ async def generate_official_number(
     logger.info(f"Generando número oficial para tipo: {document_type_acronym}")
     logger.info(f"Usuario: {user_id[:8]}..., Año: {year}")
 
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
+    async with get_conn(schema_name=schema_name) as conn:
+        # ================================================================
+        # PASO 1: OBTENER DATOS DEL USUARIO Y MUNICIPIO
+        # ================================================================
+        city_acronym = await _get_city_acronym(conn, schema_name)
+        dept_acronym, department_id = await _get_user_department(conn, user_id)
+
+        logger.info(f"Ciudad: {city_acronym}, Departamento: {dept_acronym}")
+
+        # ================================================================
+        # PASO 2: ADVISORY LOCK + MAX+1 + INSERT + COMMIT (~5ms)
+        # ================================================================
+        logger.info(f"Adquiriendo advisory lock {OFFICIAL_DOCUMENTS_LOCK_ID}...")
+        await conn.execute("SET LOCAL lock_timeout = '10s'")
+        await conn.execute(f"SELECT pg_advisory_xact_lock({OFFICIAL_DOCUMENTS_LOCK_ID})")
+
+        # Obtener siguiente número de secuencia GLOBAL (seguro bajo lock)
+        result = await conn.fetchrow(
+            """
+            SELECT COALESCE(MAX(global_sequence), 0) + 1 as next_number
+            FROM official_documents
+            WHERE year = $1
+            AND global_sequence IS NOT NULL
+            """,
+            year
+        )
+        next_number = result['next_number']
+
+        # Formatear número oficial completo
+        official_number = (
+            f"{document_type_acronym}-{year}-{next_number:08d}"
+            f"-{city_acronym}-{dept_acronym}"
+        )
+
+        logger.info(f"Número oficial generado: {official_number}")
+        logger.info(f"Secuencia global: {next_number}")
+
+        # INSERT en official_documents con signed_at=NULL
+        # El caller hará UPDATE cuando la firma externa se complete.
+        # Para CAEX/PV (callers directos de generate_official_number), insertamos
+        # directamente CONFIRMED sin pasar por RESERVED.
         try:
-            # ================================================================
-            # PASO 1: OBTENER DATOS DEL USUARIO Y MUNICIPIO
-            # ================================================================
-            city_acronym = _get_city_acronym(cursor, schema_name)
-            dept_acronym, department_id = _get_user_department(cursor, user_id)
-
-            logger.info(f"Ciudad: {city_acronym}, Departamento: {dept_acronym}")
-
-            # ================================================================
-            # PASO 2: ADVISORY LOCK + MAX+1 + INSERT + COMMIT (~5ms)
-            # ================================================================
-            logger.info(f"Adquiriendo advisory lock {OFFICIAL_DOCUMENTS_LOCK_ID}...")
-            cursor.execute("SET LOCAL lock_timeout = '10s'")
-            cursor.execute(f"SELECT pg_advisory_xact_lock({OFFICIAL_DOCUMENTS_LOCK_ID})")
-
-            # Obtener siguiente número de secuencia GLOBAL (seguro bajo lock)
-            cursor.execute(
-                """
-                SELECT COALESCE(MAX(global_sequence), 0) + 1 as next_number
-                FROM official_documents
-                WHERE year = %s
-                AND global_sequence IS NOT NULL
-                """,
-                (year,)
-            )
-            result = cursor.fetchone()
-            next_number = result['next_number']
-
-            # Formatear número oficial completo
-            official_number = (
-                f"{document_type_acronym}-{year}-{next_number:08d}"
-                f"-{city_acronym}-{dept_acronym}"
-            )
-
-            logger.info(f"Número oficial generado: {official_number}")
-            logger.info(f"Secuencia global: {next_number}")
-
-            # INSERT en official_documents con signed_at=NULL
-            # El caller hará UPDATE cuando la firma externa se complete.
-            # Para CAEX/PV (callers directos de generate_official_number), insertamos
-            # directamente CONFIRMED sin pasar por RESERVED.
-            try:
-                cursor.execute(
+            async with conn.transaction():  # SAVEPOINT — si falla solo revierte esto
+                await conn.execute(
                     """
                     INSERT INTO official_documents (
                         id,
@@ -261,75 +256,55 @@ async def generate_official_number(
                         signer_sector_ids,
                         resume
                     ) VALUES (
-                        %s, %s, %s::jsonb, %s, %s,
-                        %s, %s, NULL,
-                        %s, %s,
+                        $1, $2, $3::jsonb, $4, $5,
+                        $6, $7, NULL,
+                        $8, $9,
                         'CONFIRMED', 'GLOBAL',
-                        %s::jsonb, %s, %s
+                        $10::jsonb, $11, $12
                     )
                     """,
-                    (
-                        document_id,
-                        reference,
-                        json.dumps(content),
-                        official_number,
-                        year,
-                        department_id,
-                        user_id,
-                        document_type_id,
-                        next_number,
-                        json.dumps(signers) if signers is not None else None,
-                        signer_sector_ids,
-                        resume,
-                    )
+                    document_id,
+                    reference,
+                    content,
+                    official_number,
+                    year,
+                    department_id,
+                    user_id,
+                    document_type_id,
+                    next_number,
+                    signers,
+                    signer_sector_ids,
+                    resume,
                 )
-            except UniqueViolation as e:
-                # Race de doble-click: otro request ya insertó este document_id
-                constraint_name = e.diag.constraint_name or ''
-                if 'official_documents_pkey' in constraint_name or 'id' in constraint_name:
-                    conn.rollback()
-                    logger.info(f"Race detectado en INSERT (UniqueViolation PK), recuperando número del request paralelo")
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT official_number, global_sequence, department_id FROM official_documents WHERE id = %s",
-                        (document_id,)
-                    )
-                    existing = cursor.fetchone()
-                    if existing:
-                        logger.info(f"Race detectado, reusando número del request paralelo: {existing['official_number']}")
-                        return existing['official_number'], existing['department_id'], existing['global_sequence']
-                # Otra violación unique no esperada (bug): re-raise
-                raise
-
-            # COMMIT inmediato: libera el advisory_xact_lock (~5ms total)
-            conn.commit()
-            logger.info(f"Número reservado en BD: {official_number}")
-
-            return official_number, department_id, next_number
-
-        except UniqueViolation:
-            # UniqueViolation ya manejada arriba (race PK) - si llega aquí es re-raise
-            conn.rollback()
+        except asyncpg.UniqueViolationError as e:
+            # Race de doble-click: otro request ya insertó este document_id
+            # Savepoint revertido; outer transaction sigue activa.
+            constraint_name = e.constraint_name or ''
+            if 'official_documents_pkey' in constraint_name or 'id' in constraint_name:
+                logger.info(f"Race detectado en INSERT (UniqueViolation PK), recuperando número del request paralelo")
+                existing = await conn.fetchrow(
+                    "SELECT official_number, global_sequence, department_id FROM official_documents WHERE id = $1",
+                    document_id
+                )
+                if existing:
+                    logger.info(f"Race detectado, reutilizando número del request paralelo: {existing['official_number']}")
+                    return existing['official_number'], str(existing['department_id']), existing['global_sequence']
+            # Otra violación unique no esperada (bug): re-raise
             raise
-        except Exception:
-            conn.rollback()
-            raise
+
+        logger.info(f"Número reservado en BD: {official_number}")
+        return official_number, str(department_id), next_number
 
 
 # ============================================================
-# HELPERS PARA NUMERACION UNIFICADA (reserve/confirm/cancel)
+# CONSTANTES — Timeouts de reserva de numeración
 # ============================================================
-
-def _get_reservation_timeouts() -> tuple:
-    """
-    Timeouts de reserva de numeración.
-    Retorna (special_minutes, global_minutes).
-    Configurable via env vars, defaults: SPECIAL=5, GLOBAL=2.
-    """
-    import os
-    special = int(os.getenv('SPECIAL_NUMBERING_RESERVATION_TIMEOUT_MINUTES', '5'))
-    global_ = int(os.getenv('GLOBAL_NUMBERING_RESERVATION_TIMEOUT_MINUTES', '2'))
-    return special, global_
+# Valores fijos por diseño. Coordinación con sesión de firma digital
+# con token (frontend 3 min): GLOBAL=4 cubre el flujo asíncrono de
+# AutoFirma sin que otros numeradores GLOBAL gatillen cancel automático
+# antes de que el user termine de firmar. SPECIAL=5 ya cubría desde antes.
+SPECIAL_NUMBERING_TIMEOUT_MIN = 5
+GLOBAL_NUMBERING_TIMEOUT_MIN = 4
 
 
 # ============================================================
@@ -370,325 +345,159 @@ async def reserve_number(
     """
     logger.info(f"reserve_number: tipo={document_type_acronym} doc={document_id[:8]}...")
 
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
-        try:
-            # PASO 1: Datos del usuario y municipio
-            city_acronym = _get_city_acronym(cursor, schema_name)
-            dept_acronym, department_id = _get_user_department(cursor, user_id)
+    async with get_conn(schema_name=schema_name) as conn:
+        # PASO 1: Datos del usuario y municipio
+        city_acronym = await _get_city_acronym(conn, schema_name)
+        dept_acronym, department_id = await _get_user_department(conn, user_id)
 
-            # PASO 2: Leer flag special_numbering de la tabla del TENANT (no global)
-            cursor.execute(
+        # PASO 2: Leer flag special_numbering de la tabla del TENANT (no global)
+        type_row = await conn.fetchrow(
+            """
+            SELECT id, special_numbering
+            FROM document_types
+            WHERE id = $1
+            """,
+            document_type_id
+        )
+        if not type_row:
+            raise ValidationError(f"Tipo de documento {document_type_id} no encontrado")
+
+        is_special = bool(type_row['special_numbering'])
+
+        # PASO 3: Leer timeouts configurados
+        special_timeout_min = SPECIAL_NUMBERING_TIMEOUT_MIN
+        global_timeout_min = GLOBAL_NUMBERING_TIMEOUT_MIN
+
+        if is_special:
+            # ============================================================
+            # BRANCH SPECIAL
+            # ============================================================
+            logger.info(f"reserve_number: regime=SPECIAL timeout={special_timeout_min}min")
+
+            # 3a. INSERT ON CONFLICT DO UPDATE en counter para row-level lock
+            counter_row = await conn.fetchrow(
                 """
-                SELECT id, special_numbering
-                FROM document_types
-                WHERE id = %s
+                INSERT INTO document_number_counters
+                    (document_type_id, year, department_id, last_number, active_reservation_document_id)
+                VALUES
+                    ($1, $2, $3, 0, NULL)
+                ON CONFLICT (document_type_id, year, department_id)
+                DO UPDATE SET updated_at = NOW()
+                RETURNING last_number, active_reservation_document_id
                 """,
-                (document_type_id,)
+                document_type_id, year, department_id
             )
-            type_row = cursor.fetchone()
-            if not type_row:
-                raise ValidationError(f"Tipo de documento {document_type_id} no encontrado")
+            counter_last_number = counter_row['last_number']
+            active_doc_id = counter_row['active_reservation_document_id']
 
-            is_special = bool(type_row['special_numbering'])
-
-            # PASO 3: Leer timeouts configurados
-            special_timeout_min, global_timeout_min = _get_reservation_timeouts()
-
-            if is_special:
-                # ============================================================
-                # BRANCH SPECIAL
-                # ============================================================
-                logger.info(f"reserve_number: regime=SPECIAL timeout={special_timeout_min}min")
-
-                # 3a. INSERT ON CONFLICT DO UPDATE en counter para row-level lock
-                cursor.execute(
+            # 3b. Chequear si hay reserva RESERVED activa para esta terna
+            if active_doc_id is not None:
+                active_reservation = await conn.fetchrow(
                     """
-                    INSERT INTO document_number_counters
-                        (document_type_id, year, department_id, last_number, active_reservation_document_id)
-                    VALUES
-                        (%s, %s, %s, 0, NULL)
-                    ON CONFLICT (document_type_id, year, department_id)
-                    DO UPDATE SET updated_at = NOW()
-                    RETURNING last_number, active_reservation_document_id
-                    """,
-                    (document_type_id, year, department_id)
-                )
-                counter_row = cursor.fetchone()
-                counter_last_number = counter_row['last_number']
-                active_doc_id = counter_row['active_reservation_document_id']
-
-                # 3b. Chequear si hay reserva RESERVED activa para esta terna
-                if active_doc_id is not None:
-                    cursor.execute(
-                        """
-                        SELECT id, reserved_at, special_number
-                        FROM official_documents
-                        WHERE id = %s AND reservation_status = 'RESERVED'
-                        """,
-                        (active_doc_id,)
-                    )
-                    active_reservation = cursor.fetchone()
-
-                    if active_reservation:
-                        if str(active_reservation['id']) == str(document_id):
-                            # Mismo document_id: retry del mismo usuario → reutilizar
-                            cursor.execute(
-                                """
-                                SELECT official_number, department_id, special_number
-                                FROM official_documents
-                                WHERE id = %s
-                                """,
-                                (document_id,)
-                            )
-                            existing = cursor.fetchone()
-                            conn.commit()
-                            logger.info(
-                                f"reserve_number SPECIAL: retry detectado, "
-                                f"reutilizando {existing['official_number']}"
-                            )
-                            return (
-                                existing['official_number'],
-                                existing['department_id'],
-                                existing['special_number'],
-                            )
-                        else:
-                            # Otro document_id: verificar timeout
-                            from datetime import datetime, timezone
-                            now = datetime.now(timezone.utc)
-                            reserved_at = active_reservation['reserved_at']
-                            elapsed_minutes = (now - reserved_at).total_seconds() / 60
-
-                            if elapsed_minutes < special_timeout_min:
-                                conn.rollback()
-                                raise ValidationError(
-                                    f"Hay una firma en curso para este tipo de documento en su departamento. "
-                                    f"Intente nuevamente en "
-                                    f"{int(special_timeout_min - elapsed_minutes + 1)} minuto(s)."
-                                )
-                            else:
-                                logger.warning(
-                                    f"reserve_number SPECIAL: reserva {active_doc_id[:8]}... expirada "
-                                    f"({elapsed_minutes:.1f}min > {special_timeout_min}min), "
-                                    f"marcando CANCELLED"
-                                )
-                                cursor.execute(
-                                    """
-                                    UPDATE official_documents
-                                    SET reservation_status = 'CANCELLED'
-                                    WHERE id = %s AND reservation_status = 'RESERVED'
-                                    """,
-                                    (active_doc_id,)
-                                )
-                                cursor.execute(
-                                    """
-                                    UPDATE document_number_counters
-                                    SET active_reservation_document_id = NULL
-                                    WHERE document_type_id = %s AND year = %s AND department_id = %s
-                                    """,
-                                    (document_type_id, year, department_id)
-                                )
-
-                # 3c. Buscar CANCELLED de esta terna para reciclar (FIFO por reserved_at)
-                cursor.execute(
-                    """
-                    SELECT id, special_number
+                    SELECT id, reserved_at, special_number
                     FROM official_documents
-                    WHERE document_type_id = %s
-                      AND department_id = %s
-                      AND year = %s
-                      AND reservation_status = 'CANCELLED'
-                      AND numbering_regime = 'SPECIAL'
-                    ORDER BY reserved_at ASC
-                    LIMIT 1
-                    FOR UPDATE SKIP LOCKED
+                    WHERE id = $1 AND reservation_status = 'RESERVED'
                     """,
-                    (document_type_id, department_id, year)
-                )
-                recycled = cursor.fetchone()
-
-                if recycled:
-                    next_special_number = recycled['special_number']
-                    cursor.execute(
-                        "DELETE FROM official_documents WHERE id = %s AND reservation_status = 'CANCELLED'",
-                        (recycled['id'],)
-                    )
-                    logger.info(f"reserve_number SPECIAL: reciclando numero {next_special_number}")
-                else:
-                    # 3d. Incrementar counter
-                    next_special_number = counter_last_number + 1
-                    logger.info(f"reserve_number SPECIAL: nuevo numero {next_special_number}")
-
-                official_number = (
-                    f"{document_type_acronym}-{year}-{next_special_number:04d}"
-                    f"-{city_acronym}-{dept_acronym}"
+                    active_doc_id
                 )
 
-                # 3e. INSERT en official_documents
-                try:
-                    cursor.execute(
-                        """
-                        INSERT INTO official_documents (
-                            id, reference, content, official_number, year,
-                            department_id, numerator_id, signed_at,
-                            document_type_id, global_sequence,
-                            special_number, numbering_regime, reservation_status, reserved_at,
-                            signers, signer_sector_ids, resume
-                        ) VALUES (
-                            %s, %s, %s::jsonb, %s, %s,
-                            %s, %s, NULL,
-                            %s, NULL,
-                            %s, 'SPECIAL', 'RESERVED', NOW(),
-                            %s::jsonb, %s, %s
+                if active_reservation:
+                    if str(active_reservation['id']) == str(document_id):
+                        # Mismo document_id: retry del mismo usuario → reutilizar
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT official_number, department_id, special_number
+                            FROM official_documents
+                            WHERE id = $1
+                            """,
+                            document_id
                         )
-                        """,
-                        (
-                            document_id, reference, json.dumps(content), official_number, year,
-                            department_id, user_id,
-                            document_type_id,
-                            next_special_number,
-                            json.dumps(signers) if signers is not None else None,
-                            signer_sector_ids, resume,
-                        )
-                    )
-                except UniqueViolation:
-                    conn.rollback()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT official_number, department_id, special_number FROM official_documents WHERE id = %s",
-                        (document_id,)
-                    )
-                    existing = cursor.fetchone()
-                    if existing:
                         logger.info(
-                            f"reserve_number SPECIAL: race PK detectado, "
+                            f"reserve_number SPECIAL: retry detectado, "
                             f"reutilizando {existing['official_number']}"
                         )
                         return (
                             existing['official_number'],
-                            existing['department_id'],
+                            str(existing['department_id']),
                             existing['special_number'],
                         )
-                    raise
-
-                # 3f. UPDATE counter: last_number y active_reservation_document_id
-                cursor.execute(
-                    """
-                    UPDATE document_number_counters
-                    SET last_number = GREATEST(last_number, %s),
-                        active_reservation_document_id = %s,
-                        updated_at = NOW()
-                    WHERE document_type_id = %s AND year = %s AND department_id = %s
-                    """,
-                    (next_special_number, document_id, document_type_id, year, department_id)
-                )
-
-                conn.commit()
-                logger.info(f"reserve_number SPECIAL: reservado {official_number}")
-                return official_number, department_id, next_special_number
-
-            else:
-                # ============================================================
-                # BRANCH GLOBAL
-                # ============================================================
-                logger.info(f"reserve_number: regime=GLOBAL timeout={global_timeout_min}min")
-
-                # 4a. Advisory lock 888888
-                logger.info(f"Adquiriendo advisory lock {OFFICIAL_DOCUMENTS_LOCK_ID}...")
-                cursor.execute("SET LOCAL lock_timeout = '10s'")
-                cursor.execute(f"SELECT pg_advisory_xact_lock({OFFICIAL_DOCUMENTS_LOCK_ID})")
-
-                # 4b. Chequear si este document_id ya tiene reserva RESERVED (retry)
-                cursor.execute(
-                    """
-                    SELECT id, official_number, department_id, global_sequence, reserved_at
-                    FROM official_documents
-                    WHERE id = %s AND reservation_status = 'RESERVED'
-                    """,
-                    (document_id,)
-                )
-                existing_reserved = cursor.fetchone()
-
-                if existing_reserved:
-                    from datetime import datetime, timezone
-                    now = datetime.now(timezone.utc)
-                    reserved_at = existing_reserved['reserved_at']
-                    elapsed_minutes = (now - reserved_at).total_seconds() / 60
-
-                    if elapsed_minutes >= global_timeout_min:
-                        logger.warning(
-                            f"reserve_number GLOBAL: reserva {document_id[:8]}... expirada "
-                            f"({elapsed_minutes:.1f}min > {global_timeout_min}min), "
-                            f"marcando CANCELLED"
-                        )
-                        cursor.execute(
-                            """
-                            UPDATE official_documents
-                            SET reservation_status = 'CANCELLED'
-                            WHERE id = %s AND reservation_status = 'RESERVED'
-                            """,
-                            (document_id,)
-                        )
-                        # Continuar: obtener número nuevo abajo
                     else:
-                        # Retry válido: reutilizar número ya reservado
-                        conn.commit()
-                        logger.info(
-                            f"reserve_number GLOBAL: retry detectado, "
-                            f"reutilizando {existing_reserved['official_number']}"
-                        )
-                        return (
-                            existing_reserved['official_number'],
-                            existing_reserved['department_id'],
-                            existing_reserved['global_sequence'],
-                        )
+                        # Otro document_id: verificar timeout
+                        now = datetime.now(timezone.utc)
+                        reserved_at = active_reservation['reserved_at']
+                        elapsed_minutes = (now - reserved_at).total_seconds() / 60
 
-                # 4c. Buscar CANCELLED de scope GLOBAL mismo año para reciclar (FIFO)
-                cursor.execute(
-                    """
-                    SELECT id, global_sequence
-                    FROM official_documents
-                    WHERE year = %s
-                      AND reservation_status = 'CANCELLED'
-                      AND numbering_regime = 'GLOBAL'
-                    ORDER BY reserved_at ASC
-                    LIMIT 1
-                    FOR UPDATE SKIP LOCKED
-                    """,
-                    (year,)
+                        if elapsed_minutes < special_timeout_min:
+                            raise ValidationError(
+                                f"Hay una firma en curso para este tipo de documento en su departamento. "
+                                f"Intente nuevamente en "
+                                f"{int(special_timeout_min - elapsed_minutes + 1)} minuto(s)."
+                            )
+                        else:
+                            logger.warning(
+                                f"reserve_number SPECIAL: reserva {active_doc_id[:8]}... expirada "
+                                f"({elapsed_minutes:.1f}min > {special_timeout_min}min), "
+                                f"marcando CANCELLED"
+                            )
+                            await conn.execute(
+                                """
+                                UPDATE official_documents
+                                SET reservation_status = 'CANCELLED'
+                                WHERE id = $1 AND reservation_status = 'RESERVED'
+                                """,
+                                active_doc_id
+                            )
+                            await conn.execute(
+                                """
+                                UPDATE document_number_counters
+                                SET active_reservation_document_id = NULL
+                                WHERE document_type_id = $1 AND year = $2 AND department_id = $3
+                                """,
+                                document_type_id, year, department_id
+                            )
+
+            # 3c. Buscar CANCELLED de esta terna para reciclar (FIFO por reserved_at)
+            recycled = await conn.fetchrow(
+                """
+                SELECT id, special_number
+                FROM official_documents
+                WHERE document_type_id = $1
+                  AND department_id = $2
+                  AND year = $3
+                  AND reservation_status = 'CANCELLED'
+                  AND numbering_regime = 'SPECIAL'
+                ORDER BY reserved_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                document_type_id, department_id, year
+            )
+
+            if recycled:
+                next_special_number = recycled['special_number']
+                await conn.execute(
+                    "DELETE FROM document_chunks WHERE official_document_id = $1",
+                    recycled['id']
                 )
-                recycled_global = cursor.fetchone()
-
-                if recycled_global:
-                    next_number = recycled_global['global_sequence']
-                    cursor.execute(
-                        "DELETE FROM official_documents WHERE id = %s AND reservation_status = 'CANCELLED'",
-                        (recycled_global['id'],)
-                    )
-                    logger.info(f"reserve_number GLOBAL: reciclando global_sequence {next_number}")
-                else:
-                    # 4d. MAX+1 seguro bajo advisory lock
-                    cursor.execute(
-                        """
-                        SELECT COALESCE(MAX(global_sequence), 0) + 1 as next_number
-                        FROM official_documents
-                        WHERE year = %s
-                        AND global_sequence IS NOT NULL
-                        """,
-                        (year,)
-                    )
-                    result = cursor.fetchone()
-                    next_number = result['next_number']
-
-                official_number = (
-                    f"{document_type_acronym}-{year}-{next_number:08d}"
-                    f"-{city_acronym}-{dept_acronym}"
+                await conn.execute(
+                    "DELETE FROM official_documents WHERE id = $1 AND reservation_status = 'CANCELLED'",
+                    recycled['id']
                 )
+                logger.info(f"reserve_number SPECIAL: reciclando numero {next_special_number}")
+            else:
+                # 3d. Incrementar counter
+                next_special_number = counter_last_number + 1
+                logger.info(f"reserve_number SPECIAL: nuevo numero {next_special_number}")
 
-                # 4e. INSERT en official_documents (SIEMPRE: tanto reciclaje como nuevo)
-                # Si fue reciclaje, el DELETE del CANCELLED ya se hizo en 4c.
-                try:
-                    cursor.execute(
+            official_number = (
+                f"{document_type_acronym}-{year}-{next_special_number:04d}"
+                f"-{city_acronym}-{dept_acronym}"
+            )
+
+            # 3e. INSERT en official_documents
+            try:
+                async with conn.transaction():  # SAVEPOINT — si falla solo revierte esto
+                    await conn.execute(
                         """
                         INSERT INTO official_documents (
                             id, reference, content, official_number, year,
@@ -697,54 +506,198 @@ async def reserve_number(
                             special_number, numbering_regime, reservation_status, reserved_at,
                             signers, signer_sector_ids, resume
                         ) VALUES (
-                            %s, %s, %s::jsonb, %s, %s,
-                            %s, %s, NULL,
-                            %s, %s,
-                            NULL, 'GLOBAL', 'RESERVED', NOW(),
-                            %s::jsonb, %s, %s
+                            $1, $2, $3::jsonb, $4, $5,
+                            $6, $7, NULL,
+                            $8, NULL,
+                            $9, 'SPECIAL', 'RESERVED', NOW(),
+                            $10::jsonb, $11, $12
                         )
                         """,
-                        (
-                            document_id, reference, json.dumps(content), official_number, year,
-                            department_id, user_id,
-                            document_type_id, next_number,
-                            json.dumps(signers) if signers is not None else None,
-                            signer_sector_ids, resume,
-                        )
+                        document_id, reference, content, official_number, year,
+                        department_id, user_id,
+                        document_type_id,
+                        next_special_number,
+                        signers,
+                        signer_sector_ids, resume,
                     )
-                except UniqueViolation as e:
-                    constraint_name = e.diag.constraint_name or ''
-                    if 'official_documents_pkey' in constraint_name or 'id' in constraint_name:
-                        conn.rollback()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "SELECT official_number, global_sequence, department_id FROM official_documents WHERE id = %s",
-                            (document_id,)
+            except asyncpg.UniqueViolationError:
+                # Savepoint revertido; outer transaction sigue activa.
+                existing = await conn.fetchrow(
+                    "SELECT official_number, department_id, special_number FROM official_documents WHERE id = $1",
+                    document_id
+                )
+                if existing:
+                    logger.info(
+                        f"reserve_number SPECIAL: race PK detectado, "
+                        f"reutilizando {existing['official_number']}"
+                    )
+                    return (
+                        existing['official_number'],
+                        str(existing['department_id']),
+                        existing['special_number'],
+                    )
+                raise
+
+            # 3f. UPDATE counter: last_number y active_reservation_document_id
+            await conn.execute(
+                """
+                UPDATE document_number_counters
+                SET last_number = GREATEST(last_number, $1),
+                    active_reservation_document_id = $2,
+                    updated_at = NOW()
+                WHERE document_type_id = $3 AND year = $4 AND department_id = $5
+                """,
+                next_special_number, document_id, document_type_id, year, department_id
+            )
+
+            logger.info(f"reserve_number SPECIAL: reservado {official_number}")
+            return official_number, str(department_id), next_special_number
+
+        else:
+            # ============================================================
+            # BRANCH GLOBAL
+            # ============================================================
+            logger.info(f"reserve_number: regime=GLOBAL timeout={global_timeout_min}min")
+
+            # 4a. Advisory lock 888888
+            logger.info(f"Adquiriendo advisory lock {OFFICIAL_DOCUMENTS_LOCK_ID}...")
+            await conn.execute("SET LOCAL lock_timeout = '10s'")
+            await conn.execute(f"SELECT pg_advisory_xact_lock({OFFICIAL_DOCUMENTS_LOCK_ID})")
+
+            # 4b. Chequear si este document_id ya tiene reserva RESERVED (retry)
+            existing_reserved = await conn.fetchrow(
+                """
+                SELECT id, official_number, department_id, global_sequence, reserved_at
+                FROM official_documents
+                WHERE id = $1 AND reservation_status = 'RESERVED'
+                """,
+                document_id
+            )
+
+            if existing_reserved:
+                now = datetime.now(timezone.utc)
+                reserved_at = existing_reserved['reserved_at']
+                elapsed_minutes = (now - reserved_at).total_seconds() / 60
+
+                if elapsed_minutes >= global_timeout_min:
+                    logger.warning(
+                        f"reserve_number GLOBAL: reserva {document_id[:8]}... expirada "
+                        f"({elapsed_minutes:.1f}min > {global_timeout_min}min), "
+                        f"marcando CANCELLED"
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE official_documents
+                        SET reservation_status = 'CANCELLED'
+                        WHERE id = $1 AND reservation_status = 'RESERVED'
+                        """,
+                        document_id
+                    )
+                    # Continuar: obtener número nuevo abajo
+                else:
+                    # Retry válido: reutilizar número ya reservado
+                    logger.info(
+                        f"reserve_number GLOBAL: retry detectado, "
+                        f"reutilizando {existing_reserved['official_number']}"
+                    )
+                    return (
+                        existing_reserved['official_number'],
+                        str(existing_reserved['department_id']),
+                        existing_reserved['global_sequence'],
+                    )
+
+            # 4c. Buscar CANCELLED de scope GLOBAL mismo año para reciclar (FIFO)
+            recycled_global = await conn.fetchrow(
+                """
+                SELECT id, global_sequence
+                FROM official_documents
+                WHERE year = $1
+                  AND reservation_status = 'CANCELLED'
+                  AND numbering_regime = 'GLOBAL'
+                ORDER BY reserved_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                year
+            )
+
+            if recycled_global:
+                next_number = recycled_global['global_sequence']
+                await conn.execute(
+                    "DELETE FROM document_chunks WHERE official_document_id = $1",
+                    recycled_global['id']
+                )
+                await conn.execute(
+                    "DELETE FROM official_documents WHERE id = $1 AND reservation_status = 'CANCELLED'",
+                    recycled_global['id']
+                )
+                logger.info(f"reserve_number GLOBAL: reciclando global_sequence {next_number}")
+            else:
+                # 4d. MAX+1 seguro bajo advisory lock
+                result = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(MAX(global_sequence), 0) + 1 as next_number
+                    FROM official_documents
+                    WHERE year = $1
+                    AND global_sequence IS NOT NULL
+                    """,
+                    year
+                )
+                next_number = result['next_number']
+
+            official_number = (
+                f"{document_type_acronym}-{year}-{next_number:08d}"
+                f"-{city_acronym}-{dept_acronym}"
+            )
+
+            # 4e. INSERT en official_documents (SIEMPRE: tanto reciclaje como nuevo)
+            # Si fue reciclaje, el DELETE del CANCELLED ya se hizo en 4c.
+            try:
+                async with conn.transaction():  # SAVEPOINT — si falla solo revierte esto
+                    await conn.execute(
+                        """
+                        INSERT INTO official_documents (
+                            id, reference, content, official_number, year,
+                            department_id, numerator_id, signed_at,
+                            document_type_id, global_sequence,
+                            special_number, numbering_regime, reservation_status, reserved_at,
+                            signers, signer_sector_ids, resume
+                        ) VALUES (
+                            $1, $2, $3::jsonb, $4, $5,
+                            $6, $7, NULL,
+                            $8, $9,
+                            NULL, 'GLOBAL', 'RESERVED', NOW(),
+                            $10::jsonb, $11, $12
                         )
-                        existing = cursor.fetchone()
-                        if existing:
-                            logger.info(
-                                f"reserve_number GLOBAL: race PK detectado, "
-                                f"reutilizando {existing['official_number']}"
-                            )
-                            return (
-                                existing['official_number'],
-                                existing['department_id'],
-                                existing['global_sequence'],
-                            )
-                    raise
+                        """,
+                        document_id, reference, content, official_number, year,
+                        department_id, user_id,
+                        document_type_id, next_number,
+                        signers,
+                        signer_sector_ids, resume,
+                    )
+            except asyncpg.UniqueViolationError as e:
+                # Savepoint revertido; outer transaction sigue activa.
+                constraint_name = e.constraint_name or ''
+                if 'official_documents_pkey' in constraint_name or 'id' in constraint_name:
+                    existing = await conn.fetchrow(
+                        "SELECT official_number, global_sequence, department_id FROM official_documents WHERE id = $1",
+                        document_id
+                    )
+                    if existing:
+                        logger.info(
+                            f"reserve_number GLOBAL: race PK detectado, "
+                            f"reutilizando {existing['official_number']}"
+                        )
+                        return (
+                            existing['official_number'],
+                            str(existing['department_id']),
+                            existing['global_sequence'],
+                        )
+                raise
 
-                # 4f. COMMIT: libera advisory lock (~5ms total desde adquisición)
-                conn.commit()
-                logger.info(f"reserve_number GLOBAL: reservado {official_number} (seq={next_number})")
-                return official_number, department_id, next_number
-
-        except UniqueViolation:
-            conn.rollback()
-            raise
-        except Exception:
-            conn.rollback()
-            raise
+            logger.info(f"reserve_number GLOBAL: reservado {official_number} (seq={next_number})")
+            return official_number, str(department_id), next_number
 
 
 async def confirm_number(
@@ -761,18 +714,15 @@ async def confirm_number(
     """
     logger.info(f"confirm_number: doc={document_id[:8]}...")
 
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(
+    async with get_conn(schema_name=schema_name) as conn:
+        od = await conn.fetchrow(
             """
             SELECT id, numbering_regime, document_type_id, department_id, year
             FROM official_documents
-            WHERE id = %s
+            WHERE id = $1
             """,
-            (document_id,)
+            document_id
         )
-        od = cursor.fetchone()
 
         if not od:
             logger.warning(
@@ -780,16 +730,16 @@ async def confirm_number(
             )
             return  # Soft-fail
 
-        cursor.execute(
+        status = await conn.execute(
             """
             UPDATE official_documents
             SET reservation_status = 'CONFIRMED'
-            WHERE id = %s AND reservation_status = 'RESERVED'
+            WHERE id = $1 AND reservation_status = 'RESERVED'
             """,
-            (document_id,)
+            document_id
         )
 
-        rows_updated = cursor.rowcount
+        rows_updated = int(status.split()[-1]) if status else 0
         if rows_updated == 0:
             logger.warning(
                 f"confirm_number: no se actualizaron filas para {document_id[:8]}... "
@@ -798,20 +748,19 @@ async def confirm_number(
 
         # Si era SPECIAL, limpiar el counter
         if od['numbering_regime'] == 'SPECIAL':
-            cursor.execute(
+            await conn.execute(
                 """
                 UPDATE document_number_counters
                 SET active_reservation_document_id = NULL,
                     updated_at = NOW()
-                WHERE document_type_id = %s
-                  AND year = %s
-                  AND department_id = %s
-                  AND active_reservation_document_id = %s
+                WHERE document_type_id = $1
+                  AND year = $2
+                  AND department_id = $3
+                  AND active_reservation_document_id = $4
                 """,
-                (od['document_type_id'], od['year'], od['department_id'], document_id)
+                od['document_type_id'], od['year'], od['department_id'], document_id
             )
 
-        conn.commit()
         logger.info(
             f"confirm_number: OK doc={document_id[:8]}... regime={od['numbering_regime']}"
         )
@@ -834,69 +783,66 @@ async def cancel_number(
     """
     logger.info(f"cancel_number: doc={document_id[:8]}... reason={reason[:80]}")
 
-    regime = None
     official_number = None
+    regime = None
 
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(
+    async with get_conn(schema_name=schema_name) as conn:
+        od = await conn.fetchrow(
             """
             SELECT id, numbering_regime, document_type_id, department_id, year, official_number
             FROM official_documents
-            WHERE id = %s
+            WHERE id = $1
             """,
-            (document_id,)
+            document_id
         )
-        od = cursor.fetchone()
 
         if not od:
             logger.warning(
                 f"cancel_number: official_documents no encontrado para {document_id[:8]}..."
             )
-            return
+            # official_number and regime remain None — mail send below will soft-fail gracefully
+        else:
+            regime = od['numbering_regime']
+            official_number = od['official_number']
 
-        regime = od['numbering_regime']
-        official_number = od['official_number']
-
-        cursor.execute(
-            """
-            UPDATE official_documents
-            SET reservation_status = 'CANCELLED'
-            WHERE id = %s AND reservation_status = 'RESERVED'
-            """,
-            (document_id,)
-        )
-
-        if regime == 'SPECIAL':
-            cursor.execute(
+            await conn.execute(
                 """
-                UPDATE document_number_counters
-                SET active_reservation_document_id = NULL,
-                    updated_at = NOW()
-                WHERE document_type_id = %s
-                  AND year = %s
-                  AND department_id = %s
-                  AND active_reservation_document_id = %s
+                UPDATE official_documents
+                SET reservation_status = 'CANCELLED'
+                WHERE id = $1 AND reservation_status = 'RESERVED'
                 """,
-                (od['document_type_id'], od['year'], od['department_id'], document_id)
+                document_id
             )
 
-        conn.commit()
-        logger.info(
-            f"cancel_number: OK doc={document_id[:8]}... "
-            f"numero={official_number} reason={reason[:200]}"
-        )
+            if regime == 'SPECIAL':
+                await conn.execute(
+                    """
+                    UPDATE document_number_counters
+                    SET active_reservation_document_id = NULL,
+                        updated_at = NOW()
+                    WHERE document_type_id = $1
+                      AND year = $2
+                      AND department_id = $3
+                      AND active_reservation_document_id = $4
+                    """,
+                    od['document_type_id'], od['year'], od['department_id'], document_id
+                )
 
-    # Fuera de transacción: mail de alerta (soft-fail)
+            logger.info(
+                f"cancel_number: OK doc={document_id[:8]}... "
+                f"numero={official_number} reason={reason[:200]}"
+            )
+
+    # Fuera de transacción: mail de alerta async (soft-fail)
     try:
         from shared.alerts import send_alert_mail
+        num_display = official_number or f"(sin registro — doc {document_id})"
         await send_alert_mail(
-            subject=f"[GDI ALERTA] Firma fallida - {official_number}",
+            subject=f"[GDI ALERTA] Firma fallida - {num_display}",
             body=(
                 f"Documento {document_id} falló al firmar (ambos intentos).\n"
-                f"Número cancelado: {official_number}\n"
-                f"Régimen: {regime}\n"
+                f"Número cancelado: {num_display}\n"
+                f"Régimen: {regime or '(desconocido)'}\n"
                 f"Motivo: {reason}\n"
                 f"Schema: {schema_name}\n"
                 f"El número queda CANCELLED y puede ser reciclado en la próxima firma del mismo scope."

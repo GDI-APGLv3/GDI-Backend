@@ -12,7 +12,7 @@ Diferencias clave con NOTAS:
 from typing import Dict, Any
 from shared.logging import get_logger
 from shared.exceptions import NotFoundError, AuthorizationError
-from database import get_db_connection
+from database import fetch_all, fetch_one, transaction
 from .queries import (
     record_memo_opening_query,
     get_memo_opening_query,
@@ -29,7 +29,7 @@ from services.documents.lifecycle.editing import _fetch_proposed_cases
 logger = get_logger(__name__)
 
 
-def record_memo_opening(
+async def record_memo_opening(
     document_id: str,
     user_id: str,
     *, schema_name: str
@@ -38,60 +38,52 @@ def record_memo_opening(
     Registra la apertura de un memo por un usuario.
     Solo se registra una vez (UPDATE WHERE opened_at IS NULL).
 
-    Args:
-        document_id: UUID del documento (document_draft.id para memo_recipients,
-                     official_documents.id para detalle)
-        user_id: UUID del usuario que abre
-        schema_name: Schema del tenant
-
     Returns:
         Dict con {
             recorded: bool (True si es primera apertura),
             opened_at: datetime (fecha de apertura)
         }
     """
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            # Verificar que el usuario sea recipient (no sender)
-            cursor.execute(check_user_is_recipient_query(), (document_id, user_id))
-            recipient_result = cursor.fetchone()
+    # Verificar que el usuario sea recipient (no sender)
+    recipient_result = await fetch_one(
+        check_user_is_recipient_query(), document_id, user_id,
+        schema_name=schema_name
+    )
 
-            if not recipient_result:
-                # No es recipient, verificar si es sender
-                cursor.execute(check_user_is_sender_query(), (document_id, user_id))
-                is_sender_result = cursor.fetchone()
-                if is_sender_result and is_sender_result['is_sender']:
-                    # Es sender, no registrar apertura
-                    logger.debug(f"[{schema_name}] Sender {user_id} abrio memo {document_id}, no se registra")
-                    return {'recorded': False, 'opened_at': None, 'reason': 'sender'}
-                else:
-                    raise AuthorizationError("No tenes acceso a este memo")
+    if not recipient_result:
+        # No es recipient, verificar si es sender
+        is_sender_result = await fetch_one(
+            check_user_is_sender_query(), document_id, user_id,
+            schema_name=schema_name
+        )
+        if is_sender_result and is_sender_result['is_sender']:
+            logger.debug(f"[{schema_name}] Sender {user_id} abrio memo {document_id}, no se registra")
+            return {'recorded': False, 'opened_at': None, 'reason': 'sender'}
+        else:
+            raise AuthorizationError("No tenes acceso a este memo")
 
-            # Intentar marcar como abierto (solo si opened_at IS NULL)
-            cursor.execute(record_memo_opening_query(), (document_id, user_id))
-            result = cursor.fetchone()
+    # Intentar marcar como abierto (solo si opened_at IS NULL)
+    async with transaction(schema_name=schema_name) as conn:
+        result = await conn.fetchrow(record_memo_opening_query(), document_id, user_id)
 
-            if result:
-                # Primera apertura
-                conn.commit()
-                logger.info(f"[{schema_name}] Usuario {user_id} abrio memo {document_id} por primera vez")
-                return {
-                    'recorded': True,
-                    'opened_at': result['opened_at'].isoformat() if result['opened_at'] else None
-                }
-            else:
-                # Ya habia sido abierto
-                conn.commit()
-                cursor.execute(get_memo_opening_query(), (document_id, user_id))
-                opening = cursor.fetchone()
-                logger.debug(f"[{schema_name}] Usuario {user_id} reabrio memo {document_id}")
-                return {
-                    'recorded': False,
-                    'opened_at': opening['opened_at'].isoformat() if opening and opening['opened_at'] else None
-                }
+        if result:
+            # Primera apertura
+            logger.info(f"[{schema_name}] Usuario {user_id} abrio memo {document_id} por primera vez")
+            return {
+                'recorded': True,
+                'opened_at': result['opened_at'].isoformat() if result['opened_at'] else None
+            }
+        else:
+            # Ya habia sido abierto
+            opening = await conn.fetchrow(get_memo_opening_query(), document_id, user_id)
+            logger.debug(f"[{schema_name}] Usuario {user_id} reabrio memo {document_id}")
+            return {
+                'recorded': False,
+                'opened_at': opening['opened_at'].isoformat() if opening and opening['opened_at'] else None
+            }
 
 
-def get_memo_detail(
+async def get_memo_detail(
     document_id: str,
     requesting_user_id: str,
     *,
@@ -102,61 +94,51 @@ def get_memo_detail(
     Obtiene el detalle completo de un memo.
     Registra la apertura si es recipient y no es sender.
 
-    Args:
-        document_id: UUID del documento (official_documents.id)
-        requesting_user_id: UUID del usuario que solicita
-        register_opening: Si True, registra la apertura (default True)
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con detalle completo del memo
-
     Raises:
         NotFoundError: Si el memo no existe
         AuthorizationError: Si el usuario no tiene acceso
     """
     # Obtener detalle del memo (official_documents)
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_memo_detail_query(), (document_id,))
-            memo = cursor.fetchone()
+    memo = await fetch_one(
+        get_memo_detail_query(), document_id,
+        schema_name=schema_name
+    )
 
-            if not memo:
-                raise NotFoundError(f"Memo {document_id} no encontrado")
+    if not memo:
+        raise NotFoundError(f"Memo {document_id} no encontrado")
 
     # official_documents.id ES el mismo UUID que document_draft.id
-    # memo_recipients.document_id referencia document_draft.id
     draft_id = document_id
 
     # Obtener sender info
     sender_info = None
-    with get_db_connection(schema_name) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(get_sender_user_query(), (draft_id,))
-            sender_row = cursor.fetchone()
-            if sender_row:
-                sender_user_id = str(sender_row['sender_user_id'])
-                cursor.execute(
-                    """SELECT u.full_name, s.acronym as sector_acronym
-                       FROM users u
-                       LEFT JOIN sectors s ON s.id = u.sector_id
-                       WHERE u.id = %s""",
-                    (sender_user_id,)
-                )
-                sender_user_row = cursor.fetchone()
-                if sender_user_row:
-                    sender_info = {
-                        'user_id': sender_user_id,
-                        'full_name': sender_user_row['full_name'],
-                        'sector_acronym': sender_user_row['sector_acronym'] or ''
-                    }
+    sender_row = await fetch_one(
+        get_sender_user_query(), draft_id,
+        schema_name=schema_name
+    )
+    if sender_row:
+        sender_user_id = str(sender_row['sender_user_id'])
+        sender_user_row = await fetch_one(
+            """SELECT u.full_name, s.acronym as sector_acronym
+               FROM users u
+               LEFT JOIN sectors s ON s.id = u.sector_id
+               WHERE u.id = $1""",
+            sender_user_id,
+            schema_name=schema_name
+        )
+        if sender_user_row:
+            sender_info = {
+                'user_id': sender_user_id,
+                'full_name': sender_user_row['full_name'],
+                'sector_acronym': sender_user_row['sector_acronym'] or ''
+            }
 
     # Verificar acceso y obtener recipients visibles (usa draft_id para memo_recipients)
-    recipients = get_visible_memo_recipients(draft_id, requesting_user_id, schema_name=schema_name)
+    recipients = await get_visible_memo_recipients(draft_id, requesting_user_id, schema_name=schema_name)
 
     # Registrar apertura si corresponde
     if register_opening:
-        opening_result = record_memo_opening(
+        opening_result = await record_memo_opening(
             draft_id, requesting_user_id,
             schema_name=schema_name
         )
@@ -166,32 +148,32 @@ def get_memo_detail(
     # Obtener aperturas si es sender
     openings = None
     if recipients['is_sender']:
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(get_openings_by_document_query(), (draft_id,))
-                openings_raw = cursor.fetchall()
-                openings = [
-                    {
-                        'user_id': str(o['user_id']),
-                        'full_name': o['user_name'],
-                        'sector_acronym': o['sector_acronym'] or '',
-                        'recipient_type': o['recipient_type'],
-                        'opened_at': o['opened_at'].isoformat() if o['opened_at'] else None
-                    }
-                    for o in openings_raw
-                ]
+        openings_raw = await fetch_all(
+            get_openings_by_document_query(), draft_id,
+            schema_name=schema_name
+        )
+        openings = [
+            {
+                'user_id': str(o['user_id']),
+                'full_name': o['user_name'],
+                'sector_acronym': o['sector_acronym'] or '',
+                'recipient_type': o['recipient_type'],
+                'opened_at': o['opened_at'].isoformat() if o['opened_at'] else None
+            }
+            for o in openings_raw
+        ]
 
     # Obtener estado de archivado si es recipient
     is_archived = False
     archived_at = None
     if not recipients['is_sender']:
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(get_memo_recipient_info_query(), (draft_id, requesting_user_id))
-                recipient_info = cursor.fetchone()
-                if recipient_info:
-                    is_archived = recipient_info['is_archived']
-                    archived_at = recipient_info['archived_at'].isoformat() if recipient_info['archived_at'] else None
+        recipient_info = await fetch_one(
+            get_memo_recipient_info_query(), draft_id, requesting_user_id,
+            schema_name=schema_name
+        )
+        if recipient_info:
+            is_archived = recipient_info['is_archived']
+            archived_at = recipient_info['archived_at'].isoformat() if recipient_info['archived_at'] else None
 
     # Construir respuesta
     result = {
@@ -226,7 +208,7 @@ def get_memo_detail(
 
     # Incluir expedientes propuestos
     try:
-        proposed_cases = _fetch_proposed_cases(document_id, schema_name=schema_name)
+        proposed_cases = await _fetch_proposed_cases(document_id, schema_name=schema_name)
         if proposed_cases:
             result['proposed_cases'] = proposed_cases
     except Exception as e:

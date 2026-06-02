@@ -115,7 +115,7 @@ async def create_document(
             if not sender_sector_id:
                 raise ValidationError("No se pudo determinar el sector del usuario para enviar la nota")
 
-        result = create_doc_service(
+        result = await create_doc_service(
             request.document_type_acronym,
             request.reference,
             current_user.user_id,

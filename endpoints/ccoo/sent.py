@@ -63,7 +63,7 @@ async def list_sent_ccoo(
             f"{' search=' + search if search else ''}"
         )
 
-        result = get_sent_ccoo(
+        result = await get_sent_ccoo(
             viewable_sector_ids,
             current_user.user_id,
             schema_name=schema_name,

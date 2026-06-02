@@ -5,7 +5,7 @@ Contiene funciones para verificar y calcular permisos de usuarios sobre expedien
 
 from typing import Dict, Any, List, Optional
 
-from database import execute_query
+from database import fetch_all
 from shared.exceptions import BusinessLogicError, NotFoundError, ValidationError
 from shared.logging import get_logger
 
@@ -19,70 +19,45 @@ from services.shared.sector_utils import get_user_sector_ids
 _get_user_sector_ids = get_user_sector_ids
 
 
-def get_user_editable_sector_ids(user_id: str, *, schema_name: str) -> List[str]:
+async def get_user_editable_sector_ids(user_id: str, *, schema_name: str) -> List[str]:
     """
     Obtiene lista de sector_ids donde el usuario puede EDITAR (can_edit=true).
 
     - Sector principal: siempre puede editar
     - Sectores adicionales: solo si can_edit = true en user_sector_permissions
-
-    Args:
-        user_id: ID del usuario
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        List[str]: Lista de sector_ids donde el usuario puede editar
     """
     from services.case_queries import get_user_sectors_with_permissions_query
 
-    result = execute_query(
+    result = await fetch_all(
         get_user_sectors_with_permissions_query(),
-        (user_id, user_id),
+        user_id,
         schema_name=schema_name
     )
 
     return [str(row['sector_id']) for row in result if row['can_edit']]
 
 
-def get_user_viewable_sector_ids(user_id: str, *, schema_name: str) -> List[str]:
+async def get_user_viewable_sector_ids(user_id: str, *, schema_name: str) -> List[str]:
     """
     Obtiene lista de sector_ids donde el usuario puede VER (can_view=true).
 
     - Sector principal: siempre puede ver
     - Sectores adicionales: solo si can_view = true en user_sector_permissions
-
-    Args:
-        user_id: ID del usuario
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        List[str]: Lista de sector_ids donde el usuario puede ver
     """
     from services.case_queries import get_user_sectors_with_permissions_query
 
-    result = execute_query(
+    result = await fetch_all(
         get_user_sectors_with_permissions_query(),
-        (user_id, user_id),
+        user_id,
         schema_name=schema_name
     )
 
     return [str(row['sector_id']) for row in result if row['can_view']]
 
 
-def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
+async def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
     """
     Obtener permisos específicos del usuario sobre el expediente.
-
-    Usa can_edit de user_sector_permissions para determinar permisos de edición.
-    Verifica contra admin_sector (via case_movements) y sectores asignados.
-
-    Args:
-        case_id: ID del expediente
-        user_id: ID del usuario
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        Dict con permisos booleanos y nivel de ownership
     """
     from services.case_queries import get_case_permissions_data_query
     from config.constants import (
@@ -96,7 +71,7 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
         logger.info(f"Calculating permissions for user {user_id} on case {case_id}")
 
         # 1. Obtener sectores donde el usuario puede EDITAR
-        user_editable_sectors = get_user_editable_sector_ids(user_id, schema_name=schema_name)
+        user_editable_sectors = await get_user_editable_sector_ids(user_id, schema_name=schema_name)
         logger.debug(f"User {user_id} editable sectors: {user_editable_sectors}")
 
         # 2. Verificar is_admin e is_assigned con patron robusto de 3 condiciones
@@ -104,26 +79,24 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
             is_admin = False
             is_assigned = False
         else:
-            sector_placeholders = ",".join(["%s"] * len(user_editable_sectors))
-
-            permission_check = f"""
+            permission_check = """
                 SELECT
                     EXISTS (
                         SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = %s
-                        AND cm.assigned_sector_id IN ({sector_placeholders})
+                        WHERE cm.case_id = $1
+                        AND cm.assigned_sector_id = ANY($2::uuid[])
                         AND cm.is_active = true
                     ) as is_assigned,
                     EXISTS (
                         SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = %s
+                        WHERE cm.case_id = $3
                         AND cm.type = 'transfer'
                         AND cm.is_active = false
-                        AND cm.admin_sector_id IN ({sector_placeholders})
+                        AND cm.admin_sector_id = ANY($4::uuid[])
                         AND cm.closed_at = (
                             SELECT MAX(cm2.closed_at)
                             FROM case_movements cm2
-                            WHERE cm2.case_id = %s
+                            WHERE cm2.case_id = $5
                             AND cm2.type = 'transfer'
                             AND cm2.is_active = false
                         )
@@ -131,23 +104,24 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
                     (
                         EXISTS (
                             SELECT 1 FROM case_movements cm
-                            WHERE cm.case_id = %s
+                            WHERE cm.case_id = $6
                             AND cm.type = 'creation'
-                            AND cm.admin_sector_id IN ({sector_placeholders})
+                            AND cm.admin_sector_id = ANY($7::uuid[])
                         )
                         AND NOT EXISTS (
                             SELECT 1 FROM case_movements cm
-                            WHERE cm.case_id = %s
+                            WHERE cm.case_id = $8
                             AND cm.type = 'transfer'
                         )
                     ) as is_admin_by_creation
             """
-            params = (
-                case_id, *user_editable_sectors,
-                case_id, *user_editable_sectors, case_id,
-                case_id, *user_editable_sectors, case_id,
+            perm_result = await fetch_all(
+                permission_check,
+                case_id, user_editable_sectors,
+                case_id, user_editable_sectors, case_id,
+                case_id, user_editable_sectors, case_id,
+                schema_name=schema_name
             )
-            perm_result = execute_query(permission_check, params, schema_name=schema_name)
 
             if perm_result:
                 is_assigned = perm_result[0]['is_assigned']
@@ -157,7 +131,7 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
                 is_assigned = False
 
         # 3. Obtener información del caso
-        case_result = execute_query(get_case_permissions_data_query(), (case_id,), schema_name=schema_name)
+        case_result = await fetch_all(get_case_permissions_data_query(), case_id, schema_name=schema_name)
         if not case_result:
             logger.error(f"Case not found: {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
@@ -201,27 +175,11 @@ def get_user_case_permissions(case_id: str, user_id: str, *, schema_name: str) -
         raise BusinessLogicError(PERMISSIONS_ERROR)
 
 
-def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
+async def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
     """
     Verificar si un usuario puede ver un expediente.
-
-    Condiciones (al menos una debe cumplirse):
-    1. Usuario tiene flag can_global_search_cases=True
-    2. Usuario es creador del expediente
-    3. Sector del usuario es admin o esta asignado al expediente
-
-    Optimizado: una sola query a la BD en vez de 3-4 separadas.
-
-    Args:
-        case_id: ID del expediente
-        user_id: ID del usuario
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        bool: True si el usuario puede ver el expediente
     """
     try:
-        # Reusar la query existente de case_queries.py:249-273
         from services.case_queries import get_user_sectors_for_case_query
         USER_SECTORS_SUBQUERY = get_user_sectors_for_case_query()
 
@@ -229,15 +187,15 @@ def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
             SELECT EXISTS(
                 -- Caso 1: Flag global + expediente existe
                 SELECT 1 FROM cases c
-                JOIN users u ON u.id = %s
-                WHERE c.id = %s
+                JOIN users u ON u.id = $1
+                WHERE c.id = $2
                 AND u.can_global_search_cases = true
 
                 UNION ALL
 
                 -- Caso 2: Es el creador
                 SELECT 1 FROM cases c
-                WHERE c.id = %s AND c.created_by_user_id = %s
+                WHERE c.id = $3 AND c.created_by_user_id = $4
 
                 UNION ALL
 
@@ -245,7 +203,7 @@ def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
                 SELECT 1 FROM case_movements cm
                 JOIN ({USER_SECTORS_SUBQUERY}) user_sectors
                     ON cm.assigned_sector_id = user_sectors.sector_id
-                WHERE cm.case_id = %s AND cm.is_active = true
+                WHERE cm.case_id = $5 AND cm.is_active = true
 
                 UNION ALL
 
@@ -253,13 +211,13 @@ def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
                 SELECT 1 FROM case_movements cm
                 JOIN ({USER_SECTORS_SUBQUERY}) user_sectors
                     ON cm.admin_sector_id = user_sectors.sector_id
-                WHERE cm.case_id = %s
+                WHERE cm.case_id = $6
                 AND cm.type = 'transfer'
                 AND cm.is_active = false
                 AND cm.closed_at = (
                     SELECT MAX(cm2.closed_at)
                     FROM case_movements cm2
-                    WHERE cm2.case_id = %s
+                    WHERE cm2.case_id = $7
                     AND cm2.type = 'transfer'
                     AND cm2.is_active = false
                 )
@@ -270,34 +228,51 @@ def can_user_view_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
                 SELECT 1 FROM case_movements cm
                 JOIN ({USER_SECTORS_SUBQUERY}) user_sectors
                     ON cm.admin_sector_id = user_sectors.sector_id
-                WHERE cm.case_id = %s
+                WHERE cm.case_id = $8
                 AND cm.type = 'creation'
                 AND NOT EXISTS (
                     SELECT 1 FROM case_movements cm2
-                    WHERE cm2.case_id = %s
+                    WHERE cm2.case_id = $9
                     AND cm2.type = 'transfer'
                 )
             ) as has_access
         """
-        # Parametros: 15 placeholders
-        # Caso 1: user_id, case_id (2)
-        # Caso 2: case_id, user_id (2)
-        # Caso 3a: user_id, user_id (subquery sectores), case_id (3)
-        # Caso 3b: user_id, user_id (subquery sectores), case_id, case_id (4)
-        # Caso 3c: user_id, user_id (subquery sectores), case_id, case_id (4)
-        # Total: 2 + 2 + 3 + 4 + 4 = 15
-        params = (
-            user_id, case_id,                       # Caso 1: flag global
-            case_id, user_id,                       # Caso 2: creador
-            user_id, user_id, case_id,              # Caso 3a: sector asignado
-            user_id, user_id, case_id, case_id,     # Caso 3b: admin transfer
-            user_id, user_id, case_id, case_id,     # Caso 3c: admin creation
+        # asyncpg: $N son índices únicos. La query tiene $1..$9:
+        # $1=user_id, $2=case_id(c1), $3=case_id(c2), $4=user_id(c2),
+        # $5=case_id(3a), $6=case_id(3b), $7=case_id(3b-max),
+        # $8=case_id(3c), $9=case_id(3c-notexists)
+        # Los subqueries de sectores referencian $1 (user_id outer)
+        result = await fetch_all(
+            query,
+            user_id,    # $1 — user_id (Caso 1 + subquery sectores)
+            case_id,    # $2 — case_id (Caso 1)
+            case_id,    # $3 — case_id (Caso 2)
+            user_id,    # $4 — user_id (Caso 2 created_by)
+            case_id,    # $5 — case_id (Caso 3a)
+            case_id,    # $6 — case_id (Caso 3b)
+            case_id,    # $7 — case_id (Caso 3b MAX)
+            case_id,    # $8 — case_id (Caso 3c)
+            case_id,    # $9 — case_id (Caso 3c NOT EXISTS)
+            schema_name=schema_name
         )
-        result = execute_query(query, params, schema_name=schema_name)
         return result and result[0].get('has_access', False)
 
     except Exception as e:
         logger.error(f"Error checking case view permissions for user {user_id[:8]} on case {case_id[:8]}: {str(e)}")
+        return False
+
+
+async def can_user_edit_case(case_id: str, user_id: str, *, schema_name: str) -> bool:
+    """
+    Verifica si un usuario puede editar un expediente.
+    """
+    try:
+        perms = await get_user_case_permissions(case_id, user_id, schema_name=schema_name)
+        return perms.get("can_link_documents", False)
+    except NotFoundError:
+        return False
+    except Exception as e:
+        logger.error(f"Error checking edit permissions for user {user_id[:8]} on case {case_id[:8]}: {str(e)}")
         return False
 
 
@@ -308,14 +283,6 @@ def calculate_access_reason(
 ) -> str:
     """
     Calcula la razón de acceso del usuario al expediente.
-
-    Args:
-        user_sector_ids: Lista de sector_ids del usuario
-        admin_sector_id: ID del sector administrador del expediente
-        assigned_sector_ids: Lista de sector_ids asignados al expediente
-
-    Returns:
-        str: Razón de acceso ('admin_sector', 'assigned', etc.)
     """
     from config.constants import ACCESS_REASON_ADMIN, ACCESS_REASON_ASSIGNED
 

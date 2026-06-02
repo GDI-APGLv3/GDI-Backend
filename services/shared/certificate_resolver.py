@@ -106,14 +106,14 @@ async def resolve_certificate(tenant_id: str, *, schema_name: str) -> Tuple[byte
     logger.info(f"Certificate cache MISS for {tenant_id}, fetching from R2...")
 
     # 2. Query BD
-    from database import execute_query
+    from database import fetch_one
 
     query = """
         SELECT r2_bucket, r2_key, encrypted_password
         FROM public.tenant_certificates
-        WHERE tenant_id = %s AND is_active = true
+        WHERE tenant_id = $1 AND is_active = true
     """
-    result = execute_query(query, (tenant_id,), fetch_one=True, schema_name=schema_name)
+    result = await fetch_one(query, tenant_id, schema_name=schema_name)
 
     if not result:
         raise RuntimeError(f"No hay certificado activo en BD para tenant '{tenant_id}'")

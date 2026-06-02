@@ -3,9 +3,8 @@ Servicios para la numeración de documentos.
 Maneja la lógica de negocio para numerar documentos y completar el proceso.
 """
 
-import json
 from typing import Dict, Any
-from database import get_db_connection, execute_query
+from database import fetch_one, fetch_all, execute, transaction
 from shared.exceptions import (
     DocumentNotFoundError, ValidationError, DocumentStateError,
     AuthorizationError
@@ -48,11 +47,11 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         DocumentStateError: Si el documento no está en estado correcto
     """
     # Validaciones básicas de formato
-    doc_error = validate_document_id(document_id, schema_name=schema_name)
+    doc_error = await validate_document_id(document_id, schema_name=schema_name)
     if doc_error:
         raise ValidationError(doc_error)
 
-    user_error = validate_user_id(user_id, schema_name=schema_name)
+    user_error = await validate_user_id(user_id, schema_name=schema_name)
     if user_error:
         raise ValidationError(user_error)
 
@@ -61,7 +60,7 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     logger.info(f"User ID: {user_id[:8]}...")
 
     # ================================================================
-    # MOMENTO 1: VALIDACIONES + RESERVAR NÚMERO (conexión corta)
+    # MOMENTO 1: VALIDACIONES + RESERVAR NÚMERO
     # ================================================================
 
     logger.info("MOMENTO 1: Validaciones y reserva de número...")
@@ -73,222 +72,167 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     signer_sector_ids = None
     current_year = None
 
-    with get_db_connection(schema_name) as conn:
-        cursor = conn.cursor()
+    # ============================================================
+    # FUSIÓN 1 (P1+P2+P6+P7): rol/estado + firmantes pendientes +
+    #   JSON de firmantes + array sector_ids — 1 sola query
+    # ============================================================
+    logger.info("PASO 1/2 (M1): Validando numerador y estado del documento...")
 
-        # ============================================================
-        # PASO 1: VALIDACIONES PREVIAS
-        # ============================================================
-        logger.info("PASO 1/2 (M1): Validando numerador y estado del documento...")
-
-        # Verificar que es numerador y el documento está listo
-        check_query = """
-            SELECT dd.id as document_id, dd.status, dd.document_number,
-                   ds.is_numerator, ds.status as signer_status
-            FROM document_draft dd
-            JOIN document_signers ds ON dd.id = ds.document_id
-            WHERE dd.id = %s AND ds.user_id = %s
+    doc_info = await fetch_one(
         """
-        cursor.execute(check_query, (document_id, user_id))
-        doc_info = cursor.fetchone()
-
-        if not doc_info:
-            logger.error("Documento no encontrado o numerador inválido")
-            raise DocumentNotFoundError("Documento no encontrado o numerador inválido")
-
-        if not doc_info['is_numerator']:
-            logger.error("Usuario no es numerador del documento")
-            raise ValidationError("Usuario no es numerador del documento")
-
-        if doc_info['signer_status'] == 'signed':
-            logger.error("El numerador ya firmó este documento")
-            raise ValidationError("El numerador ya firmó este documento")
-
-        if doc_info['status'] != 'sent_to_sign':
-            logger.error(f"Documento en estado incorrecto: {doc_info['status']}")
-            raise DocumentStateError(
-                f"Documento en estado '{doc_info['status']}' no puede firmarse como numerador",
-                current_state=doc_info['status'],
-                required_state="sent_to_sign"
-            )
-
-        # Verificar que todos los firmantes no-numeradores hayan firmado
-        remaining_signers_query = """
-            SELECT COUNT(*) as pending_count
-            FROM document_signers
-            WHERE document_id = %s
-            AND is_numerator = false
-            AND (status = 'pending' OR status IS NULL)
-        """
-        cursor.execute(remaining_signers_query, (document_id,))
-        pending_result = cursor.fetchone()
-
-        if pending_result['pending_count'] > 0:
-            logger.error(f"Hay {pending_result['pending_count']} firmantes pendientes")
-            raise ValidationError("Aún hay firmantes pendientes. El numerador debe firmar al final.")
-
-        logger.info("Validaciones OK")
-
-        # ============================================================
-        # PASO 1b: VALIDAR RANK Y DEPARTAMENTO DEL NUMERADOR
-        # ============================================================
-        logger.info("PASO 1b (M1): Validando permisos de rank y departamento...")
-
-        rank_dept_query = """
-            SELECT
-                ur.name as user_rank_name,
-                ur.level as user_rank_level,
-                rr.name as required_rank_name,
-                rr.level as required_rank_level,
-                dt.name as doc_type_name,
-                dep.id as user_department_id,
-                dep.name as user_department_name,
-                CASE
-                    WHEN rr.level IS NULL THEN true
-                    WHEN ur.level IS NULL THEN false
-                    WHEN ur.level <= rr.level THEN true
-                    ELSE false
-                END as has_rank_permission,
-                CASE
-                    WHEN NOT EXISTS(
-                        SELECT 1 FROM enabled_document_types_by_sector
-                        WHERE document_type_id = dd.document_type_id
-                    ) THEN true
-                    WHEN EXISTS(
-                        SELECT 1 FROM enabled_document_types_by_sector
-                        WHERE document_type_id = dd.document_type_id
-                        AND sector_id = u.sector_id
-                    ) THEN true
-                    WHEN EXISTS(
-                        SELECT 1 FROM enabled_document_types_by_sector edts
-                        WHERE edts.document_type_id = dd.document_type_id
-                        AND edts.sector_id IN (
-                            SELECT usp.sector_id
-                            FROM user_sector_permissions usp
-                            WHERE usp.user_id = u.id AND usp.can_edit = true
-                        )
-                    ) THEN true
-                    ELSE false
-                END as has_sector_permission
-            FROM document_draft dd
-            JOIN document_types dt ON dd.document_type_id = dt.id
-            JOIN users u ON u.id = %s
-            LEFT JOIN user_seals us ON u.id = us.user_id
-            LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
-            LEFT JOIN ranks ur ON cs.rank_id = ur.id
-            LEFT JOIN sectors sec ON u.sector_id = sec.id
-            LEFT JOIN departments dep ON sec.department_id = dep.id
-            LEFT JOIN document_types_allowed_by_rank dtabr ON dt.id = dtabr.document_type_id
-            LEFT JOIN ranks rr ON dtabr.rank_id = rr.id
-            WHERE dd.id = %s
-        """
-        cursor.execute(rank_dept_query, (user_id, document_id))
-        perm_result = cursor.fetchone()
-
-        if perm_result:
-            # Validar RANK
-            if not perm_result['has_rank_permission']:
-                user_rank = perm_result['user_rank_name'] or "sin rank"
-                required_rank = perm_result['required_rank_name'] or "desconocido"
-                doc_type = perm_result['doc_type_name']
-                raise AuthorizationError(
-                    f"Rank insuficiente para numerar '{doc_type}'. "
-                    f"Se requiere '{required_rank}' o superior, "
-                    f"pero el usuario tiene rank '{user_rank}'"
+        SELECT
+            dd.id              AS document_id,
+            dd.status,
+            dd.document_number,
+            ds_num.is_numerator,
+            ds_num.status      AS signer_status,
+            -- P2: count de firmantes no-numerador pendientes
+            (
+                SELECT COUNT(*)
+                FROM document_signers
+                WHERE document_id = $1
+                  AND is_numerator = false
+                  AND (status = 'pending' OR status IS NULL)
+            )                  AS pending_count,
+            -- P6: snapshot JSON de todos los firmantes para official_documents
+            (
+                SELECT json_agg(
+                    json_build_object(
+                        'user_id',       ds2.user_id,
+                        'full_name',     u2.full_name,
+                        'status',        ds2.status,
+                        'is_numerator',  ds2.is_numerator,
+                        'signing_order', ds2.signing_order,
+                        'signed_at',     ds2.signed_at
+                    )
                 )
+                FROM document_signers ds2
+                JOIN users u2 ON ds2.user_id = u2.id
+                WHERE ds2.document_id = $1
+            )                  AS signers_json,
+            -- P7: array de sector_ids de los firmantes para official_documents
+            (
+                SELECT ARRAY_AGG(DISTINCT u3.sector_id)
+                       FILTER (WHERE u3.sector_id IS NOT NULL)
+                FROM document_signers ds3
+                JOIN users u3 ON ds3.user_id = u3.id
+                WHERE ds3.document_id = $1
+            )                  AS signer_sector_ids
+        FROM document_draft dd
+        JOIN document_signers ds_num
+          ON dd.id = ds_num.document_id AND ds_num.user_id = $2
+        WHERE dd.id = $1
+        """,
+        document_id,
+        user_id,
+        schema_name=schema_name,
+    )
 
-            # Validar SECTOR
-            if not perm_result['has_sector_permission']:
-                dept_name = perm_result['user_department_name'] or "sin departamento"
-                doc_type = perm_result['doc_type_name']
-                raise AuthorizationError(
-                    f"El sector del departamento '{dept_name}' no tiene habilitado "
-                    f"el tipo de documento '{doc_type}'"
-                )
+    if not doc_info:
+        logger.error("Documento no encontrado o numerador inválido")
+        raise DocumentNotFoundError("Documento no encontrado o numerador inválido")
 
-            logger.info(f"Permisos OK - rank: {perm_result['user_rank_name'] or 'N/A'}, dept: {perm_result['user_department_name'] or 'N/A'}")
+    # --- Guard clauses en el mismo orden que antes ---
+    if not doc_info['is_numerator']:
+        logger.error("Usuario no es numerador del documento")
+        raise ValidationError("Usuario no es numerador del documento")
 
-        # ============================================================
-        # PASO 2 (M1): OBTENER DATOS DEL DOCUMENTO PARA generate_official_number
-        # ============================================================
-        logger.info("PASO 2/2 (M1): Recopilando datos del documento...")
+    if doc_info['signer_status'] == 'signed':
+        logger.error("El numerador ya firmó este documento")
+        raise ValidationError("El numerador ya firmó este documento")
 
-        # Tipo de documento + source_type (necesario para stamp_position en MOMENTO 2)
-        # También se lee special_numbering del tenant (tabla del tenant, NO global)
-        type_query = """
-            SELECT dt.acronym, dt.type as source_type,
-                   dt.special_numbering
-            FROM document_draft dd
-            JOIN document_types dt ON dd.document_type_id = dt.id
-            WHERE dd.id = %s
+    if doc_info['status'] != 'sent_to_sign':
+        logger.error(f"Documento en estado incorrecto: {doc_info['status']}")
+        raise DocumentStateError(
+            f"Documento en estado '{doc_info['status']}' no puede firmarse como numerador",
+            current_state=doc_info['status'],
+            required_state="sent_to_sign"
+        )
+
+    if doc_info['pending_count'] > 0:
+        logger.error(f"Hay {doc_info['pending_count']} firmantes pendientes")
+        raise ValidationError("Aún hay firmantes pendientes. El numerador debe firmar al final.")
+
+    logger.info("Validaciones OK")
+
+    # ============================================================
+    # QUERY 2a (M1): datos del documento
+    #   reference, content, document_type_id, acronym, source_type,
+    #   special_numbering, resume — todo de document_draft + document_types.
+    #   Separada de los permisos para que el validador único sea
+    #   reutilizable sin necesidad de un draft.
+    # ============================================================
+    logger.info("PASO 2/2 (M1): Recopilando datos del documento...")
+
+    doc_data_row = await fetch_one(
         """
-        cursor.execute(type_query, (document_id,))
-        type_result = cursor.fetchone()
+        SELECT
+            dd.reference,
+            dd.content,
+            dd.document_type_id,
+            dd.resume,
+            dt.acronym         AS document_type_acronym,
+            dt.type            AS source_type,
+            dt.special_numbering
+        FROM document_draft dd
+        JOIN document_types dt ON dd.document_type_id = dt.id
+        WHERE dd.id = $1
+        """,
+        document_id,
+        schema_name=schema_name,
+    )
 
-        document_type_acronym = type_result['acronym'] if type_result else "DOC"
-        source_type = type_result['source_type'] if type_result else "HTML"
-        is_special_numbering = bool(type_result['special_numbering']) if type_result else False
+    if not doc_data_row:
+        raise DocumentNotFoundError(f"Documento {document_id} no encontrado al leer datos del draft")
 
-        # Datos del documento (reference, content, document_type_id, resume)
-        doc_data_query = """
-            SELECT dd.reference, dd.content::text as content_text,
-                   dd.document_type_id, dd.resume
-            FROM document_draft dd
-            WHERE dd.id = %s
-        """
-        cursor.execute(doc_data_query, (document_id,))
-        doc_data_row = cursor.fetchone()
+    document_type_acronym = doc_data_row['document_type_acronym'] or "DOC"
+    source_type = doc_data_row['source_type'] or "HTML"
+    is_special_numbering = bool(doc_data_row['special_numbering'])
 
-        doc_data = {
-            'reference': doc_data_row['reference'],
-            'content': json.loads(doc_data_row['content_text']) if doc_data_row['content_text'] else {},
-            'document_type_id': doc_data_row['document_type_id'],
-            'resume': doc_data_row['resume'],
-        }
+    doc_data = {
+        'reference':        doc_data_row['reference'],
+        'content':          doc_data_row['content'] or {},
+        'document_type_id': doc_data_row['document_type_id'],
+        'resume':           doc_data_row['resume'],
+    }
 
-        # Firmantes del documento (con status='pending' y signed_at=null tal como están)
-        signers_query = """
-            SELECT json_agg(
-                json_build_object(
-                    'user_id', ds.user_id,
-                    'full_name', u.full_name,
-                    'status', ds.status,
-                    'is_numerator', ds.is_numerator,
-                    'signing_order', ds.signing_order,
-                    'signed_at', ds.signed_at
-                )
-            ) as signers
-            FROM document_signers ds
-            JOIN users u ON ds.user_id = u.id
-            WHERE ds.document_id = %s
-        """
-        cursor.execute(signers_query, (document_id,))
-        signers_result = cursor.fetchone()
-        signers_data = signers_result['signers'] if signers_result else []
+    # ============================================================
+    # QUERY 2b (M1): validador único de permisos de numeración
+    #   Usa numbering_permissions.can_user_number_document_type —
+    #   fuente única de verdad para TODOS los paths de numeración.
+    # ============================================================
+    logger.info("PASO 1b (M1): Validando permisos de titular de repartición y sector...")
 
-        # Sector IDs de todos los firmantes
-        signer_sectors_query = """
-            SELECT ARRAY_AGG(DISTINCT u.sector_id) FILTER (WHERE u.sector_id IS NOT NULL) as sector_ids
-            FROM document_signers ds
-            JOIN users u ON ds.user_id = u.id
-            WHERE ds.document_id = %s
-        """
-        cursor.execute(signer_sectors_query, (document_id,))
-        signer_sectors_result = cursor.fetchone()
-        signer_sector_ids = signer_sectors_result['sector_ids'] if signer_sectors_result else None
+    from services.documents.signing.numbering_permissions import (
+        can_user_number_document_type,
+    )
 
-        # Año actual
-        from datetime import datetime
-        current_year = datetime.now().year
+    has_rank, has_sector, reason = await can_user_number_document_type(
+        user_id,
+        doc_data['document_type_id'],
+        schema_name=schema_name,
+    )
 
-        logger.info("Datos recopilados - cerrando conexión de validaciones")
-    # Conexión de validaciones cerrada y devuelta al pool
+    if not has_rank:
+        raise AuthorizationError(reason)
+
+    if not has_sector:
+        raise AuthorizationError(reason)
+
+    logger.info(f"Permisos OK")
+
+    # Datos de firmantes ya disponibles desde Fusión 1
+    signers_data = doc_info['signers_json'] if doc_info['signers_json'] else []
+    signer_sector_ids = doc_info['signer_sector_ids'] if doc_info else None
+
+    from datetime import datetime
+    current_year = datetime.now().year
+
+    logger.info("Datos recopilados")
 
     # ================================================================
     # RESERVAR NÚMERO OFICIAL
     # ================================================================
-    # reserve_number() detecta reintentos internamente (via reservation_status='RESERVED')
-    # y reutiliza la reserva existente. No es necesario chequear huérfanos antes.
     logger.info("Reservando número oficial...")
 
     official_number = None
@@ -311,13 +255,11 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
     # Limpiar resume del draft (ya está copiado a official_documents por reserve_number)
     if doc_data.get('resume'):
-        with get_db_connection(schema_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE document_draft SET resume = NULL WHERE id = %s",
-                (document_id,)
-            )
-            conn.commit()
+        await execute(
+            "UPDATE document_draft SET resume = NULL WHERE id = $1",
+            document_id,
+            schema_name=schema_name,
+        )
         logger.info("Resume copiado a official y limpiado del draft")
 
     # ================================================================
@@ -328,7 +270,7 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     from services.storage.cloudflare import get_tenant_r2_client
     import httpx
 
-    r2_client = get_tenant_r2_client(schema_name=schema_name)
+    r2_client = await get_tenant_r2_client(schema_name=schema_name)
     filename = document_id.replace('-', '') + '.pdf'
 
     signed_pdf_bytes = None  # Cache para retry inteligente
@@ -338,7 +280,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         try:
             # ----------------------------------------------------------
             # 2a. Descargar PDF de R2 tosign + firmar con Notary
-            #     Solo si todavía no tenemos signed_pdf_bytes (retry inteligente)
             # ----------------------------------------------------------
             if signed_pdf_bytes is None:
                 logger.info(f"Intento {attempt + 1}/2 - Descargando PDF de R2 tosign...")
@@ -357,7 +298,7 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                 # 2b. Obtener datos del firmante numerador
                 logger.info("Obteniendo datos del numerador...")
                 try:
-                    signer_data = get_signer_data(user_id, schema_name=schema_name)
+                    signer_data = await get_signer_data(user_id, schema_name=schema_name)
                     signer_name = signer_data['full_name']
                     signer_seal = signer_data['seal']
                     signer_department = signer_data['department_name']
@@ -373,11 +314,7 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                 from services.shared.notary_api import call_notary_sign_pdf
                 from services.shared.settings_utils import get_city_from_settings
 
-                # City desde settings del tenant (requiere conexión corta)
-                with get_db_connection(schema_name) as conn:
-                    city_cursor = conn.cursor()
-                    city = get_city_from_settings(cursor=city_cursor)
-
+                city = await get_city_from_settings(schema_name=schema_name)
                 logger.info(f"City desde settings: {city}")
 
                 # Documentos importados: firma en página final
@@ -402,8 +339,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
             # ----------------------------------------------------------
             # 2d. Subir PDF firmado a R2 oficial
-            #     Si falla aquí (y signed_pdf_bytes ya existe), el retry
-            #     no vuelve a firmar: solo reintenta el upload.
             # ----------------------------------------------------------
             logger.info(f"Intento {attempt + 1}/2 - Subiendo PDF a R2 oficial...")
 
@@ -417,32 +352,32 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
             logger.info("Reserva confirmada en official_documents")
 
             # ----------------------------------------------------------
-            # 2e. Confirmar en BD: UPDATE (NO INSERT - ya se hizo en MOMENTO 1)
+            # 2e. Confirmar en BD: UPDATEs ATÓMICOS
+            # Los 4 UPDATEs de estado del documento van en UNA sola
+            # transacción para evitar estados inconsistentes (ej: signed_at
+            # seteado pero document_draft sin actualizar) si el worker crashea
+            # entre statements. No hay I/O externo aquí (R2/Notary ya completaron).
             # ----------------------------------------------------------
-            logger.info("Confirmando firma en BD (UPDATE)...")
+            logger.info("Confirmando firma en BD (UPDATE atómico)...")
 
-            with get_db_connection(schema_name) as conn:
-                cursor = conn.cursor()
-
-                # UPDATE official_documents: signed_at + signers
-                # content NO se toca (ya tiene datos reales del MOMENTO 1)
-                cursor.execute(
+            async with transaction(
+                schema_name=schema_name, user_id=user_id, auth_source="numerator"
+            ) as conn:
+                await conn.execute(
                     """
                     UPDATE official_documents
                     SET signed_at = CURRENT_TIMESTAMP
-                    WHERE id = %s AND signed_at IS NULL
+                    WHERE id = $1 AND signed_at IS NULL
                     """,
-                    (document_id,)
+                    document_id,
                 )
 
-                # Actualizar el numerador en el array signers con jsonb_set
-                # (no pisa el array completo, solo modifica el elemento del numerador)
-                cursor.execute(
+                await conn.execute(
                     """
                     UPDATE official_documents
                     SET signers = (
                         SELECT jsonb_agg(
-                            CASE WHEN s->>'user_id' = %s
+                            CASE WHEN s->>'user_id' = $1
                                 THEN jsonb_set(
                                     jsonb_set(s, '{status}', '"signed"'),
                                     '{signed_at}', to_jsonb(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
@@ -452,49 +387,64 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                         )
                         FROM jsonb_array_elements(signers) s
                     )
-                    WHERE id = %s
+                    WHERE id = $2
                     """,
-                    (user_id, document_id)
+                    user_id,
+                    document_id,
                 )
 
-                # Marcar numerador como signed en document_signers
-                cursor.execute(
+                await conn.execute(
                     """
                     UPDATE document_signers
                     SET status = 'signed', signed_at = CURRENT_TIMESTAMP
-                    WHERE document_id = %s AND user_id = %s
+                    WHERE document_id = $1 AND user_id = $2
                     """,
-                    (document_id, user_id)
+                    document_id,
+                    user_id,
                 )
 
-                # Actualizar document_draft con número oficial y estado final
-                cursor.execute(
+                await conn.execute(
                     """
                     UPDATE document_draft
                     SET status = 'signed',
-                        document_number = %s,
+                        document_number = $1,
                         numbered_at = CURRENT_TIMESTAMP,
-                        numbered_by = %s,
+                        numbered_by = $2,
                         last_modified_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE id = $3
                     """,
-                    (official_number, user_id, document_id)
+                    official_number,
+                    user_id,
+                    document_id,
                 )
 
-                conn.commit()
-
-            logger.info("BD actualizada - firma confirmada")
+            logger.info("BD actualizada - firma confirmada (transacción atómica)")
 
             # ----------------------------------------------------------
             # 2f. Eliminar PDF de R2 tosign (soft-fail)
             # ----------------------------------------------------------
             try:
-                r2_client.delete_tosign(filename)
+                await run_in_threadpool(r2_client.delete_tosign, filename)
                 logger.info("PDF eliminado de R2 tosign")
             except Exception as e:
                 logger.warning(f"No se pudo eliminar PDF de R2 tosign: {e} (soft-fail)")
 
             logger.info(f"Documento firmado y numerado exitosamente: {official_number}")
+
+            # Audit log - firma electrónica numerador exitosa
+            try:
+                from services.documents.signing.audit_logger import log_signature_event
+                await log_signature_event(
+                    schema_name=schema_name,
+                    document_id=document_id,
+                    user_id=user_id,
+                    signature_method="electronic",
+                    result="ok",
+                    official_number=official_number,
+                    r2_object_key=f"{official_number}.pdf",
+                )
+            except Exception as _audit_err:
+                logger.warning(f"audit_log fallo (soft-fail): {_audit_err}")
 
             return {
                 "success": True,
@@ -510,8 +460,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
             logger.error(f"Firma intento {attempt + 1}/2 falló: {e}")
 
             if attempt == 0:
-                # Si signed_pdf_bytes es None: Notary falló → reintentar todo desde descarga
-                # Si signed_pdf_bytes existe: R2 falló → próximo intento solo reintenta R2
                 if signed_pdf_bytes is None:
                     logger.info("Notary falló - próximo intento reintentará desde descarga de PDF")
                 else:
@@ -530,8 +478,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         f"El número {official_number} será cancelado y quedará reciclable."
     )
 
-    # Cancelar reserva (reservation_status RESERVED -> CANCELLED, número queda reciclable)
-    # cancel_number() también envía mail de alerta internamente (soft-fail)
     try:
         await cancel_number(
             document_id,
@@ -541,10 +487,25 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     except Exception as cancel_err:
         logger.error(f"cancel_number fallo (soft-fail): {cancel_err}")
 
+    # Audit log - firma electrónica numerador fallida
+    try:
+        from services.documents.signing.audit_logger import log_signature_event
+        await log_signature_event(
+            schema_name=schema_name,
+            document_id=document_id,
+            user_id=user_id,
+            signature_method="electronic",
+            result="fail",
+            failure_reason=f"firma_fallida_2_intentos: {str(last_error)[:300]}",
+            official_number=official_number,
+        )
+    except Exception as _audit_err:
+        logger.warning(f"audit_log fallo en path de error (soft-fail): {_audit_err}")
+
     raise ValidationError("Error al firmar documento, por favor intente mas tarde")
 
 
-def get_numerator_documents(numerator_user_id: str, status_filter: str = None, *, schema_name: str) -> Dict[str, Any]:
+async def get_numerator_documents(numerator_user_id: str, status_filter: str = None, *, schema_name: str) -> Dict[str, Any]:
     """
     Obtiene documentos asignados a un numerador.
 
@@ -557,19 +518,21 @@ def get_numerator_documents(numerator_user_id: str, status_filter: str = None, *
         Dict con documentos del numerador
     """
     # Validar usuario
-    user_error = validate_user_id(numerator_user_id, schema_name=schema_name)
+    user_error = await validate_user_id(numerator_user_id, schema_name=schema_name)
     if user_error:
         raise ValidationError(user_error)
 
     # Construir query con filtros
-    where_conditions = ["ds.user_id = %s AND ds.is_numerator = true"]
-    params = [numerator_user_id]
+    where_conditions = ["ds.user_id = $1 AND ds.is_numerator = true"]
+    params: list = [numerator_user_id]
 
     if status_filter:
-        where_conditions.append("d.status = %s")
         params.append(status_filter)
+        where_conditions.append(f"d.status = ${len(params)}")
 
     where_clause = " AND ".join(where_conditions)
+    params.append(numerator_user_id)
+    numerator_param_idx = len(params)
 
     query = f"""
         SELECT d.id, d.reference, d.status, d.official_number, d.created_at, d.updated_at,
@@ -580,7 +543,7 @@ def get_numerator_documents(numerator_user_id: str, status_filter: str = None, *
                (SELECT COUNT(*) FROM document_signers dsign
                 WHERE dsign.document_id = d.id AND dsign.is_numerator = false) as required_signatures,
                (SELECT COUNT(*) FROM document_signatures dsig
-                WHERE dsig.document_id = d.id AND dsig.user_id = %s) as numerator_signed
+                WHERE dsig.document_id = d.id AND dsig.user_id = ${numerator_param_idx}) as numerator_signed
         FROM documents d
         JOIN document_types dt ON d.document_type_id = dt.id
         JOIN users creator ON d.creator_id = creator.id
@@ -589,14 +552,11 @@ def get_numerator_documents(numerator_user_id: str, status_filter: str = None, *
         ORDER BY d.updated_at DESC, d.created_at DESC
     """
 
-    # Agregar numerator_user_id para la subconsulta de firma del numerador
-    final_params = params + [numerator_user_id]
-
-    documents_data = execute_query(query, final_params, schema_name=schema_name)
+    documents_data = await fetch_all(query, *params, schema_name=schema_name)
 
     # Procesar documentos
     documents = []
-    for doc in documents_data:
+    for doc in (documents_data or []):
         # Determinar si puede ser numerado
         can_numerate = (
             doc['status'] in ['signed', 'pending_numeration'] and

@@ -1,6 +1,9 @@
 import asyncio, time, sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Apuntar al Notary DEV publico para tests locales (FALLBACK_TO_VISUAL=true en DEV)
+os.environ.setdefault("NOTARY_URL", "https://<your-notary-app>.fly.dev")
 from datetime import datetime
 
 TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M")
@@ -13,7 +16,7 @@ USERS = {
     "patricia": {"id": "a1000000-0000-0000-0000-000000000007", "sector": "51000000-0000-0000-0000-000000000007"},
 }
 HABI = "c1000000-0000-0000-0000-000000000001"
-TEST_TPL = "c1000000-0000-0000-0000-0000000000fe"
+TEST_TPL = "c1000000-0000-0000-0000-000000000002"
 TH = {"create_document": 2000, "save_document": 2000, "start_signing": 5000, "sign_document": 5000, "create_case": 8000, "transfer": 4000, "search": 1000, "list": 1000, "detail": 1000}
 R = []
 PA = []
@@ -37,6 +40,10 @@ async def req(cl, m, u, h, j=None):
 async def run_all():
     from httpx import AsyncClient, ASGITransport
     from main import app
+    from database import init_pool, close_pool
+    from shared.tenant_validation import clear_all_cache
+    await init_pool()
+    clear_all_cache()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", timeout=60.0) as c:
         print("  AGENTE 1: Maria Rodriguez")
         r, e = await req(c, "GET", "/document-types", hdr("maria"))
@@ -74,8 +81,8 @@ async def run_all():
             r, e = await req(c, "GET", f"/api/v1/cases/{cim}/documents", hdr("maria"))
             rec("Maria", "GET case-docs", "OK" if r.status_code==200 else "FAIL", e, "", "detail")
         if cim and onm:
-            from database import execute_query
-            od = execute_query("SELECT id FROM official_documents WHERE official_number = %s", (onm,), fetch_one=True, schema_name="100_test")
+            from database import fetch_one as _fetch_one
+            od = await _fetch_one("SELECT id FROM official_documents WHERE official_number = $1", onm, schema_name="100_test")
             if od:
                 r, e = await req(c, "POST", f"/api/v1/cases/{cim}/documents/link", hdr("maria"), {"official_document_id": str(od["id"])})
                 rec("Maria", "POST link-doc", "OK" if r.status_code==200 else "FAIL", e)
@@ -188,57 +195,58 @@ async def run_all():
         except Exception as ex:
             rec("Cross", f"[NEG] bad schema -> ERR", "OK", 0, str(ex)[:50])
 
-print("=" * 70)
-print("     TEST E2E - POST-REFACTOR SPRINT 4 GDI")
-print("=" * 70)
-print(f"Fecha: {datetime.now()}")
-print(f"BD: dev-test | Schema: 100_test | Ref: {REF_BASE}")
-print("=" * 70)
-asyncio.run(run_all())
-total_time = time.time() - T0
-print()
-print("=" * 70)
-print("                    RESULTADOS POR AGENTE")
-print("=" * 70)
-agents = {}
-for r in R:
-    a = r["a"]
-    if a not in agents: agents[a] = {"ok": 0, "fail": 0, "total": 0, "ms": 0, "results": []}
-    agents[a]["total"] += 1
-    agents[a]["ms"] += r["ms"]
-    agents[a]["ok" if r["s"]=="OK" else "fail"] += 1
-    agents[a]["results"].append(r)
-for an, d in agents.items():
-    print("")
-    print(f"AGENTE: {an}")
-    print("-" * 65)
-    for r in d["results"]:
-        op = r["o"][:46]
-        icon = "OK" if r["s"]=="OK" else "FAIL"
-        det = ""
-        if r["d"] and r["s"]=="FAIL": det = f" ({r["d"][:35]})"
-        print(f"  {op:<48} {icon:>6} {r["ms"]:.0f}ms{det}")
-    print(f"  Subtotal: {d["ok"]}/{d["total"]} OK ({d["ms"]:.0f}ms)")
-print()
-print("=" * 70)
-print("                        RESUMEN FINAL")
-print("=" * 70)
-tt = to = tf = 0
-for an, d in agents.items():
-    tt += d["total"]; to += d["ok"]; tf += d["fail"]
-    print(f"  {an:<12} {d["total"]:>6} {d["ok"]:>5} {d["fail"]:>5} {d["ms"]/1000:.1f}s")
-print("-" * 42)
-print(f"  TOTAL        {tt:>6} {to:>5} {tf:>5} {total_time:.1f}s")
-print("=" * 70)
-if PA:
-    print("  ALERTAS DE PERFORMANCE")
-    for a in PA: print(f"  WARN: {a["a"]}/{a["o"][:30]} = {a["ms"]:.0f}ms (umbral: {a["th"]}ms)")
-st = "PASSED" if tf == 0 else "FAILED"
-print("")
-print(f"ESTADO: {st} | Tests: {tt} | OK: {to} | FAIL: {tf} | Duracion: {total_time:.1f}s")
-print("=" * 70)
-if tf > 0:
-    print("[FAIL DETAILS]")
+if __name__ == "__main__":
+    print("=" * 70)
+    print("     TEST E2E - POST-REFACTOR SPRINT 4 GDI")
+    print("=" * 70)
+    print(f"Fecha: {datetime.now()}")
+    print(f"BD: dev-test | Schema: 100_test | Ref: {REF_BASE}")
+    print("=" * 70)
+    asyncio.run(run_all())
+    total_time = time.time() - T0
+    print()
+    print("=" * 70)
+    print("                    RESULTADOS POR AGENTE")
+    print("=" * 70)
+    agents = {}
     for r in R:
-        if r["s"] == "FAIL": print(f"  {r["a"]}/{r["o"]}: {r["d"]}")
-    sys.exit(1)
+        a = r["a"]
+        if a not in agents: agents[a] = {"ok": 0, "fail": 0, "total": 0, "ms": 0, "results": []}
+        agents[a]["total"] += 1
+        agents[a]["ms"] += r["ms"]
+        agents[a]["ok" if r["s"]=="OK" else "fail"] += 1
+        agents[a]["results"].append(r)
+    for an, d in agents.items():
+        print("")
+        print(f"AGENTE: {an}")
+        print("-" * 65)
+        for r in d["results"]:
+            op = r["o"][:46]
+            icon = "OK" if r["s"]=="OK" else "FAIL"
+            det = ""
+            if r["d"] and r["s"]=="FAIL": det = f" ({r['d'][:35]})"
+            print(f"  {op:<48} {icon:>6} {r['ms']:.0f}ms{det}")
+        print(f"  Subtotal: {d['ok']}/{d['total']} OK ({d['ms']:.0f}ms)")
+    print()
+    print("=" * 70)
+    print("                        RESUMEN FINAL")
+    print("=" * 70)
+    tt = to = tf = 0
+    for an, d in agents.items():
+        tt += d["total"]; to += d["ok"]; tf += d["fail"]
+        print(f"  {an:<12} {d['total']:>6} {d['ok']:>5} {d['fail']:>5} {d['ms']/1000:.1f}s")
+    print("-" * 42)
+    print(f"  TOTAL        {tt:>6} {to:>5} {tf:>5} {total_time:.1f}s")
+    print("=" * 70)
+    if PA:
+        print("  ALERTAS DE PERFORMANCE")
+        for a in PA: print(f"  WARN: {a['a']}/{a['o'][:30]} = {a['ms']:.0f}ms (umbral: {a['th']}ms)")
+    st = "PASSED" if tf == 0 else "FAILED"
+    print("")
+    print(f"ESTADO: {st} | Tests: {tt} | OK: {to} | FAIL: {tf} | Duracion: {total_time:.1f}s")
+    print("=" * 70)
+    if tf > 0:
+        print("[FAIL DETAILS]")
+        for r in R:
+            if r["s"] == "FAIL": print(f"  {r['a']}/{r['o']}: {r['d']}")
+        sys.exit(1)

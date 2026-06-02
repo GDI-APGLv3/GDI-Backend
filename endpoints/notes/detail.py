@@ -60,7 +60,7 @@ async def get_note(
             f"(tiene {viewable_count} sectores viewable)"
         )
 
-        result = get_note_detail_multi_sector(
+        result = await get_note_detail_multi_sector(
             document_id=document_id,
             requesting_user_id=current_user.user_id,
             user_permissions=user_permissions,

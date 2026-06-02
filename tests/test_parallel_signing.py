@@ -8,7 +8,7 @@ de numeracion (FixNumber) bajo carga concurrente.
 Uso:
     python tests/test_parallel_signing.py [N]
 
-Default N=10. Apunta al backend en TESTING_MODE (configurable via GDI_TEST_BASE_URL).
+Default N=10. Apunta a <your-backend-app> en TESTING_MODE.
 """
 
 import asyncio
@@ -20,9 +20,8 @@ from collections import Counter
 import httpx
 
 # === CONFIGURACION ===
-import os
-BASE_URL = os.getenv("GDI_TEST_BASE_URL", "http://localhost:8000")
-USER_ID = "a1000000-0000-0000-0000-000000000100"  # Numerador con sello
+BASE_URL = "https://<your-backend-app>.fly.dev"
+USER_ID = "a1000000-0000-0000-0000-000000000100"  # Castor (numerador con sello)
 SCHEMA_NAME = "100_test"
 DOCUMENT_TYPE_ACRONYM = "ANEXO"  # Tipo simple para testing
 

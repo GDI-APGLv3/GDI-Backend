@@ -338,7 +338,7 @@ curl -X POST "http://localhost:8000/sign-pdf" \
 ## Notas Técnicas
 
 - **Tipo de Firma:** Visual únicamente (no criptográfica)
-- **Bibliotecas:** PyPDF2, PyMuPDF (fitz), ReportLab
+- **Bibliotecas:** pypdf, PyMuPDF (fitz), ReportLab
 - **Sistema de Coordenadas:** PDF estándar (origen en esquina inferior izquierda)
 - **Fuentes:** Helvetica (incluida en PDF estándar)
 - **Codificación:** UTF-8 para todos los textos

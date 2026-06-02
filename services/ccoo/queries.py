@@ -4,6 +4,12 @@ Queries UNION ALL que combinan notas y memos en una sola consulta paginada.
 
 Nota sobre exclusividad: No puede haber duplicados entre subqueries porque
 document_type_id es exclusivo: un documento es NOTA o MEMO, nunca ambos.
+
+Parametros asyncpg (positionales):
+  No-search: ($1=sector_ids, $2=user_id, $3=limit, $4=offset)
+  Search:    ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
+  Count no-search: ($1=sector_ids, $2=user_id)
+  Count search:    ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term)
 """
 
 
@@ -15,7 +21,7 @@ document_type_id es exclusivo: un documento es NOTA o MEMO, nunca ambos.
 def get_received_ccoo_query(date_where: str = "") -> str:
     """
     Obtiene CCOO recibidas (notas + memos) con paginacion, NO archivadas.
-    Usa named parameters %(param)s para evitar errores de orden.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=limit, $4=offset)
     """
     return f"""
         WITH ccoo AS (
@@ -47,7 +53,7 @@ def get_received_ccoo_query(date_where: str = "") -> str:
                     ) as read_status
                 FROM official_documents od
                 JOIN notes_recipients nr ON nr.document_id = od.id
-                    AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                    AND nr.sector_id = ANY($1::uuid[])
                     AND nr.is_archived = false
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN sectors ss ON ss.id = nr.sender_sector_id
@@ -77,7 +83,7 @@ def get_received_ccoo_query(date_where: str = "") -> str:
                     ) as read_status
                 FROM official_documents od
                 JOIN memo_recipients mr ON mr.document_id = od.id
-                    AND mr.recipient_user_id = %(user_id)s
+                    AND mr.recipient_user_id = $2
                     AND mr.is_archived = false
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN users u_sender ON u_sender.id = mr.sender_user_id
@@ -87,27 +93,27 @@ def get_received_ccoo_query(date_where: str = "") -> str:
         )
         SELECT * FROM ccoo
         ORDER BY signed_at DESC
-        LIMIT %(limit)s OFFSET %(offset)s
+        LIMIT $3 OFFSET $4
     """
 
 
 def get_received_ccoo_count_query(date_where: str = "") -> str:
     """
     Cuenta CCOO recibidas como suma de 2 counts separados.
-    Mas eficiente que COUNT sobre UNION ALL.
+    Params: ($1=sector_ids::uuid[], $2=user_id)
     """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN notes_recipients nr ON nr.document_id = od.id
-                AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                AND nr.sector_id = ANY($1::uuid[])
                 AND nr.is_archived = false
              JOIN document_types dt ON dt.id = od.document_type_id
              WHERE od.signed_at IS NOT NULL {date_where})
             +
             (SELECT COUNT(*) FROM official_documents od
              JOIN memo_recipients mr ON mr.document_id = od.id
-                AND mr.recipient_user_id = %(user_id)s
+                AND mr.recipient_user_id = $2
                 AND mr.is_archived = false
              JOIN document_types dt ON dt.id = od.document_type_id
              WHERE od.signed_at IS NOT NULL {date_where})
@@ -118,6 +124,7 @@ def get_received_ccoo_count_query(date_where: str = "") -> str:
 def get_received_ccoo_search_query(date_where: str = "") -> str:
     """
     Obtiene CCOO recibidas con filtro de busqueda ILIKE, NO archivadas.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
     """
     return f"""
         WITH ccoo AS (
@@ -149,17 +156,17 @@ def get_received_ccoo_search_query(date_where: str = "") -> str:
                     ) as read_status
                 FROM official_documents od
                 JOIN notes_recipients nr ON nr.document_id = od.id
-                    AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                    AND nr.sector_id = ANY($1::uuid[])
                     AND nr.is_archived = false
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN sectors ss ON ss.id = nr.sender_sector_id
                 JOIN departments sd ON sd.id = ss.department_id
                 WHERE od.signed_at IS NOT NULL
                 AND (
-                    od.official_number ILIKE %(search_pattern)s
-                    OR od.reference ILIKE %(search_pattern)s
-                    OR od.content->>'html' ILIKE %(search_pattern)s
-                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                    od.official_number ILIKE $3
+                    OR od.reference ILIKE $3
+                    OR od.content->>'html' ILIKE $3
+                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
                 )
                 {date_where}
                 ORDER BY od.id, nr.recipient_type
@@ -186,56 +193,59 @@ def get_received_ccoo_search_query(date_where: str = "") -> str:
                     ) as read_status
                 FROM official_documents od
                 JOIN memo_recipients mr ON mr.document_id = od.id
-                    AND mr.recipient_user_id = %(user_id)s
+                    AND mr.recipient_user_id = $2
                     AND mr.is_archived = false
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN users u_sender ON u_sender.id = mr.sender_user_id
                 LEFT JOIN sectors s_sender ON s_sender.id = mr.sender_sector_id
                 WHERE od.signed_at IS NOT NULL
                 AND (
-                    od.official_number ILIKE %(search_pattern)s
-                    OR od.reference ILIKE %(search_pattern)s
-                    OR od.content->>'html' ILIKE %(search_pattern)s
-                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                    od.official_number ILIKE $3
+                    OR od.reference ILIKE $3
+                    OR od.content->>'html' ILIKE $3
+                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
                 )
                 {date_where}
             )
         )
         SELECT * FROM ccoo
         ORDER BY signed_at DESC
-        LIMIT %(limit)s OFFSET %(offset)s
+        LIMIT $5 OFFSET $6
     """
 
 
 def get_received_ccoo_search_count_query(date_where: str = "") -> str:
-    """Cuenta CCOO recibidas con filtro de busqueda ILIKE."""
+    """
+    Cuenta CCOO recibidas con filtro de busqueda ILIKE.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term)
+    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN notes_recipients nr ON nr.document_id = od.id
-                AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                AND nr.sector_id = ANY($1::uuid[])
                 AND nr.is_archived = false
              JOIN document_types dt ON dt.id = od.document_type_id
              WHERE od.signed_at IS NOT NULL
              AND (
-                od.official_number ILIKE %(search_pattern)s
-                OR od.reference ILIKE %(search_pattern)s
-                OR od.content->>'html' ILIKE %(search_pattern)s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                od.official_number ILIKE $3
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $3
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
              )
              {date_where})
             +
             (SELECT COUNT(*) FROM official_documents od
              JOIN memo_recipients mr ON mr.document_id = od.id
-                AND mr.recipient_user_id = %(user_id)s
+                AND mr.recipient_user_id = $2
                 AND mr.is_archived = false
              JOIN document_types dt ON dt.id = od.document_type_id
              WHERE od.signed_at IS NOT NULL
              AND (
-                od.official_number ILIKE %(search_pattern)s
-                OR od.reference ILIKE %(search_pattern)s
-                OR od.content->>'html' ILIKE %(search_pattern)s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                od.official_number ILIKE $3
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $3
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
              )
              {date_where})
         ) as total
@@ -250,9 +260,7 @@ def get_received_ccoo_search_count_query(date_where: str = "") -> str:
 def get_sent_ccoo_query(date_where: str = "") -> str:
     """
     Obtiene CCOO enviadas (notas + memos) con paginacion.
-    Notas: filtra por sender_sector_id = ANY(sector_ids)
-    Memos: filtra por sender_user_id = user_id
-    Normaliza recipients como recipients_label (primer destinatario) y recipients_count.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=limit, $4=offset)
     """
     return f"""
         WITH ccoo AS (
@@ -288,7 +296,7 @@ def get_sent_ccoo_query(date_where: str = "") -> str:
                 AND od.id IN (
                     SELECT DISTINCT nr.document_id
                     FROM notes_recipients nr
-                    WHERE nr.sender_sector_id = ANY(%(sector_ids)s::uuid[])
+                    WHERE nr.sender_sector_id = ANY($1::uuid[])
                 )
                 {date_where}
             )
@@ -324,7 +332,7 @@ def get_sent_ccoo_query(date_where: str = "") -> str:
                     JOIN memo_recipients mr ON mr.document_id = od.id
                     JOIN document_types dt ON dt.id = od.document_type_id
                     WHERE od.signed_at IS NOT NULL
-                    AND mr.sender_user_id = %(user_id)s
+                    AND mr.sender_user_id = $2
                     {date_where}
                     ORDER BY od.id, od.signed_at DESC
                 ) sub
@@ -332,31 +340,37 @@ def get_sent_ccoo_query(date_where: str = "") -> str:
         )
         SELECT * FROM ccoo
         ORDER BY signed_at DESC
-        LIMIT %(limit)s OFFSET %(offset)s
+        LIMIT $3 OFFSET $4
     """
 
 
 def get_sent_ccoo_count_query(date_where: str = "") -> str:
-    """Cuenta CCOO enviadas como suma de 2 counts separados."""
+    """
+    Cuenta CCOO enviadas como suma de 2 counts separados.
+    Params: ($1=sector_ids::uuid[], $2=user_id)
+    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN notes_recipients nr ON nr.document_id = od.id
              WHERE od.signed_at IS NOT NULL
-             AND nr.sender_sector_id = ANY(%(sector_ids)s::uuid[])
+             AND nr.sender_sector_id = ANY($1::uuid[])
              {date_where})
             +
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN memo_recipients mr ON mr.document_id = od.id
              WHERE od.signed_at IS NOT NULL
-             AND mr.sender_user_id = %(user_id)s
+             AND mr.sender_user_id = $2
              {date_where})
         ) as total
     """
 
 
 def get_sent_ccoo_search_query(date_where: str = "") -> str:
-    """Obtiene CCOO enviadas con filtro de busqueda ILIKE."""
+    """
+    Obtiene CCOO enviadas con filtro de busqueda ILIKE.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
+    """
     return f"""
         WITH ccoo AS (
             (
@@ -391,13 +405,13 @@ def get_sent_ccoo_search_query(date_where: str = "") -> str:
                 AND od.id IN (
                     SELECT DISTINCT nr.document_id
                     FROM notes_recipients nr
-                    WHERE nr.sender_sector_id = ANY(%(sector_ids)s::uuid[])
+                    WHERE nr.sender_sector_id = ANY($1::uuid[])
                 )
                 AND (
-                    od.official_number ILIKE %(search_pattern)s
-                    OR od.reference ILIKE %(search_pattern)s
-                    OR od.content->>'html' ILIKE %(search_pattern)s
-                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                    od.official_number ILIKE $3
+                    OR od.reference ILIKE $3
+                    OR od.content->>'html' ILIKE $3
+                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
                 )
                 {date_where}
             )
@@ -433,12 +447,12 @@ def get_sent_ccoo_search_query(date_where: str = "") -> str:
                     JOIN memo_recipients mr ON mr.document_id = od.id
                     JOIN document_types dt ON dt.id = od.document_type_id
                     WHERE od.signed_at IS NOT NULL
-                    AND mr.sender_user_id = %(user_id)s
+                    AND mr.sender_user_id = $2
                     AND (
-                        od.official_number ILIKE %(search_pattern)s
-                        OR od.reference ILIKE %(search_pattern)s
-                        OR od.content->>'html' ILIKE %(search_pattern)s
-                        OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                        od.official_number ILIKE $3
+                        OR od.reference ILIKE $3
+                        OR od.content->>'html' ILIKE $3
+                        OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
                     )
                     {date_where}
                     ORDER BY od.id, od.signed_at DESC
@@ -447,35 +461,38 @@ def get_sent_ccoo_search_query(date_where: str = "") -> str:
         )
         SELECT * FROM ccoo
         ORDER BY signed_at DESC
-        LIMIT %(limit)s OFFSET %(offset)s
+        LIMIT $5 OFFSET $6
     """
 
 
 def get_sent_ccoo_search_count_query(date_where: str = "") -> str:
-    """Cuenta CCOO enviadas con filtro de busqueda ILIKE."""
+    """
+    Cuenta CCOO enviadas con filtro de busqueda ILIKE.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term)
+    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN notes_recipients nr ON nr.document_id = od.id
              WHERE od.signed_at IS NOT NULL
-             AND nr.sender_sector_id = ANY(%(sector_ids)s::uuid[])
+             AND nr.sender_sector_id = ANY($1::uuid[])
              AND (
-                od.official_number ILIKE %(search_pattern)s
-                OR od.reference ILIKE %(search_pattern)s
-                OR od.content->>'html' ILIKE %(search_pattern)s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                od.official_number ILIKE $3
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $3
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
              )
              {date_where})
             +
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN memo_recipients mr ON mr.document_id = od.id
              WHERE od.signed_at IS NOT NULL
-             AND mr.sender_user_id = %(user_id)s
+             AND mr.sender_user_id = $2
              AND (
-                od.official_number ILIKE %(search_pattern)s
-                OR od.reference ILIKE %(search_pattern)s
-                OR od.content->>'html' ILIKE %(search_pattern)s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                od.official_number ILIKE $3
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $3
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
              )
              {date_where})
         ) as total
@@ -490,7 +507,7 @@ def get_sent_ccoo_search_count_query(date_where: str = "") -> str:
 def get_archived_ccoo_query() -> str:
     """
     Obtiene CCOO archivadas (notas + memos) con paginacion.
-    Orden por archived_at DESC.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=limit, $4=offset)
     """
     return """
         WITH ccoo AS (
@@ -523,7 +540,7 @@ def get_archived_ccoo_query() -> str:
                     nr.archived_at
                 FROM official_documents od
                 JOIN notes_recipients nr ON nr.document_id = od.id
-                    AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                    AND nr.sector_id = ANY($1::uuid[])
                     AND nr.is_archived = true
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN sectors ss ON ss.id = nr.sender_sector_id
@@ -554,7 +571,7 @@ def get_archived_ccoo_query() -> str:
                     mr.archived_at
                 FROM official_documents od
                 JOIN memo_recipients mr ON mr.document_id = od.id
-                    AND mr.recipient_user_id = %(user_id)s
+                    AND mr.recipient_user_id = $2
                     AND mr.is_archived = true
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN users u_sender ON u_sender.id = mr.sender_user_id
@@ -564,23 +581,26 @@ def get_archived_ccoo_query() -> str:
         )
         SELECT * FROM ccoo
         ORDER BY archived_at DESC
-        LIMIT %(limit)s OFFSET %(offset)s
+        LIMIT $3 OFFSET $4
     """
 
 
 def get_archived_ccoo_count_query() -> str:
-    """Cuenta CCOO archivadas como suma de 2 counts separados."""
+    """
+    Cuenta CCOO archivadas como suma de 2 counts separados.
+    Params: ($1=sector_ids::uuid[], $2=user_id)
+    """
     return """
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN notes_recipients nr ON nr.document_id = od.id
-                AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                AND nr.sector_id = ANY($1::uuid[])
                 AND nr.is_archived = true
              WHERE od.signed_at IS NOT NULL)
             +
             (SELECT COUNT(*) FROM official_documents od
              JOIN memo_recipients mr ON mr.document_id = od.id
-                AND mr.recipient_user_id = %(user_id)s
+                AND mr.recipient_user_id = $2
                 AND mr.is_archived = true
              WHERE od.signed_at IS NOT NULL)
         ) as total
@@ -588,7 +608,10 @@ def get_archived_ccoo_count_query() -> str:
 
 
 def get_archived_ccoo_search_query() -> str:
-    """Obtiene CCOO archivadas con filtro de busqueda ILIKE."""
+    """
+    Obtiene CCOO archivadas con filtro de busqueda ILIKE.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
+    """
     return """
         WITH ccoo AS (
             (
@@ -620,17 +643,17 @@ def get_archived_ccoo_search_query() -> str:
                     nr.archived_at
                 FROM official_documents od
                 JOIN notes_recipients nr ON nr.document_id = od.id
-                    AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                    AND nr.sector_id = ANY($1::uuid[])
                     AND nr.is_archived = true
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN sectors ss ON ss.id = nr.sender_sector_id
                 JOIN departments sd ON sd.id = ss.department_id
                 WHERE od.signed_at IS NOT NULL
                 AND (
-                    od.official_number ILIKE %(search_pattern)s
-                    OR od.reference ILIKE %(search_pattern)s
-                    OR od.content->>'html' ILIKE %(search_pattern)s
-                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                    od.official_number ILIKE $3
+                    OR od.reference ILIKE $3
+                    OR od.content->>'html' ILIKE $3
+                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
                 )
                 ORDER BY od.id, nr.recipient_type
             )
@@ -657,52 +680,55 @@ def get_archived_ccoo_search_query() -> str:
                     mr.archived_at
                 FROM official_documents od
                 JOIN memo_recipients mr ON mr.document_id = od.id
-                    AND mr.recipient_user_id = %(user_id)s
+                    AND mr.recipient_user_id = $2
                     AND mr.is_archived = true
                 JOIN document_types dt ON dt.id = od.document_type_id
                 JOIN users u_sender ON u_sender.id = mr.sender_user_id
                 LEFT JOIN sectors s_sender ON s_sender.id = mr.sender_sector_id
                 WHERE od.signed_at IS NOT NULL
                 AND (
-                    od.official_number ILIKE %(search_pattern)s
-                    OR od.reference ILIKE %(search_pattern)s
-                    OR od.content->>'html' ILIKE %(search_pattern)s
-                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                    od.official_number ILIKE $3
+                    OR od.reference ILIKE $3
+                    OR od.content->>'html' ILIKE $3
+                    OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
                 )
             )
         )
         SELECT * FROM ccoo
         ORDER BY archived_at DESC
-        LIMIT %(limit)s OFFSET %(offset)s
+        LIMIT $5 OFFSET $6
     """
 
 
 def get_archived_ccoo_search_count_query() -> str:
-    """Cuenta CCOO archivadas con filtro de busqueda ILIKE."""
+    """
+    Cuenta CCOO archivadas con filtro de busqueda ILIKE.
+    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term)
+    """
     return """
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
              JOIN notes_recipients nr ON nr.document_id = od.id
-                AND nr.sector_id = ANY(%(sector_ids)s::uuid[])
+                AND nr.sector_id = ANY($1::uuid[])
                 AND nr.is_archived = true
              WHERE od.signed_at IS NOT NULL
              AND (
-                od.official_number ILIKE %(search_pattern)s
-                OR od.reference ILIKE %(search_pattern)s
-                OR od.content->>'html' ILIKE %(search_pattern)s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                od.official_number ILIKE $3
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $3
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
              ))
             +
             (SELECT COUNT(*) FROM official_documents od
              JOIN memo_recipients mr ON mr.document_id = od.id
-                AND mr.recipient_user_id = %(user_id)s
+                AND mr.recipient_user_id = $2
                 AND mr.is_archived = true
              WHERE od.signed_at IS NOT NULL
              AND (
-                od.official_number ILIKE %(search_pattern)s
-                OR od.reference ILIKE %(search_pattern)s
-                OR od.content->>'html' ILIKE %(search_pattern)s
-                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER(%(search_term)s)) > 0.3
+                od.official_number ILIKE $3
+                OR od.reference ILIKE $3
+                OR od.content->>'html' ILIKE $3
+                OR similarity(LOWER(COALESCE(od.reference, '')), LOWER($4)) > 0.3
              ))
         ) as total
     """

@@ -29,8 +29,8 @@ async def get_record_cases(
 ):
     """Listar expedientes vinculados a un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
-        result = get_linked_cases(
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        result = await get_linked_cases(
             record_id,
             db_user_id,
             schema_name=schema_name,
@@ -58,9 +58,9 @@ async def link_case_to_record(
 ):
     """Vincular un expediente a un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = link_case(
+        result = await link_case(
             record_id=record_id,
             case_id=request.case_id,
             user_id=db_user_id,
@@ -90,9 +90,9 @@ async def unlink_case_from_record(
 ):
     """Desvincular un expediente de un legajo."""
     try:
-        db_user_id = get_authenticated_user(current_user.user_id, schema_name=schema_name)
+        db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
-        result = unlink_case(
+        result = await unlink_case(
             record_id=record_id,
             link_id=link_id,
             user_id=db_user_id,

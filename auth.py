@@ -3,7 +3,6 @@ Middleware de autenticación para validar tokens JWT de Auth0.
 Este módulo contiene la lógica para validar tokens JWT y obtener información del usuario autenticado.
 """
 
-import os
 import logging
 import requests
 
@@ -160,7 +159,7 @@ def verify_auth0_token(
         )
     return verify_token(credentials.credentials)
 
-def load_user_permissions(user_id: str, *, schema_name: str) -> list:
+async def load_user_permissions(user_id: str, *, schema_name: str) -> list:
     """
     Carga los permisos de sectores del usuario desde la base de datos.
 
@@ -172,7 +171,7 @@ def load_user_permissions(user_id: str, *, schema_name: str) -> list:
         Lista de objetos SectorPermission con información de sectores y permisos
     """
     try:
-        permissions_data = user_service.get_user_sector_permissions(user_id, schema_name=schema_name)
+        permissions_data = await user_service.get_user_sector_permissions(user_id, schema_name=schema_name)
 
         # Convertir cada dict a SectorPermission
         permissions = [
@@ -197,7 +196,7 @@ def load_user_permissions(user_id: str, *, schema_name: str) -> list:
         logger.error(f"Error cargando permisos para user_id {user_id}: {str(e)}", exc_info=True)
         return []
 
-def get_current_user(
+async def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     x_user_id: Optional[str] = Header(None, alias="X-User-ID")
@@ -223,36 +222,46 @@ def get_current_user(
     # Obtener schema del request (seteado por TenantMiddleware)
     schema_name = getattr(request.state, 'schema_name', None)
 
+    # CAMINO API KEY (FASE 1 S8-001).
+    # El TenantMiddleware ya validó la API Key y dejó schema_name + tenant_user_id
+    # en request.state. Construimos el AuthenticatedUser igual que el camino JWT,
+    # cargando permisos de sector desde BD (esto puebla sender_sector_id en NOTAs).
+    # Nota: get_user_by_id filtra WHERE u.id=$1 AND u.estado=1, por lo que si
+    # devuelve un resultado el usuario es activo; None significa no encontrado o inactivo.
+    auth_source = getattr(request.state, 'auth_source', None)
+    if auth_source == "api_key":
+        tenant_user_id = getattr(request.state, 'tenant_user_id', None)
+        if tenant_user_id and schema_name:
+            user_data = await user_service.get_user_by_id(tenant_user_id, schema_name=schema_name)
+            if not user_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Usuario no encontrado en la base de datos.",
+                )
+            permissions = await load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
+            return AuthenticatedUser(
+                user_id=str(user_data["user_id"]),
+                auth_id=user_data.get("auth_id") or "api_key",
+                full_name=user_data["full_name"],
+                email=user_data["email"],
+                permissions=permissions
+            )
+        # API Key sin tenant_user_id no debería llegar acá (validate_rest_api_key lo exige),
+        # pero si ocurre por algún bug de wiring → 401 explícito.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API Key auth no provee usuario para este endpoint",
+        )
+
     # MODO TESTING: Usar tenant_user_id del middleware si está disponible
     if TESTING_MODE:
-        # Opción 0: API Key fija para testing (header X-API-Key)
-        api_key = request.headers.get("X-API-Key")
-        testing_api_key = os.getenv("TESTING_API_KEY")
-        if api_key and testing_api_key and api_key == testing_api_key:
-            # Buscar primer usuario activo en el schema
-            first_user = user_service.get_first_active_user(schema_name=schema_name)
-            if first_user:
-                user_id = str(first_user["user_id"])
-                permissions = load_user_permissions(user_id, schema_name=schema_name)
-                return AuthenticatedUser(
-                    user_id=user_id,
-                    auth_id=first_user.get("auth_id") or "testing-api-key",
-                    full_name=first_user["full_name"],
-                    email=first_user["email"],
-                    permissions=permissions
-                )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="No hay usuarios activos en el sistema para testing",
-            )
-
         # Opción 1: Usar tenant_user_id ya validado por TenantMiddleware
         tenant_user_id = getattr(request.state, 'tenant_user_id', None)
         if tenant_user_id:
-            user_data = user_service.get_user_by_id(tenant_user_id, schema_name=schema_name)
+            user_data = await user_service.get_user_by_id(tenant_user_id, schema_name=schema_name)
 
             if user_data:
-                permissions = load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
+                permissions = await load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
                 return AuthenticatedUser(
                     user_id=str(user_data["user_id"]),
                     auth_id=user_data.get("auth_id") or "testing",
@@ -271,7 +280,7 @@ def get_current_user(
                 test_user_id = token
 
         if test_user_id:
-            user_data = user_service.get_user_by_id(test_user_id, schema_name=schema_name)
+            user_data = await user_service.get_user_by_id(test_user_id, schema_name=schema_name)
 
             if not user_data:
                 raise HTTPException(
@@ -285,7 +294,7 @@ def get_current_user(
                     detail="Usuario inactivo",
                 )
 
-            permissions = load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
+            permissions = await load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
             return AuthenticatedUser(
                 user_id=str(user_data["user_id"]),
                 auth_id=user_data.get("auth_id") or "testing",
@@ -324,7 +333,7 @@ def get_current_user(
             detail="Schema no configurado. TenantMiddleware no se ejecutó?",
         )
 
-    user_data = user_service.get_user_by_auth_id(auth_id, schema_name=schema_name)
+    user_data = await user_service.get_user_by_auth_id(auth_id, schema_name=schema_name)
 
     if not user_data:
         raise HTTPException(
@@ -340,7 +349,7 @@ def get_current_user(
         )
 
     # Cargar permisos de sectores desde BD
-    user_permissions = load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
+    user_permissions = await load_user_permissions(str(user_data["user_id"]), schema_name=schema_name)
 
     # Retornar usuario autenticado
     return AuthenticatedUser(
@@ -351,7 +360,7 @@ def get_current_user(
         permissions=user_permissions
     )
 
-def get_optional_current_user(
+async def get_optional_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     x_user_id: Optional[str] = Header(None, alias="X-User-ID")
@@ -364,7 +373,7 @@ def get_optional_current_user(
         return None
 
     try:
-        return get_current_user(request, credentials, x_user_id)
+        return await get_current_user(request, credentials, x_user_id)
     except HTTPException:
         return None
     except Exception as e:

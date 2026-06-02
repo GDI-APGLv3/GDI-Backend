@@ -14,7 +14,7 @@
 
 | Variable | Tipo | Requerida | Default | Descripcion | Donde configurar |
 |----------|------|-----------|---------|-------------|-----------------|
-| API_KEY | Secret | Si | miapikey | API Key autenticacion | Fly Secret |
+| API_KEY | Secret | Si | your-api-key-here | API Key autenticacion | Fly Secret |
 | PORT | Config | No | 8080 | Puerto del servidor | fly.toml [env] |
 | GUNICORN_WORKERS | Config | No | 4 | Numero de workers | fly.toml [env] |
 | GUNICORN_TIMEOUT | Config | No | 120 | Timeout en segundos | fly.toml [env] |
@@ -26,7 +26,7 @@
 ### Local (desarrollo)
 Copiar `.env.example` a `.env` y completar valores.
 ```bash
-API_KEY=miapikey
+API_KEY=your-api-key-here
 ```
 
 ### Fly.io (dev/staging/prod)

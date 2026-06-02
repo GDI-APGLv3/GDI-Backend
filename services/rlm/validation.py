@@ -7,14 +7,14 @@ from datetime import datetime
 from typing import Any, Optional
 from shared.logging import get_logger
 from shared.exceptions import ValidationError
-from database import execute_query
+from database import fetch_one
 
 logger = get_logger(__name__)
 
 VALID_FIELD_TYPES = {"text", "number", "date", "select", "boolean", "file", "textarea"}
 
 
-def validate_record_data(data: dict, data_schema: dict, *, skip_required: bool = False, schema_name: str = None) -> dict:
+async def validate_record_data(data: dict, data_schema: dict, *, skip_required: bool = False, schema_name: str = None) -> dict:
     """
     Valida los datos de un legajo contra el data_schema del registro.
 
@@ -43,12 +43,12 @@ def validate_record_data(data: dict, data_schema: dict, *, skip_required: bool =
             )
 
         if field_value is not None and field_value != "":
-            validated[field_name] = _build_enriched_field(field_name, field_value, field_schema, data, schema_name=schema_name)
+            validated[field_name] = await _build_enriched_field(field_name, field_value, field_schema, data, schema_name=schema_name)
 
     return validated
 
 
-def _build_enriched_field(field_name: str, value: Any, field_schema: dict, full_data: dict, *, schema_name: str = None) -> dict:
+async def _build_enriched_field(field_name: str, value: Any, field_schema: dict, full_data: dict, *, schema_name: str = None) -> dict:
     """
     Construye un campo enriquecido con metadatos opcionales.
 
@@ -81,7 +81,7 @@ def _build_enriched_field(field_name: str, value: Any, field_schema: dict, full_
 
     # Para campos file: auto-enriquecer con datos del documento
     if is_file and isinstance(value, str) and schema_name:
-        doc_info = _lookup_document(value, schema_name=schema_name)
+        doc_info = await _lookup_document(value, schema_name=schema_name)
         if doc_info:
             field = {
                 "value": doc_info.get("official_number") or value,
@@ -124,22 +124,21 @@ def _build_enriched_field(field_name: str, value: Any, field_schema: dict, full_
     return field
 
 
-def _lookup_document(document_id: str, *, schema_name: str) -> Optional[dict]:
+async def _lookup_document(document_id: str, *, schema_name: str) -> Optional[dict]:
     """
     Busca un documento oficial por ID para enriquecer campos file.
     Best-effort: si no existe o falla, retorna None.
     """
     try:
-        result = execute_query(
+        result = await fetch_one(
             """SELECT official_number, reference, resume
-               FROM official_documents WHERE id = %s AND signed_at IS NOT NULL
+               FROM official_documents WHERE id = $1 AND signed_at IS NOT NULL
                UNION ALL
                SELECT NULL as official_number, reference, NULL as resume
-               FROM document_draft WHERE id = %s
+               FROM document_draft WHERE id = $1
                LIMIT 1""",
-            (document_id, document_id),
+            document_id,
             schema_name=schema_name,
-            fetch_one=True
         )
         return dict(result) if result else None
     except Exception as e:

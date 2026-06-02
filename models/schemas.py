@@ -289,7 +289,7 @@ class User(BaseModel):
     auth_id: Optional[str] = Field(None, description="ID de Auth0 del usuario")
     full_name: str = Field(..., description="Nombre completo del usuario")
     email: str = Field(..., description="Email del usuario")
-    cuit: Optional[str] = Field(None, description="CUIT del usuario")
+    country_id: Optional[str] = Field(None, description="Identificador nacional del usuario (CountryID en BD). En Argentina es el CUIT; en otros países es el equivalente.")
     profile_picture_url: Optional[str] = Field(None, description="URL de la foto de perfil")
     sector_id: Optional[str] = Field(None, description="UUID del sector al que pertenece")
     sector_acronym: Optional[str] = Field(None, description="Acrónimo/nombre del sector (ej: SECOBRA, MESA)")
@@ -311,7 +311,7 @@ class User(BaseModel):
                 "auth_id": "auth0|64a1b2c3d4e5f67890abcdef",
                 "full_name": "Juan Pérez González",
                 "email": "juan.perez@municipalidad.cl",
-                "cuit": "20-12345678-9",
+                "country_id": "20-12345678-9",
                 "profile_picture_url": "https://s.gravatar.com/avatar/123abc.jpg",
                 "sector_id": "770e8400-e29b-41d4-a716-446655440222",
                 "sector_acronym": "SECOBRA",
@@ -333,17 +333,17 @@ class CreateUserRequest(BaseModel):
     auth_id: str = Field(..., description="ID de Auth0 del usuario")
     full_name: str = Field(..., min_length=1, max_length=255, description="Nombre completo del usuario")
     email: str = Field(..., description="Email del usuario")
-    cuit: Optional[str] = Field(None, description="CUIT del usuario")
+    country_id: Optional[str] = Field(None, description="Identificador nacional del usuario (CountryID en BD). En Argentina es el CUIT; en otros países es el equivalente.")
     profile_picture_url: Optional[str] = Field(None, description="URL de la foto de perfil")
     sector_id: Optional[str] = Field(None, description="UUID del sector")
-    
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "auth_id": "auth0|64a1b2c3d4e5f67890abcdef",
                 "full_name": "Juan Pérez González",
                 "email": "juan.perez@municipalidad.cl",
-                "cuit": "20-12345678-9",
+                "country_id": "20-12345678-9",
                 "profile_picture_url": "https://s.gravatar.com/avatar/123abc.jpg",
                 "sector_id": "770e8400-e29b-41d4-a716-446655440222"
             }
@@ -366,7 +366,7 @@ class CreateUserResponse(BaseModel):
                     "auth_id": "auth0|64a1b2c3d4e5f67890abcdef",
                     "full_name": "Juan Pérez González",
                     "email": "juan.perez@municipalidad.cl",
-                    "cuit": "20-12345678-9",
+                    "country_id": "20-12345678-9",
                     "profile_picture_id": "660e8400-e29b-41d4-a716-446655440111",
                     "sector_id": "770e8400-e29b-41d4-a716-446655440222",
                     "last_access": "2025-09-26T10:30:00",
@@ -381,15 +381,15 @@ class CreateUserResponse(BaseModel):
 class UpdateUserRequest(BaseModel):
     """Modelo para actualización de perfil de usuario"""
     full_name: Optional[str] = Field(None, min_length=1, max_length=255, description="Nombre completo del usuario")
-    cuit: Optional[str] = Field(None, description="CUIT del usuario")
+    country_id: Optional[str] = Field(None, description="Identificador nacional del usuario (CountryID en BD). En Argentina es el CUIT; en otros países es el equivalente.")
     profile_picture_url: Optional[str] = Field(None, description="URL de la foto de perfil")
     sector_id: Optional[str] = Field(None, description="UUID del sector")
-    
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "full_name": "Juan Carlos Pérez González",
-                "cuit": "20-12345678-9",
+                "country_id": "20-12345678-9",
                 "profile_picture_url": "https://s.gravatar.com/avatar/456def.jpg"
             }
         }

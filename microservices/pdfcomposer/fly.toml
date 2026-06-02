@@ -1,5 +1,4 @@
-# Plantilla Fly.io para el microservicio PDFComposer (generación de PDFs).
-app = "<YOUR_PDFCOMPOSER_APP_NAME>"
+app = "<your-pdfcomposer-app>"
 primary_region = "gru"
 
 [build]

@@ -183,10 +183,10 @@ async def search_users_endpoint(
         # Detectar si es búsqueda por email o por nombre
         if is_email(q):
             # Búsqueda/creación por email
-            result = search_or_create_user_by_email(email=q, schema_name=schema_name)
+            result = await search_or_create_user_by_email(email=q, schema_name=schema_name)
         else:
             # Búsqueda normal por nombre - Single Responsibility
-            result = search_users_for_autocomplete(search_query=q, limit=limit, schema_name=schema_name)
+            result = await search_users_for_autocomplete(search_query=q, limit=limit, schema_name=schema_name)
 
         # Respuesta directa usando **unpacking como en editor-details
         return UserSearchResponse(

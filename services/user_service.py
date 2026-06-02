@@ -3,16 +3,16 @@ Servicios para la gestión de usuarios que contienen la lógica de negocio.
 Estos servicios implementan las consultas a la base de datos y la manipulación de datos de usuarios.
 """
 
-import psycopg2
+import asyncpg
 from typing import List, Dict, Any, Optional
-from database import get_db_connection, get_db_cursor
+from database import fetch_all, fetch_one, fetch_val, execute
 from datetime import datetime
 from shared.logging import get_logger
 
 logger = get_logger(__name__)
 
-def create_user(auth_id: str, full_name: str, email: str,
-                cuit: Optional[str] = None, profile_picture_url: Optional[str] = None,
+async def create_user(auth_id: str, full_name: str, email: str,
+                country_id: Optional[str] = None, profile_picture_url: Optional[str] = None,
                 sector_id: Optional[str] = None, *, schema_name: str) -> Dict[str, Any]:
     """
     Crea un nuevo usuario usando la función stored procedure de PostgreSQL.
@@ -21,7 +21,7 @@ def create_user(auth_id: str, full_name: str, email: str,
         auth_id: ID de Auth0 del usuario
         full_name: Nombre completo del usuario
         email: Email del usuario
-        cuit: CUIT del usuario (opcional)
+        country_id: Identificador nacional del usuario (columna CountryID en BD). En Argentina es el CUIT (opcional)
         profile_picture_url: URL de la foto de perfil (opcional)
         sector_id: UUID del sector (opcional)
 
@@ -29,37 +29,34 @@ def create_user(auth_id: str, full_name: str, email: str,
         Diccionario con la información del usuario creado o error
     """
     try:
-        with get_db_cursor(commit=True, schema_name=schema_name) as cursor:
-            # Llamar a la función stored procedure
-            cursor.execute(
-                """
-                SELECT * FROM create_user(
-                    p_auth_id := %s,
-                    p_full_name := %s,
-                    p_email := %s,
-                    p_cuit := %s,
-                    p_profile_picture_url := %s,
-                    p_sector_id := %s
-                )
-                """,
-                (auth_id, full_name, email, cuit, profile_picture_url, sector_id)
+        user_data = await fetch_one(
+            """
+            SELECT * FROM create_user(
+                p_auth_id := $1,
+                p_full_name := $2,
+                p_email := $3,
+                p_cuit := $4,
+                p_profile_picture_url := $5,
+                p_sector_id := $6
             )
+            """,
+            auth_id, full_name, email, country_id, profile_picture_url, sector_id,
+            schema_name=schema_name
+        )
 
-            user_data = cursor.fetchone()
+        if user_data:
+            return {
+                "success": True,
+                "message": "Usuario creado exitosamente",
+                "user": dict(user_data)
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Error al crear usuario: No se retornaron datos"
+            }
 
-            if user_data:
-                return {
-                    "success": True,
-                    "message": "Usuario creado exitosamente",
-                    "user": dict(user_data)
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": "Error al crear usuario: No se retornaron datos"
-                }
-
-    except psycopg2.IntegrityError as e:
+    except asyncpg.UniqueViolationError as e:
         error_message = str(e)
         if "Ya existe un usuario con el email" in error_message:
             return {
@@ -76,7 +73,7 @@ def create_user(auth_id: str, full_name: str, email: str,
                 "success": False,
                 "message": f"Error de integridad: {error_message}"
             }
-    except psycopg2.Error as e:
+    except Exception as e:
         error_message = f"Error al crear usuario: {str(e)}"
         logger.error(error_message)
         return {
@@ -84,7 +81,7 @@ def create_user(auth_id: str, full_name: str, email: str,
             "message": error_message
         }
 
-def get_user_by_auth_id(auth_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
+async def get_user_by_auth_id(auth_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
     """
     Obtiene un usuario por su auth_id de Auth0.
 
@@ -96,42 +93,40 @@ def get_user_by_auth_id(auth_id: str, *, schema_name: str) -> Optional[Dict[str,
         Diccionario con los datos del usuario o None si no existe
     """
     try:
-        with get_db_cursor(schema_name=schema_name) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    u.id as user_id,
-                    u.auth_id,
-                    u.full_name,
-                    u.email,
-                    u.sector_id,
-                    u.last_access,
-                    u.created_at,
-                    u.estado,
-                    cs.id as default_seal_id,
-                    cs.name as default_seal_name
-                FROM users u
-                LEFT JOIN user_seals us ON u.id = us.user_id
-                LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
-                WHERE u.auth_id = %s AND u.estado = 1
-                """,
-                (auth_id,)
-            )
+        user_data = await fetch_one(
+            """
+            SELECT
+                u.id as user_id,
+                u.auth_id,
+                u.full_name,
+                u.email,
+                u.sector_id,
+                u.last_access,
+                u.created_at,
+                u.estado,
+                cs.id as default_seal_id,
+                cs.name as default_seal_name
+            FROM users u
+            LEFT JOIN user_seals us ON u.id = us.user_id
+            LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
+            WHERE u.auth_id = $1 AND u.estado = 1
+            """,
+            auth_id,
+            schema_name=schema_name
+        )
 
-            user_data = cursor.fetchone()
+        if user_data:
+            # Actualizar last_access (pasando schema_name para multi-tenant)
+            await update_last_access(auth_id, schema_name=schema_name)
+            return dict(user_data)
 
-            if user_data:
-                # Actualizar last_access (pasando schema_name para multi-tenant)
-                update_last_access(auth_id, schema_name=schema_name)
-                return dict(user_data)
+        return None
 
-            return None
-
-    except psycopg2.Error as e:
+    except Exception as e:
         logger.error(f"Error al obtener usuario por auth_id: {str(e)}")
         return None
 
-def get_user_by_id(user_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
+async def get_user_by_id(user_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
     """
     Obtiene un usuario por su UUID con información de sector y departamento.
 
@@ -145,21 +140,23 @@ def get_user_by_id(user_id: str, *, schema_name: str) -> Optional[Dict[str, Any]
     from services.users.queries import get_user_by_id_query
 
     try:
-        with get_db_cursor(schema_name=schema_name) as cursor:
-            cursor.execute(get_user_by_id_query(), (user_id,))
-            user_data = cursor.fetchone()
+        user_data = await fetch_one(
+            get_user_by_id_query(),
+            user_id,
+            schema_name=schema_name
+        )
 
-            if user_data:
-                return dict(user_data)
+        if user_data:
+            return dict(user_data)
 
-            return None
+        return None
 
-    except psycopg2.Error as e:
+    except Exception as e:
         logger.error(f"Error al obtener usuario por ID {user_id}: {str(e)}", exc_info=True)
         return None
 
-def update_user_profile(user_id: str, full_name: Optional[str] = None,
-                       cuit: Optional[str] = None, profile_picture_url: Optional[str] = None,
+async def update_user_profile(user_id: str, full_name: Optional[str] = None,
+                       country_id: Optional[str] = None, profile_picture_url: Optional[str] = None,
                        sector_id: Optional[str] = None, *, schema_name: str) -> Dict[str, Any]:
     """
     Actualiza el perfil de un usuario.
@@ -167,7 +164,7 @@ def update_user_profile(user_id: str, full_name: Optional[str] = None,
     Args:
         user_id: UUID del usuario
         full_name: Nuevo nombre completo (opcional)
-        cuit: Nuevo CUIT (opcional)
+        country_id: Nuevo identificador nacional (columna CountryID en BD). En Argentina es el CUIT (opcional)
         profile_picture_url: Nueva URL de foto de perfil (opcional)
         sector_id: Nuevo sector (opcional)
 
@@ -175,7 +172,7 @@ def update_user_profile(user_id: str, full_name: Optional[str] = None,
         Diccionario con el resultado de la operación
     """
     import logging
-    from services.users.queries import update_user_profile_query, get_updated_user_profile_query
+    from services.users.queries import get_updated_user_profile_query
     from config.constants import (
         PROFILE_NO_FIELDS_TO_UPDATE_ERROR,
         PROFILE_UPDATE_FAILED_ERROR,
@@ -188,19 +185,20 @@ def update_user_profile(user_id: str, full_name: Optional[str] = None,
         update_values = []
 
         if full_name is not None:
-            update_fields.append("full_name = %s")
+            update_fields.append(f"full_name = ${len(update_values) + 1}")
             update_values.append(full_name)
 
-        if cuit is not None:
-            update_fields.append("cuit = %s")
-            update_values.append(cuit)
+        if country_id is not None:
+            # CountryID es el nombre de la columna en BD (multi-país: CUIT en Argentina)
+            update_fields.append(f'"CountryID" = ${len(update_values) + 1}')
+            update_values.append(country_id)
 
         if profile_picture_url is not None:
-            update_fields.append("profile_picture_url = %s")
+            update_fields.append(f"profile_picture_url = ${len(update_values) + 1}")
             update_values.append(profile_picture_url)
 
         if sector_id is not None:
-            update_fields.append("sector_id = %s")
+            update_fields.append(f"sector_id = ${len(update_values) + 1}")
             update_values.append(sector_id)
 
         if not update_fields:
@@ -212,39 +210,47 @@ def update_user_profile(user_id: str, full_name: Optional[str] = None,
 
         # Agregar user_id al final para la cláusula WHERE
         update_values.append(user_id)
+        where_placeholder = f"${len(update_values)}"
 
-        # Actualizar y retornar con datos de sector y departamento
-        with get_db_cursor(commit=True, schema_name=schema_name) as cursor:
-            # Primero hacer el UPDATE
-            cursor.execute(update_user_profile_query(update_fields), update_values)
-            result = cursor.fetchone()
+        update_query = f"""
+            UPDATE users
+            SET {', '.join(update_fields)}
+            WHERE id = {where_placeholder} AND estado = 1
+            RETURNING id as user_id
+        """
 
-            if not result:
-                logger.warning(f"No se pudo actualizar perfil para user_id {user_id}")
-                return {
-                    "success": False,
-                    "message": PROFILE_UPDATE_FAILED_ERROR
-                }
+        # Primero hacer el UPDATE
+        result = await fetch_one(update_query, *update_values, schema_name=schema_name)
 
-            # Luego obtener los datos completos con JOIN
-            cursor.execute(get_updated_user_profile_query(), (user_id,))
-            updated_user = cursor.fetchone()
+        if not result:
+            logger.warning(f"No se pudo actualizar perfil para user_id {user_id}")
+            return {
+                "success": False,
+                "message": PROFILE_UPDATE_FAILED_ERROR
+            }
 
-            if updated_user:
-                logger.info(f"Perfil actualizado exitosamente para user_id {user_id}")
-                return {
-                    "success": True,
-                    "message": "Perfil actualizado exitosamente",
-                    "user": dict(updated_user)
-                }
-            else:
-                logger.error(f"Usuario {user_id} no encontrado después de UPDATE")
-                return {
-                    "success": False,
-                    "message": PROFILE_UPDATE_FAILED_ERROR
-                }
+        # Luego obtener los datos completos con JOIN
+        updated_user = await fetch_one(
+            get_updated_user_profile_query(),
+            user_id,
+            schema_name=schema_name
+        )
 
-    except psycopg2.Error as e:
+        if updated_user:
+            logger.info(f"Perfil actualizado exitosamente para user_id {user_id}")
+            return {
+                "success": True,
+                "message": "Perfil actualizado exitosamente",
+                "user": dict(updated_user)
+            }
+        else:
+            logger.error(f"Usuario {user_id} no encontrado después de UPDATE")
+            return {
+                "success": False,
+                "message": PROFILE_UPDATE_FAILED_ERROR
+            }
+
+    except Exception as e:
         error_message = PROFILE_UPDATE_ERROR.format(error=str(e))
         logger.error(error_message, exc_info=True)
         return {
@@ -252,7 +258,7 @@ def update_user_profile(user_id: str, full_name: Optional[str] = None,
             "message": error_message
         }
 
-def update_last_access(auth_id: str, *, schema_name: str) -> bool:
+async def update_last_access(auth_id: str, *, schema_name: str) -> bool:
     """
     Actualiza la fecha de último acceso de un usuario.
 
@@ -264,23 +270,23 @@ def update_last_access(auth_id: str, *, schema_name: str) -> bool:
         True si se actualizó correctamente, False en caso contrario
     """
     try:
-        with get_db_cursor(commit=True, schema_name=schema_name) as cursor:
-            cursor.execute(
-                """
-                UPDATE users
-                SET last_access = NOW()
-                WHERE auth_id = %s AND estado = 1
-                """,
-                (auth_id,)
-            )
+        status = await execute(
+            """
+            UPDATE users
+            SET last_access = NOW()
+            WHERE auth_id = $1 AND estado = 1
+            """,
+            auth_id,
+            schema_name=schema_name
+        )
 
-            return cursor.rowcount > 0
+        return int(status.split()[-1]) > 0 if status else False
 
-    except psycopg2.Error as e:
+    except Exception as e:
         logger.error(f"Error al actualizar last_access: {str(e)}")
         return False
 
-def get_user_by_email(email: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
+async def get_user_by_email(email: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
     """
     Obtiene un usuario por su email.
 
@@ -292,42 +298,40 @@ def get_user_by_email(email: str, *, schema_name: str) -> Optional[Dict[str, Any
         Diccionario con los datos del usuario o None si no existe
     """
     try:
-        with get_db_cursor(schema_name=schema_name) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    u.id as user_id,
-                    u.auth_id,
-                    u.full_name,
-                    u.email,
-                    u.profile_picture_url,
-                    u.sector_id,
-                    u.last_access,
-                    u.created_at,
-                    u.estado,
-                    us.city_seal_id as default_seal_id,
-                    cs.name as default_seal_name,
-                    cs.acronym as default_seal_acronym
-                FROM users u
-                LEFT JOIN user_seals us ON u.id = us.user_id
-                LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
-                WHERE u.email = %s AND u.estado = 1
-                """,
-                (email,)
-            )
+        user_data = await fetch_one(
+            """
+            SELECT
+                u.id as user_id,
+                u.auth_id,
+                u.full_name,
+                u.email,
+                u.profile_picture_url,
+                u.sector_id,
+                u.last_access,
+                u.created_at,
+                u.estado,
+                us.city_seal_id as default_seal_id,
+                cs.name as default_seal_name,
+                cs.acronym as default_seal_acronym
+            FROM users u
+            LEFT JOIN user_seals us ON u.id = us.user_id
+            LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
+            WHERE u.email = $1 AND u.estado = 1
+            """,
+            email,
+            schema_name=schema_name
+        )
 
-            user_data = cursor.fetchone()
+        if user_data:
+            return dict(user_data)
 
-            if user_data:
-                return dict(user_data)
+        return None
 
-            return None
-
-    except psycopg2.Error as e:
+    except Exception as e:
         logger.error(f"Error al obtener usuario por email: {str(e)}")
         return None
 
-def get_first_active_user(*, schema_name: str) -> Optional[Dict[str, Any]]:
+async def get_first_active_user(*, schema_name: str) -> Optional[Dict[str, Any]]:
     """
     Obtiene el primer usuario activo del sistema.
     Usado para autenticación con API key en modo testing.
@@ -339,35 +343,33 @@ def get_first_active_user(*, schema_name: str) -> Optional[Dict[str, Any]]:
         Diccionario con los datos del usuario o None si no existe
     """
     try:
-        with get_db_cursor(schema_name=schema_name) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    u.id as user_id,
-                    u.auth_id,
-                    u.full_name,
-                    u.email,
-                    u.sector_id,
-                    u.estado
-                FROM users u
-                WHERE u.estado = 1
-                ORDER BY u.created_at ASC
-                LIMIT 1
-                """
-            )
+        user_data = await fetch_one(
+            """
+            SELECT
+                u.id as user_id,
+                u.auth_id,
+                u.full_name,
+                u.email,
+                u.sector_id,
+                u.estado
+            FROM users u
+            WHERE u.estado = 1
+            ORDER BY u.created_at ASC
+            LIMIT 1
+            """,
+            schema_name=schema_name
+        )
 
-            user_data = cursor.fetchone()
+        if user_data:
+            return dict(user_data)
 
-            if user_data:
-                return dict(user_data)
+        return None
 
-            return None
-
-    except psycopg2.Error as e:
+    except Exception as e:
         logger.error(f"Error al obtener primer usuario activo: {str(e)}")
         return None
 
-def get_user_sector_permissions(user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
+async def get_user_sector_permissions(user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
     """
     Obtiene todos los sectores a los que el usuario tiene acceso con sus permisos.
 
@@ -399,16 +401,18 @@ def get_user_sector_permissions(user_id: str, *, schema_name: str) -> List[Dict[
     from services.users.queries import get_user_sector_permissions_query
 
     try:
-        with get_db_cursor(schema_name=schema_name) as cursor:
-            # Query necesita user_id dos veces (para UNION de sector principal y adicionales)
-            cursor.execute(get_user_sector_permissions_query(), (user_id, user_id))
-            results = cursor.fetchall()
+        # Query necesita user_id dos veces (para UNION de sector principal y adicionales)
+        results = await fetch_all(
+            get_user_sector_permissions_query(),
+            user_id, user_id,
+            schema_name=schema_name
+        )
 
-            if results:
-                return [dict(row) for row in results]
+        if results:
+            return [dict(row) for row in results]
 
-            return []
+        return []
 
-    except psycopg2.Error as e:
+    except Exception as e:
         logger.error(f"Error al obtener permisos de sectores para user_id {user_id}: {str(e)}", exc_info=True)
         return []

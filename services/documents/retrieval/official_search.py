@@ -6,14 +6,14 @@ Optimizado siguiendo principios de Clean Code.
 
 from shared.logging import get_logger
 from typing import Dict, Any, Optional
-from database import get_db_connection
+from database import fetch_one
 from shared.exceptions import ValidationError
 from ..core.queries import search_official_document_by_number_query
 
 # === CONFIGURACION ===
 logger = get_logger(__name__)
 
-def search_official_document_by_number(doc_number: str, *, user_id: str = None, schema_name: str) -> Dict[str, Any]:
+async def search_official_document_by_number(doc_number: str, *, user_id: str = None, schema_name: str) -> Dict[str, Any]:
     """
     Busca un documento oficial por su numero exacto.
     Si user_id es None: busqueda global sin restricciones.
@@ -39,92 +39,95 @@ def search_official_document_by_number(doc_number: str, *, user_id: str = None, 
     doc_number = doc_number.strip()
 
     try:
-        with get_db_connection(schema_name) as conn:
-            with conn.cursor() as cursor:
-                # Query centralizada que obtiene toda la informacion necesaria del documento oficial
-                cursor.execute(search_official_document_by_number_query(), (doc_number,))
-                result = cursor.fetchone()
+        result = await fetch_one(
+            search_official_document_by_number_query(),
+            doc_number,
+            schema_name=schema_name,
+        )
 
-                if not result:
-                    logger.info(f"No se encontro documento con numero: {doc_number[:15]}...")
+        if not result:
+            logger.info(f"No se encontro documento con numero: {doc_number[:15]}...")
+            return {
+                "found": False,
+                "document": None,
+                "search_term": doc_number
+            }
+
+        # Si user_id proporcionado, verificar que el documento tenga relacion con el usuario
+        if user_id:
+            # Si es tipo MEMO, verificar acceso por memo_recipients
+            doc_type_acronym = result['document_type_acronym'] or ''
+            if doc_type_acronym == 'MEMO':
+                access_check = await fetch_one(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM memo_recipients mr
+                        WHERE mr.document_id = $1
+                          AND (mr.sender_user_id = $2 OR mr.recipient_user_id = $2)
+                    ) as has_access
+                    """,
+                    result['document_id'],
+                    user_id,
+                    schema_name=schema_name,
+                )
+                if not access_check or not access_check['has_access']:
+                    logger.info(f"Usuario {user_id[:8]} sin acceso a MEMO {doc_number[:15]}")
+                    return {
+                        "found": False,
+                        "document": None,
+                        "search_term": doc_number
+                    }
+            else:
+                from services.cases.permissions import get_user_viewable_sector_ids
+                user_sector_ids = await get_user_viewable_sector_ids(user_id, schema_name=schema_name)
+
+                access_check = await fetch_one(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM official_documents
+                        WHERE id = $1
+                          AND signer_sector_ids && $2::uuid[]
+                    ) as has_access
+                    """,
+                    result['document_id'],
+                    user_sector_ids,
+                    schema_name=schema_name,
+                )
+                if not access_check or not access_check['has_access']:
+                    logger.info(f"Usuario {user_id[:8]} sin acceso a documento {doc_number[:15]}")
                     return {
                         "found": False,
                         "document": None,
                         "search_term": doc_number
                     }
 
-                # Si user_id proporcionado, verificar que el documento tenga relacion con el usuario
-                if user_id:
-                    # Si es tipo MEMO, verificar acceso por memo_recipients
-                    doc_type_acronym = result.get('document_type_acronym', '')
-                    if doc_type_acronym == 'MEMO':
-                        cursor.execute(
-                            """
-                            SELECT EXISTS(
-                                SELECT 1 FROM memo_recipients mr
-                                WHERE mr.document_id = %s
-                                  AND (mr.sender_user_id = %s OR mr.recipient_user_id = %s)
-                            ) as has_access
-                            """,
-                            (result['document_id'], user_id, user_id)
-                        )
-                        access_check = cursor.fetchone()
-                        if not access_check or not access_check['has_access']:
-                            logger.info(f"Usuario {user_id[:8]} sin acceso a MEMO {doc_number[:15]}")
-                            return {
-                                "found": False,
-                                "document": None,
-                                "search_term": doc_number
-                            }
-                    else:
-                        from services.cases.permissions import get_user_viewable_sector_ids
-                        user_sector_ids = get_user_viewable_sector_ids(user_id, schema_name=schema_name)
+        logger.info(f"Documento oficial encontrado: {result['document_id'][:8]}...")
 
-                        # Verificar si signer_sector_ids tiene interseccion con sectores del usuario
-                        cursor.execute(
-                            """
-                            SELECT EXISTS(
-                                SELECT 1 FROM official_documents
-                                WHERE id = %s
-                                  AND signer_sector_ids && %s::uuid[]
-                            ) as has_access
-                            """,
-                            (result['document_id'], user_sector_ids)
-                        )
-                        access_check = cursor.fetchone()
-                        if not access_check or not access_check['has_access']:
-                            logger.info(f"Usuario {user_id[:8]} sin acceso a documento {doc_number[:15]}")
-                            return {
-                                "found": False,
-                                "document": None,
-                                "search_term": doc_number
-                            }
+        # Construir respuesta con exactamente la misma estructura que UserDocumentInfo
+        document_info = {
+            "id": result["document_id"],
+            "reference": result["official_number"],  # Para documentos oficiales, reference es el numero oficial
+            "display_status": "Firmado",  # Los documentos oficiales siempre estan firmados
+            "updated_at": result["updated_at"].isoformat() if result["updated_at"] else None,
+            "document_type": {
+                "name": result["document_type_name"] or "Documento",
+                "acronym": result["document_type_acronym"] or "DOC"
+            },
+            "user_role": "public",  # Para documentos oficiales, acceso publico
+            # Para documentos oficiales, el ultimo editor es el numerador (quien lo oficializo)
+            "last_editor_name": result["numerator_name"] or result["creator_name"],
+            "last_editor_profile_picture_id": None,  # Por simplicidad, no incluir foto en busqueda publica
+            "official_number": result["official_number"]  # Siempre presente en documentos oficiales
+        }
 
-                logger.info(f"Documento oficial encontrado: {result['document_id'][:8]}...")
+        return {
+            "found": True,
+            "document": document_info,
+            "search_term": doc_number
+        }
 
-                # Construir respuesta con exactamente la misma estructura que UserDocumentInfo
-                document_info = {
-                    "id": result["document_id"],
-                    "reference": result["official_number"],  # Para documentos oficiales, reference es el numero oficial
-                    "display_status": "Firmado",  # Los documentos oficiales siempre estan firmados
-                    "updated_at": result["updated_at"].isoformat() if result["updated_at"] else None,
-                    "document_type": {
-                        "name": result["document_type_name"] or "Documento",
-                        "acronym": result["document_type_acronym"] or "DOC"
-                    },
-                    "user_role": "public",  # Para documentos oficiales, acceso publico
-                    # Para documentos oficiales, el ultimo editor es el numerador (quien lo oficializo)
-                    "last_editor_name": result["numerator_name"] or result["creator_name"],
-                    "last_editor_profile_picture_id": None,  # Por simplicidad, no incluir foto en busqueda publica
-                    "official_number": result["official_number"]  # Siempre presente en documentos oficiales
-                }
-
-                return {
-                    "found": True,
-                    "document": document_info,
-                    "search_term": doc_number
-                }
-
+    except ValidationError:
+        raise
     except Exception as e:
-        logger.error(f"Error en busqueda: {str(e)}")
-        raise ValidationError(f"Error al buscar documento oficial: {str(e)}")
+        logger.error(f"Error en busqueda: {str(e)}", exc_info=True)
+        raise ValidationError("Error al buscar documento oficial")

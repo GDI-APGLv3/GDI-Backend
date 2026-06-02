@@ -6,23 +6,16 @@ Contiene funciones para obtener y crear movimientos en expedientes.
 import uuid
 from typing import Dict, Any, List, Optional
 
-from database import execute_query, execute_update
+from database import fetch_all, execute
 from shared.exceptions import BusinessLogicError, NotFoundError, ValidationError
 from shared.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
+async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
     """
     Obtiene el historial de movimientos de un expediente.
-
-    Args:
-        case_id: ID del expediente
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        Lista de movimientos con información de usuarios y sectores
     """
     from services.case_queries import get_case_movements_query
     from config.constants import MOVEMENTS_ERROR
@@ -30,7 +23,7 @@ def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str, Any]
     try:
         logger.info(f"Fetching movements for case: {case_id}")
 
-        movements_result = execute_query(get_case_movements_query(), (case_id,), schema_name=schema_name)
+        movements_result = await fetch_all(get_case_movements_query(), case_id, schema_name=schema_name)
 
         if not movements_result:
             logger.info(f"No movements found for case: {case_id}")
@@ -87,7 +80,7 @@ def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str, Any]
         raise BusinessLogicError(MOVEMENTS_ERROR)
 
 
-def create_movement(
+async def create_movement(
     case_id: str,
     movement_type: str,
     user_id: str,
@@ -103,21 +96,6 @@ def create_movement(
 ) -> str:
     """
     Crear nuevo movimiento en el expediente.
-
-    Args:
-        case_id: ID del expediente
-        movement_type: Tipo de movimiento (creation, transfer, assignment, etc.)
-        user_id: ID del usuario que realiza el movimiento
-        creator_sector_id: ID del sector creador
-        admin_sector_id: ID del sector administrador
-        reason: Razón del movimiento
-        assigned_sector_id: ID del sector asignado (opcional)
-        assigned_user_id: ID del usuario asignado (opcional)
-        supporting_document_id: ID del documento de soporte (opcional)
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        ID del movimiento creado
     """
     try:
         movement_id = str(uuid.uuid4())
@@ -129,18 +107,20 @@ def create_movement(
                 assigned_sector_id, assigned_user_id,
                 reason, is_active, supporting_document_id
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
             )
         """
 
-        execute_update(movement_insert, (
+        await execute(
+            movement_insert,
             movement_id, case_id, movement_type, user_id,
             creator_sector_id, admin_sector_id,
             assigned_sector_id or None,
             assigned_user_id or None,
             reason, True,
-            supporting_document_id or None
-        ), schema_name=schema_name, user_id=user_id, auth_source=auth_source)
+            supporting_document_id or None,
+            schema_name=schema_name, user_id=user_id, auth_source=auth_source
+        )
 
         logger.info(f"Movement created successfully: {movement_id}")
         return movement_id
@@ -150,17 +130,9 @@ def create_movement(
         raise BusinessLogicError(f"Error creando movimiento: {str(e)}")
 
 
-def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
+async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
     """
     Obtener historial completo del expediente con mensajes formateados.
-    Reutiliza get_case_movements() para obtener datos estructurados.
-
-    Args:
-        case_id: ID del expediente
-        schema_name: Nombre del schema (multi-tenant)
-
-    Returns:
-        Dict con case_number y lista de movimientos formateados con mensajes legibles
     """
     from services.case_queries import get_case_number_query
     from config.constants import (
@@ -176,7 +148,7 @@ def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
         logger.info(f"Fetching history for case: {case_id}")
 
         # Obtener número del expediente
-        case_result = execute_query(get_case_number_query(), (case_id,), schema_name=schema_name)
+        case_result = await fetch_all(get_case_number_query(), case_id, schema_name=schema_name)
 
         if not case_result:
             logger.error(f"Case not found: {case_id}")
@@ -188,11 +160,9 @@ def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
         short_ai_summary = case_result[0].get('short_ai_summary')
 
         # Obtener movimientos estructurados
-        movements = get_case_movements(case_id, schema_name=schema_name)
+        movements = await get_case_movements(case_id, schema_name=schema_name)
 
-        # Calcular qué propuestas ya fueron resueltas (aceptadas → document_link,
-        # o rechazadas → document_proposal_reject). Si una propuesta sobre un
-        # supporting_document_id ya tiene resolución, la ocultamos del timeline.
+        # Calcular qué propuestas ya fueron resueltas
         resolved_proposal_doc_ids = {
             m.get('supporting_document_id')
             for m in movements
@@ -237,7 +207,6 @@ def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
             elif movement_type in [MOVEMENT_TYPE_TRANSFER, MOVEMENT_TYPE_ASSIGNMENT]:
                 action_verb = "Transfirió" if movement_type == MOVEMENT_TYPE_TRANSFER else "Asignó"
                 message = f"{action_verb} el expediente a {assigned_sector_name}"
-                # Resume ya se muestra en el movimiento document_link asociado
             elif movement_type == MOVEMENT_TYPE_STATUS_CHANGE:
                 message = "Cambió el estado del expediente"
             elif movement_type == MOVEMENT_TYPE_DOCUMENT_LINK:
@@ -249,6 +218,8 @@ def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
                 message = f"Cerró la asignación a {assigned_sector_name}"
             elif movement_type in [MOVEMENT_TYPE_DOCUMENT_PROPOSAL, MOVEMENT_TYPE_DOCUMENT_PROPOSAL_REJECT]:
                 message = ""
+            elif movement_type in ('responsible_add', 'responsible_remove'):
+                message = ""  # reason contiene el detalle completo
             else:
                 message = f"Realizó acción: {movement_type}"
 

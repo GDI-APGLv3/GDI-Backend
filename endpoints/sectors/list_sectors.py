@@ -50,9 +50,9 @@ async def get_all_sectors(
 
         # Obtener sectores desde cache (TTL: 5 minutos)
         # Si Redis no está disponible, ejecuta directamente sin cache
-        result = get_cached(
+        result = await get_cached(
             cache_key=f"sectors:all:{schema_name}",
-            fetch_func=lambda: SectorService().get_all_sectors_with_departments(schema_name=schema_name),
+            fetch_func=lambda: SectorService.get_all_sectors_with_departments(schema_name=schema_name),
             ttl=300  # 5 minutos
         )
 

@@ -11,7 +11,7 @@ oficiales por número. Implementa:
 
 Example:
     GET /api/v1/documents/autocomplete?q=ANEXO-2025&limit=20&page=1
-    
+
     Response:
     {
         "documents": [
@@ -25,6 +25,7 @@ Example:
         "query": "ANEXO-2025",
         "page": 1
     }
+MIGRADO: Fase 6 asyncpg
 """
 
 from fastapi import APIRouter, Query, status, Depends, Request
@@ -34,7 +35,7 @@ import re
 from auth import get_current_user
 from models.schemas import AuthenticatedUser, AutocompleteDocumentsResponse
 from models.tags import Tags
-from database import execute_query
+from database import fetch_all
 from services.documents.core.queries import autocomplete_official_documents_query
 from shared.exceptions import (
     ValidationError,
@@ -59,19 +60,19 @@ LIMIT_DEFAULT = 50
 def validate_query_string(q: str) -> None:
     """
     Valida que el string de búsqueda contenga solo caracteres permitidos.
-    
+
     Args:
         q: String de búsqueda a validar
-        
+
     Raises:
         ValidationError: Si el string contiene caracteres no permitidos
-        
+
     Note:
         Permite: letras, números, guiones, espacios y caracteres especiales comunes en números de documento
     """
     # Patrón: alfanuméricos, guiones, espacios, punto, coma
     pattern = r'^[a-zA-Z0-9\s\-.,áéíóúÁÉÍÓÚñÑüÜ]+$'
-    
+
     if not re.match(pattern, q):
         raise ValidationError(
             "El texto de búsqueda contiene caracteres no permitidos. "
@@ -86,70 +87,22 @@ def validate_query_string(q: str) -> None:
     summary="Autocompletado de documentos oficiales",
     description="""
     Busca documentos oficiales cuyo número oficial comience con el texto proporcionado.
-    
+
     **Funcionalidades:**
     - Búsqueda a partir de 2 caracteres
     - Paginación para manejar grandes conjuntos de resultados
     - Exclusión automática de documentos internos del sistema (CAEX, PV)
     - Resultados ordenados alfabéticamente por número oficial
-    
+
     **Casos de uso:**
     - Autocompletado en campos de búsqueda
     - Selección de documentos relacionados
-    
+
     **Notas:**
     - La búsqueda es case-insensitive
     - Solo devuelve documentos oficiales (no borradores)
     - Requiere autenticación
     """,
-    responses={
-        200: {
-            "description": "Búsqueda exitosa",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "documents": [
-                            {
-                                "document_id": "550e8400-e29b-41d4-a716-446655440000",
-                                "official_number": "ANEXO-2025-000001-SMG-ADGEN",
-                                "reference": "Solicitud de presupuesto para obras"
-                            },
-                            {
-                                "document_id": "550e8400-e29b-41d4-a716-446655440001",
-                                "official_number": "ANEXO-2025-000002-SMG-ADGEN",
-                                "reference": "Informe de auditoría"
-                            }
-                        ],
-                        "total": 2,
-                        "query": "ANEXO-2025",
-                        "page": 1
-                    }
-                }
-            }
-        },
-        400: {
-            "description": "Error de validación - Query inválido",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "message": "El texto de búsqueda contiene caracteres no permitidos",
-                        "type": "ValidationError"
-                    }
-                }
-            }
-        },
-        500: {
-            "description": "Error interno del servidor",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "message": "Error interno del servidor",
-                        "type": "DatabaseError"
-                    }
-                }
-            }
-        }
-    }
 )
 async def autocomplete_official_documents(
     request: Request,
@@ -178,47 +131,16 @@ async def autocomplete_official_documents(
 ) -> AutocompleteDocumentsResponse:
     """
     Autocompletado de documentos oficiales por número.
-    
-    Este endpoint proporciona funcionalidad de autocompletado para búsqueda de documentos
-    oficiales. Busca documentos cuyo número oficial comience con el texto proporcionado.
-    
-    Args:
-        q: Texto de búsqueda (mínimo 2 caracteres, máximo 50)
-        limit: Número máximo de resultados por página (máximo 50)
-        page: Número de página para paginación
-        current_user: Usuario autenticado (inyectado por dependencia)
-        
-    Returns:
-        AutocompleteDocumentsResponse: Objeto con lista de documentos encontrados
-        
-    Raises:
-        HTTPException 400: Si el query contiene caracteres no permitidos
-        HTTPException 500: Si hay error de base de datos o error interno
-        
-    Example:
-        >>> # GET /api/v1/documents/autocomplete?q=ANEXO-2025&limit=20&page=1
-        >>> {
-        ...     "documents": [
-        ...         {
-        ...             "document_id": "550e8400-e29b-41d4-a716-446655440000",
-        ...             "official_number": "ANEXO-2025-000001-SMG-ADGEN",
-        ...             "reference": "Solicitud de presupuesto"
-        ...         }
-        ...     ],
-        ...     "total": 1,
-        ...     "query": "ANEXO-2025",
-        ...     "page": 1
-        ... }
     """
     try:
         validate_query_string(q)
         offset = (page - 1) * limit
         query_sql = autocomplete_official_documents_query()
         search_pattern = f"{q}%"
-        results = execute_query(query_sql, (search_pattern, limit, offset), schema_name=schema_name)
+        results = await fetch_all(query_sql, search_pattern, limit, offset, schema_name=schema_name)
 
         return AutocompleteDocumentsResponse(
-            documents=results,
+            documents=[dict(r) for r in results],
             total=len(results),
             query=q,
             page=page

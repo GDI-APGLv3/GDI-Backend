@@ -39,7 +39,7 @@ Genera carátulas estructuradas para expedientes administrativos.
 
 ### Variables de Entorno (.env)
 ```ini
-API_KEY=miapikey
+API_KEY=your-api-key-here
 ```
 
 ### Puerto de Desarrollo
@@ -50,7 +50,7 @@ API_KEY=miapikey
 
 ### Headers Requeridos
 ```
-X-API-Key: miapikey
+X-API-Key: your-api-key-here
 ```
 
 ### Estructura de Request (form-data)
@@ -64,7 +64,7 @@ Text: Contenido del documento...
 ### Ejemplo con curl
 ```bash
 curl -X POST "http://localhost:8002/generate-pdf/" \
-     -H "X-API-Key: miapikey" \
+     -H "X-API-Key: your-api-key-here" \
      -F "urlLogo=https://www.grupogdi.com/assets/img/logo-gdi-2.png" \
      -F "TypeDocument=DOCUMENTO TÉCNICO" \
      -F "Reference=REF-GEN-001-2025" \
