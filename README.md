@@ -1,3 +1,5 @@
+> 🇬🇧 **English summary** — GDI Backend is the core REST API of **GDI (Gestión Documental Inteligente)**, an open-source (AGPL-3.0) document-management platform for local governments in Latin America: official documents, case files (*expedientes*), digital signature workflows (Argentine Digital Signature Law 25.506) and multi-tenant object storage. Built with **FastAPI + PostgreSQL**. Live product: [gdilatam.com](https://www.gdilatam.com).
+
 # GDI Backend - Sistema de Gestión Documental Institucional
 
 **Version 1.2** (Phase 2-6 Complete - Direct Integrations)
