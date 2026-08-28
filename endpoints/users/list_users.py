@@ -1,13 +1,8 @@
-"""
-Endpoint para listar todos los usuarios del sistema - Clean Code Implementation.
-Aplicando principios SOLID con endpoint delgado y servicio dedicado.
-"""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends
-from typing import List
 from models.tags import Tags
-from models.users.list import UserListItem, UserListResponse
+from models.users.list import UserListResponse
 from services.users.list import list_all_active_users
 from shared.exceptions import exception_to_http_exception
 from auth import get_current_user

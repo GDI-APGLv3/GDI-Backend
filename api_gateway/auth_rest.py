@@ -1,93 +1,148 @@
-"""
-Autenticación REST con API Key por Schema.
-
-Valida API Key contra tabla public.api_keys,
-obtiene municipality_id y schema_name automáticamente.
-
-Incluye validación de Backup API Keys (key_type='backup')
-con 3 capas: key válida, IP/DNS, rate limit.
-"""
 import hashlib
 import hmac
 import os
 import re
 import sys
 import socket
-import logging
-from typing import Tuple, Optional
-from datetime import datetime, timezone
-from functools import lru_cache
+import uuid
+from shared.logging import get_logger
+from api_gateway.rate_limiter import cap_rate_limit
+from typing import Optional
+from datetime import datetime
 import time
 
-# Service auth: paths donde se acepta AGENT_GATEWAY_SECRET (shared secret).
-# Sin esta allowlist, el secret seria una llave de acceso total.
 SERVICE_AUTH_ALLOWED_PATHS = [
-    re.compile(r'^/api/v1/documents/[^/]+/url$'),
+    re.compile(r'^/api/v1/documents/(?P<resource_id>[^/]+)/url$'),
 ]
 
-# Service account UUID usado para auditoria cuando entra por service auth (AI Worker).
 _SERVICE_AUTH_USER_ID = "a1000000-0000-0000-0000-000000000100"
 
-# Agregar path del backend para imports
+_last_used_writes: dict[str, float] = {}
+LAST_USED_WRITE_INTERVAL_SECONDS = 60
+_LAST_USED_WRITES_MAX_SIZE = 10_000
+
+API_KEY_CACHE_TTL_SECONDS = int(os.getenv("API_KEY_CACHE_TTL_SECONDS", "60"))
+_API_KEY_CACHE_MAX_SIZE = 10_000
+_API_KEY_USER_CACHE_MAX_SIZE = 10_000
+
+_api_key_row_cache: dict[str, tuple[dict, float]] = {}
+_api_key_user_cache: dict[tuple, float] = {}
+
+
+def _api_key_cache_get(api_key_hash: str) -> Optional[dict]:
+    if API_KEY_CACHE_TTL_SECONDS <= 0:
+        return None
+    entry = _api_key_row_cache.get(api_key_hash)
+    if entry is None:
+        return None
+    row, ts = entry
+    if time.monotonic() - ts > API_KEY_CACHE_TTL_SECONDS:
+        return None
+    return row
+
+
+def _api_key_cache_set(api_key_hash: str, row: dict) -> None:
+    if API_KEY_CACHE_TTL_SECONDS <= 0:
+        return
+    if len(_api_key_row_cache) >= _API_KEY_CACHE_MAX_SIZE:
+        _api_key_row_cache.clear()
+    _api_key_row_cache[api_key_hash] = (row, time.monotonic())
+
+
+def _api_key_user_cache_get(api_key_id, user_id) -> bool:
+    if API_KEY_CACHE_TTL_SECONDS <= 0:
+        return False
+    ts = _api_key_user_cache.get((api_key_id, user_id))
+    if ts is None:
+        return False
+    return (time.monotonic() - ts) <= API_KEY_CACHE_TTL_SECONDS
+
+
+def _api_key_user_cache_set(api_key_id, user_id) -> None:
+    if API_KEY_CACHE_TTL_SECONDS <= 0:
+        return
+    if len(_api_key_user_cache) >= _API_KEY_USER_CACHE_MAX_SIZE:
+        _api_key_user_cache.clear()
+    _api_key_user_cache[(api_key_id, user_id)] = time.monotonic()
+
+SERVICE_JOB_SIGNATURE_REQUIRED = os.getenv("SERVICE_JOB_SIGNATURE_REQUIRED", "false").lower() == "true"
+SERVICE_JOB_SIGNATURE_TTL_SECONDS = 300
+SERVICE_JOB_SIGNATURE_HEADER = "X-Service-Job-Signature"
+
+
+def _verify_service_job_signature(
+    header_value: Optional[str],
+    *,
+    service_secret: str,
+    schema_name: str,
+    resource_id: str,
+) -> None:
+    if not header_value:
+        if SERVICE_JOB_SIGNATURE_REQUIRED:
+            raise ValueError(f"{SERVICE_JOB_SIGNATURE_HEADER} header requerido para service auth")
+        return
+
+    try:
+        ts_str, hmac_hex = header_value.split(".", 1)
+        ts = int(ts_str)
+    except (ValueError, AttributeError):
+        raise ValueError(f"{SERVICE_JOB_SIGNATURE_HEADER} formato invalido")
+
+    now = int(time.time())
+    if abs(now - ts) > SERVICE_JOB_SIGNATURE_TTL_SECONDS:
+        raise ValueError(f"{SERVICE_JOB_SIGNATURE_HEADER} expirado")
+
+    expected = hmac.new(
+        service_secret.encode(),
+        f"{schema_name}:{resource_id}:{ts_str}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, hmac_hex):
+        raise ValueError(f"{SERVICE_JOB_SIGNATURE_HEADER} invalido")
+
 backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, backend_root)
 
 from api_gateway.context import MCPContext
 from database import validate_schema_name
+from shared.exceptions import DatabaseBusyError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def validate_rest_api_key(api_key: str, user_id: str = None, request=None) -> MCPContext:
-    """
-    Valida API Key y retorna contexto MCP con user_id.
-
-    La API Key determina automáticamente la municipalidad y schema.
-    El user_id es REQUERIDO y debe estar autorizado para esta API Key.
-
-    Si se pasa `request` y el `api_key` coincide con AGENT_GATEWAY_SECRET
-    (env var), se intenta una autenticacion de servicio (service-to-service)
-    restringida a SERVICE_AUTH_ALLOWED_PATHS y que requiere header
-    X-Tenant-Schema. Esta rama NO requiere X-User-ID.
-
-    Args:
-        api_key: Header X-API-Key
-        user_id: Header X-User-ID (REQUERIDO en el path normal)
-        request: Starlette Request opcional. Necesario para service auth.
-
-    Returns:
-        MCPContext con api_key, municipality_id, schema_name y user_id
-
-    Raises:
-        ValueError: Si API Key inválida, inactiva, expirada, o user_id no autorizado
-    """
-    from database import fetch_one, execute
+    from database import fetch_one
 
     if not api_key:
         raise ValueError("X-API-Key header requerido")
 
-    # ============================================================
-    # SERVICE AUTH (shared secret) - se evalua ANTES del path normal.
-    # Solo activo si AGENT_GATEWAY_SECRET esta seteada y el caller
-    # paso `request` (asi los callers viejos no rompen).
-    # ============================================================
     service_secret = os.getenv("AGENT_GATEWAY_SECRET")
     if request is not None and service_secret and hmac.compare_digest(api_key, service_secret):
-        # a) Path allowlist - el secret SOLO funciona en endpoints especificos.
         path = request.url.path
-        if not any(p.match(path) for p in SERVICE_AUTH_ALLOWED_PATHS):
+        path_match = next((p.match(path) for p in SERVICE_AUTH_ALLOWED_PATHS if p.match(path)), None)
+        if not path_match:
             logger.warning(f"[Service Auth] Intento en path no permitido: {path}")
             raise ValueError("Service auth no permitido en este endpoint")
 
-        # b) Validar header X-Tenant-Schema (requerido en service auth).
         schema_name = request.headers.get("X-Tenant-Schema")
         if not schema_name:
             raise ValueError("X-Tenant-Schema header requerido para service auth")
 
-        # Defense in depth contra SQL injection del nombre de schema.
         validate_schema_name(schema_name)
 
-        # c) Validar que el schema existe y esta activo en municipalities.
+        resource_id = path_match.group("resource_id")
+        try:
+            _verify_service_job_signature(
+                request.headers.get(SERVICE_JOB_SIGNATURE_HEADER),
+                service_secret=service_secret,
+                schema_name=schema_name,
+                resource_id=resource_id,
+            )
+        except ValueError as e:
+            logger.warning(f"[Service Auth] {SERVICE_JOB_SIGNATURE_HEADER} rechazado: {e}")
+            raise
+
         try:
             row = await fetch_one(
                 """
@@ -98,6 +153,8 @@ async def validate_rest_api_key(api_key: str, user_id: str = None, request=None)
                 schema_name,
                 schema_name="public"
             )
+        except DatabaseBusyError:
+            raise
         except Exception as e:
             logger.error(f"[Service Auth] Error consultando municipalities: {e}")
             raise ValueError("Error validando schema")
@@ -106,10 +163,8 @@ async def validate_rest_api_key(api_key: str, user_id: str = None, request=None)
             logger.warning(f"[Service Auth] Schema invalido o inactivo: {schema_name}")
             raise ValueError("Schema invalido o inactivo")
 
-        # d) Audit log
         logger.info(f"[Service Auth] OK: path={path} schema={schema_name}")
 
-        # e) Retornar MCPContext como si fuera una API Key valida.
         return MCPContext(
             api_key=api_key,
             municipality_id=str(row["id"]),
@@ -118,97 +173,101 @@ async def validate_rest_api_key(api_key: str, user_id: str = None, request=None)
             user_id=_SERVICE_AUTH_USER_ID,
         )
 
-    # === Path normal: validacion contra public.api_keys (sin tocar) ===
 
     if not user_id:
         raise ValueError("X-User-ID header requerido para REST API")
 
-    # Hashear la key entrante para comparar con BD
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
-    # Buscar API Key en tabla public.api_keys por hash
-    try:
-        result = await fetch_one(
-            """
-            SELECT
-                ak.id,
-                ak.api_key_prefix,
-                ak.municipality_id,
-                ak.name as key_name,
-                ak.expires_at,
-                ak.rate_limit_per_minute,
-                ak.is_active as key_active,
-                m.schema_name,
-                m.name as municipality_name,
-                m.is_active as muni_active
-            FROM public.api_keys ak
-            JOIN public.municipalities m ON ak.municipality_id = m.id
-            WHERE ak.api_key_hash = $1
-            """,
-            api_key_hash,
-            schema_name="public"
-        )
-    except Exception as e:
-        logger.error(f"[REST Auth] Error consultando API Key: {e}")
-        raise ValueError("Error validando API Key")
+    result = _api_key_cache_get(api_key_hash)
+    if result is None:
+        try:
+            result = await fetch_one(
+                """
+                SELECT
+                    ak.id,
+                    ak.api_key_prefix,
+                    ak.municipality_id,
+                    ak.name as key_name,
+                    ak.expires_at,
+                    ak.rate_limit_per_minute,
+                    ak.is_active as key_active,
+                    m.schema_name,
+                    m.name as municipality_name,
+                    m.is_active as muni_active
+                FROM public.api_keys ak
+                JOIN public.municipalities m ON ak.municipality_id = m.id
+                WHERE ak.api_key_hash = $1
+                """,
+                api_key_hash,
+                schema_name="public"
+            )
+        except DatabaseBusyError:
+            raise
+        except Exception as e:
+            logger.error(f"[REST Auth] Error consultando API Key: {e}")
+            raise ValueError("Error validando API Key")
 
-    if not result:
-        logger.warning(f"[REST Auth] API Key no encontrada: {api_key[:12]}...")
-        raise ValueError("API Key inválida")
+        if not result:
+            logger.warning(f"[REST Auth] API Key no encontrada: {api_key[:12]}...")
+            raise ValueError("API Key inválida")
 
-    # Verificar que la key está activa
+        result = dict(result)
+        _api_key_cache_set(api_key_hash, result)
+
     if not result.get("key_active"):
         logger.warning(f"[REST Auth] API Key inactiva: {result['key_name']}")
         raise ValueError("API Key inactiva")
 
-    # Verificar que la municipalidad está activa
     if not result.get("muni_active"):
         logger.warning(f"[REST Auth] Municipalidad inactiva: {result['municipality_name']}")
         raise ValueError("Municipalidad inactiva")
 
-    # Verificar expiración
     expires_at = result.get("expires_at")
     if expires_at and expires_at < datetime.now(expires_at.tzinfo):
         logger.warning(f"[REST Auth] API Key expirada: {result['key_name']}")
         raise ValueError("API Key expirada")
 
-    # Verificar que user_id está autorizado para esta API Key
     api_key_id = result["id"]
     schema_name = result["schema_name"]
-    validate_schema_name(schema_name)  # Defense in depth
+    validate_schema_name(schema_name)
 
-    try:
-        user_allowed = await fetch_one(
-            """
-            SELECT user_id FROM public.api_key_users
-            WHERE api_key_id = $1 AND user_id = $2 AND schema_name = $3
-            """,
-            api_key_id, user_id, schema_name,
-            schema_name="public"
-        )
-    except Exception as e:
-        logger.error(f"[REST Auth] Error verificando usuario autorizado: {e}")
-        raise ValueError("Error validando usuario")
+    if not _api_key_user_cache_get(api_key_id, user_id):
+        try:
+            user_allowed = await fetch_one(
+                """
+                SELECT user_id FROM public.api_key_users
+                WHERE api_key_id = $1 AND user_id = $2 AND schema_name = $3
+                """,
+                api_key_id, user_id, schema_name,
+                schema_name="public"
+            )
+        except DatabaseBusyError:
+            raise
+        except Exception as e:
+            logger.error(f"[REST Auth] Error verificando usuario autorizado: {e}")
+            raise ValueError("Error validando usuario")
 
-    if not user_allowed:
-        logger.warning(f"[REST Auth] Usuario {user_id} no autorizado para API Key {result['key_name']}")
-        raise ValueError(f"Usuario no autorizado para esta API Key")
+        if not user_allowed:
+            logger.warning(f"[REST Auth] Usuario {user_id} no autorizado para API Key {result['key_name']}")
+            raise ValueError(f"Usuario no autorizado para esta API Key")
 
-    # Rate limit per-API-Key (usa rate_limit_per_minute de BD)
+        _api_key_user_cache_set(api_key_id, user_id)
+
     rate_limit_per_minute = result.get("rate_limit_per_minute")
     if rate_limit_per_minute:
-        from api_gateway.rate_limiter import rate_limiter, RateLimitExceeded
+        from api_gateway.rate_limiter import rate_limiter
+        rate_limit_per_minute = cap_rate_limit(rate_limit_per_minute, "api", key_id=api_key_id)
         rate_limiter.check(f"rest_key:{api_key_id}", rate_limit_per_minute)
 
-    # Actualizar last_used_at (async, no bloquea si falla)
     await _update_last_used(api_key_id)
 
     ctx = MCPContext(
         api_key=api_key,
         municipality_id=str(result["municipality_id"]),
         schema_name=schema_name,
-        auth_source="api_key",  # Trazabilidad: origen REST API
-        user_id=user_id  # Usuario validado
+        auth_source="api_key",
+        user_id=user_id
     )
 
     logger.info(f"[REST Auth] API Key válida: {result['key_name']}, schema: {schema_name}, user: {user_id}")
@@ -216,11 +275,12 @@ async def validate_rest_api_key(api_key: str, user_id: str = None, request=None)
 
 
 async def _update_last_used(api_key_id: str) -> None:
-    """
-    Actualiza el timestamp de último uso de la API Key.
-    No falla si hay error (operación no crítica).
-    """
     from database import execute
+
+    now = time.monotonic()
+    last_write = _last_used_writes.get(api_key_id, 0)
+    if now - last_write < LAST_USED_WRITE_INTERVAL_SECONDS:
+        return
 
     try:
         await execute(
@@ -228,80 +288,222 @@ async def _update_last_used(api_key_id: str) -> None:
             api_key_id,
             schema_name="public"
         )
+        if len(_last_used_writes) >= _LAST_USED_WRITES_MAX_SIZE:
+            _last_used_writes.clear()
+        _last_used_writes[api_key_id] = now
     except Exception as e:
-        # No fallar por esto, solo loguear
         logger.debug(f"[REST Auth] Error actualizando last_used_at: {e}")
 
 
-async def get_api_key_info(api_key: str) -> Optional[dict]:
-    """
-    Obtiene información completa de una API Key (para debugging/admin).
+class PublicAuthError(Exception):
+    def __init__(self, message: str, status_code: int = 401):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
 
-    Args:
-        api_key: La API Key a consultar
 
-    Returns:
-        Dict con toda la información de la key, o None si no existe
-    """
+PUBLIC_ALLOWED_KEY_TYPES = frozenset({"api"})
+
+_PUBLIC_AUTH_GENERIC_401 = "API Key invalida"
+
+
+async def validate_public_api_key(api_key: str, muni_acronym: str) -> str:
     from database import fetch_one
+
+    if not api_key:
+        raise PublicAuthError("X-API-Key requerido", status_code=401)
 
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     try:
-        result = await fetch_one(
+        row = await fetch_one(
             """
             SELECT
                 ak.id,
-                ak.api_key_prefix,
-                ak.municipality_id,
-                ak.name,
-                ak.description,
-                ak.is_active,
-                ak.created_at,
+                ak.is_active AS key_active,
                 ak.expires_at,
-                ak.last_used_at,
                 ak.rate_limit_per_minute,
-                ak.created_by,
+                ak.key_type,
                 m.schema_name,
-                m.name as municipality_name
+                m.acronym,
+                m.is_active AS muni_active
             FROM public.api_keys ak
             JOIN public.municipalities m ON ak.municipality_id = m.id
             WHERE ak.api_key_hash = $1
             """,
             api_key_hash,
-            schema_name="public"
+            schema_name="public",
         )
-
-        if result:
-            return {
-                "id": str(result["id"]),
-                "name": result["name"],
-                "description": result["description"],
-                "is_active": result["is_active"],
-                "created_at": str(result["created_at"]) if result["created_at"] else None,
-                "expires_at": str(result["expires_at"]) if result["expires_at"] else None,
-                "last_used_at": str(result["last_used_at"]) if result["last_used_at"] else None,
-                "rate_limit_per_minute": result["rate_limit_per_minute"],
-                "created_by": result["created_by"],
-                "municipality": {
-                    "id": str(result["municipality_id"]),
-                    "name": result["municipality_name"],
-                    "schema_name": result["schema_name"]
-                }
-            }
-        return None
-
+    except DatabaseBusyError:
+        logger.error("[PublicInfo Auth] Pool saturado consultando API Key; se responde 503")
+        raise PublicAuthError("Servidor ocupado, reintente en unos segundos",
+                              status_code=503)
     except Exception as e:
-        logger.error(f"[REST Auth] Error obteniendo info de API Key: {e}")
-        return None
+        logger.error(f"[PublicInfo Auth] Error consultando API Key: {e}")
+        raise PublicAuthError(_PUBLIC_AUTH_GENERIC_401, status_code=401)
+
+    if not row:
+        logger.warning(f"[PublicInfo Auth] API Key no encontrada: {api_key[:12]}...")
+        raise PublicAuthError(_PUBLIC_AUTH_GENERIC_401, status_code=401)
+
+    if (row.get("key_type") or "") not in PUBLIC_ALLOWED_KEY_TYPES:
+        logger.warning(f"[PublicInfo Auth] key_type no permitido en bloque publico: {row.get('key_type')!r}")
+        raise PublicAuthError(_PUBLIC_AUTH_GENERIC_401, status_code=401)
+
+    if not row.get("key_active"):
+        logger.warning("[PublicInfo Auth] API Key inactiva")
+        raise PublicAuthError(_PUBLIC_AUTH_GENERIC_401, status_code=401)
+
+    if not row.get("muni_active"):
+        logger.warning("[PublicInfo Auth] Municipalidad inactiva")
+        raise PublicAuthError(_PUBLIC_AUTH_GENERIC_401, status_code=401)
+
+    expires_at = row.get("expires_at")
+    if expires_at and expires_at < datetime.now(expires_at.tzinfo):
+        logger.warning("[PublicInfo Auth] API Key expirada")
+        raise PublicAuthError(_PUBLIC_AUTH_GENERIC_401, status_code=401)
+
+    key_acronym = (row.get("acronym") or "").strip().lower()
+    if key_acronym != muni_acronym:
+        logger.warning(
+            f"[PublicInfo Auth] API Key del muni '{key_acronym}' intento acceder a '{muni_acronym}'"
+        )
+        raise PublicAuthError("API Key no valida para este municipio", status_code=403)
+
+    schema_name = row["schema_name"]
+    validate_schema_name(schema_name)
+
+    rate_limit_per_minute = row.get("rate_limit_per_minute") or 60
+    rate_limit_per_minute = cap_rate_limit(rate_limit_per_minute, "public", key_id=str(row["id"]))
+    from api_gateway.rate_limiter import rate_limiter
+    rate_limiter.check(f"public_key:{row['id']}", rate_limit_per_minute)
+
+    await _update_last_used(row["id"])
+
+    return schema_name
 
 
-# ============================================================================
-# BACKUP API KEY AUTHENTICATION
-# ============================================================================
+class TadAuthError(Exception):
+    def __init__(self, message: str, status_code: int = 401):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
+
+
+TAD_ALLOWED_KEY_TYPES = frozenset({"tad"})
+
+TAD_DEFAULT_RATE_LIMIT_PER_MINUTE = 30
+
+_TAD_AUTH_GENERIC_401 = "API Key invalida"
+
+
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+async def validate_tad_api_key(
+    api_key: str,
+    citizen_ref: Optional[str] = None,
+    *,
+    strict_rate_limit: Optional[int] = None,
+) -> tuple[str, Optional[dict]]:
+    from database import fetch_one
+
+    if not api_key:
+        raise TadAuthError("X-API-Key requerido", status_code=401)
+
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+    try:
+        row = await fetch_one(
+            """
+            SELECT
+                ak.id,
+                ak.is_active AS key_active,
+                ak.expires_at,
+                ak.rate_limit_per_minute,
+                ak.key_type,
+                m.schema_name,
+                m.is_active AS muni_active
+            FROM public.api_keys ak
+            JOIN public.municipalities m ON ak.municipality_id = m.id
+            WHERE ak.api_key_hash = $1
+            """,
+            api_key_hash,
+            schema_name="public",
+        )
+    except DatabaseBusyError:
+        logger.error("[TAD Auth] Pool saturado consultando API Key; se responde 503")
+        raise TadAuthError("Servidor ocupado, reintente en unos segundos",
+                           status_code=503)
+    except Exception as e:
+        logger.error(f"[TAD Auth] Error consultando API Key: {e}")
+        raise TadAuthError(_TAD_AUTH_GENERIC_401, status_code=401)
+
+    if not row:
+        logger.warning(f"[TAD Auth] API Key no encontrada: {api_key[:12]}...")
+        raise TadAuthError(_TAD_AUTH_GENERIC_401, status_code=401)
+
+    if (row.get("key_type") or "") not in TAD_ALLOWED_KEY_TYPES:
+        logger.warning(f"[TAD Auth] key_type no permitido en bloque TAD: {row.get('key_type')!r}")
+        raise TadAuthError(_TAD_AUTH_GENERIC_401, status_code=401)
+
+    if not row.get("key_active"):
+        logger.warning("[TAD Auth] API Key inactiva")
+        raise TadAuthError(_TAD_AUTH_GENERIC_401, status_code=401)
+
+    if not row.get("muni_active"):
+        logger.warning("[TAD Auth] Municipalidad inactiva")
+        raise TadAuthError(_TAD_AUTH_GENERIC_401, status_code=401)
+
+    expires_at = row.get("expires_at")
+    if expires_at and expires_at < datetime.now(expires_at.tzinfo):
+        logger.warning("[TAD Auth] API Key expirada")
+        raise TadAuthError(_TAD_AUTH_GENERIC_401, status_code=401)
+
+    schema_name = row["schema_name"]
+    validate_schema_name(schema_name)
+
+    rate_limit_per_minute = row.get("rate_limit_per_minute") or TAD_DEFAULT_RATE_LIMIT_PER_MINUTE
+    rate_limit_per_minute = cap_rate_limit(rate_limit_per_minute, "tad", key_id=str(row["id"]))
+    from api_gateway.rate_limiter import rate_limiter
+    rate_limiter.check(f"tad_key:{row['id']}", rate_limit_per_minute)
+
+    if strict_rate_limit is not None:
+        rate_limiter.check(f"tad_key:{row['id']}:strict", strict_rate_limit)
+
+    await _update_last_used(row["id"])
+
+    citizen = None
+    if citizen_ref:
+        citizen_ref = citizen_ref.strip()
+        if _looks_like_uuid(citizen_ref):
+            citizen_row = await fetch_one(
+                "SELECT id, full_name, country_id, estado FROM citizens WHERE id = $1",
+                citizen_ref,
+                schema_name=schema_name,
+            )
+        else:
+            citizen_row = await fetch_one(
+                "SELECT id, full_name, country_id, estado FROM citizens WHERE country_id = $1 LIMIT 1",
+                citizen_ref,
+                schema_name=schema_name,
+            )
+        if citizen_row:
+            citizen = dict(citizen_row)
+            if citizen.get("estado") == "bloqueado":
+                logger.warning(f"[TAD Auth] Ciudadano bloqueado intento operar: {citizen['id']}")
+                raise TadAuthError("Ciudadano bloqueado", status_code=403)
+
+    logger.info(f"[TAD Auth] API Key TAD valida, schema: {schema_name}")
+    return schema_name, citizen
+
 
 class BackupAuthError(Exception):
-    """Error de autenticación backup con status HTTP."""
     def __init__(self, message: str, status_code: int = 401, retry_after: int = None):
         self.message = message
         self.status_code = status_code
@@ -309,20 +511,17 @@ class BackupAuthError(Exception):
         super().__init__(message)
 
 
-# Cache DNS: {domain: (ips, timestamp)}
 _dns_cache: dict = {}
-_DNS_CACHE_TTL = 300  # 5 minutos
-_DNS_CACHE_MAX = 50   # Max entradas (eviction de expiradas)
+_DNS_CACHE_TTL = 300
+_DNS_CACHE_MAX = 50
 
 
 def _resolve_dns(domain: str) -> list:
-    """Resuelve dominio a lista de IPs con cache de 5 minutos."""
     now = time.time()
     cached = _dns_cache.get(domain)
     if cached and (now - cached[1]) < _DNS_CACHE_TTL:
         return cached[0]
 
-    # Evict entradas expiradas si el cache crece demasiado
     if len(_dns_cache) >= _DNS_CACHE_MAX:
         expired = [k for k, (_, ts) in _dns_cache.items() if (now - ts) >= _DNS_CACHE_TTL]
         for k in expired:
@@ -339,15 +538,12 @@ def _resolve_dns(domain: str) -> list:
 
 
 def _check_origin(client_ip: str, allowed_origins: list) -> bool:
-    """Verifica si client_ip está en la lista de orígenes permitidos."""
     if allowed_origins is None:
         return True
 
     for origin in allowed_origins:
-        # Comparación directa (IP)
         if origin == client_ip:
             return True
-        # Si parece dominio (no es IP), resolver DNS
         if not origin.replace(".", "").replace(":", "").isdigit():
             resolved_ips = _resolve_dns(origin)
             if client_ip in resolved_ips:
@@ -357,36 +553,16 @@ def _check_origin(client_ip: str, allowed_origins: list) -> bool:
 
 
 async def validate_backup_api_key(request) -> dict:
-    """
-    Valida Backup API Key con 2 capas de seguridad.
-
-    Capa 1: Key válida + key_type='backup' + activa + muni activa + no expirada
-    Capa 2: IP/DNS contra allowed_origins
-
-    Rate limit se maneja por separado en check_and_log_sync_access().
-
-    Args:
-        request: Starlette Request object
-
-    Returns:
-        dict con api_key_id, municipality_id, schema_name, rate_limit_per_minute
-
-    Raises:
-        BackupAuthError: Con status_code apropiado (401, 403)
-    """
     from database import fetch_one
 
-    # Guardia: X-User-ID PROHIBIDO para backup keys
     if request.headers.get("X-User-ID"):
         logger.warning("[Backup Auth] Request con X-User-ID prohibido")
         raise BackupAuthError("Acceso denegado", 401)
 
-    # Obtener API Key
     api_key = request.headers.get("X-API-Key")
     if not api_key:
         raise BackupAuthError("Acceso denegado", 401)
 
-    # === CAPA 1: Key válida ===
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     try:
@@ -416,7 +592,6 @@ async def validate_backup_api_key(request) -> dict:
         logger.error(f"[Backup Auth] Error consultando API Key: {e}")
         raise BackupAuthError("Acceso denegado", 401)
 
-    # Validaciones genéricas (sin revelar motivo específico)
     if not result:
         logger.warning(f"[Backup Auth] Key no encontrada: {api_key[:12]}...")
         raise BackupAuthError("Acceso denegado", 401)
@@ -440,9 +615,8 @@ async def validate_backup_api_key(request) -> dict:
 
     api_key_id = result["id"]
     schema_name = result["schema_name"]
-    validate_schema_name(schema_name)  # Defense in depth
+    validate_schema_name(schema_name)
 
-    # === CAPA 2: Verificar IP/DNS ===
     client_ip = request.client.host if request.client else None
     allowed_origins = result.get("allowed_origins")
 
@@ -450,7 +624,6 @@ async def validate_backup_api_key(request) -> dict:
         logger.warning(f"[Backup Auth] IP {client_ip} no autorizada para key {result['key_name']}")
         raise BackupAuthError("Acceso denegado", 403)
 
-    # Actualizar last_used_at
     await _update_last_used(api_key_id)
 
     logger.info(f"[Backup Auth] Acceso autorizado: key={result['key_name']}, schema={schema_name}, ip={client_ip}")
@@ -459,7 +632,9 @@ async def validate_backup_api_key(request) -> dict:
         "api_key_id": str(api_key_id),
         "municipality_id": str(result["municipality_id"]),
         "schema_name": schema_name,
-        "rate_limit_per_minute": result.get("rate_limit_per_minute") or 60
+        "rate_limit_per_minute": cap_rate_limit(
+            result.get("rate_limit_per_minute") or 60, "backup", key_id=str(result["id"])
+        ),
     }
 
 
@@ -471,29 +646,11 @@ async def check_and_log_sync_access(
     user_agent: str,
     rate_limit_per_minute: int
 ) -> Optional[int]:
-    """
-    Check rate limit y log de acceso atómico (INSERT ... WHERE NOT EXISTS).
-
-    Si el acceso está permitido, inserta el log y retorna None.
-    Si está rate-limited, retorna retry_after en segundos.
-
-    Args:
-        api_key_id: UUID de la API key
-        schema_name: Schema del tenant
-        action: Acción (ej: 'sync_data')
-        ip: IP del cliente
-        user_agent: User-Agent header
-        rate_limit_per_minute: Requests por minuto permitidos
-
-    Returns:
-        None si acceso permitido (ya logueado), int retry_after si rate-limited
-    """
     from database import fetch_one
 
     interval_seconds = 60 / max(rate_limit_per_minute, 1)
 
     try:
-        # INSERT atómico: solo inserta si no hay acceso reciente
         result = await fetch_one(
             """
             INSERT INTO public.backup_access_log
@@ -507,20 +664,16 @@ async def check_and_log_sync_access(
             RETURNING id
             """,
             api_key_id, schema_name, action, ip, user_agent,
-            api_key_id, action, int(interval_seconds),
+            api_key_id, action, interval_seconds,
             schema_name="public"
         )
     except Exception as e:
         logger.error(f"[Backup Auth] Error en check_and_log_sync_access: {e}")
-        # Fail-closed: si la BD falla, el sync tampoco puede leer datos.
-        # Mejor fallar temprano que dejar pasar y fallar despues sin registro.
-        return 60  # retry_after = 60s (retorna int = rate limited)
+        return 60
 
     if result:
-        # Acceso permitido, ya quedó logueado
         return None
 
-    # Rate limited — calcular retry_after
     try:
         last_access = await fetch_one(
             """
@@ -532,7 +685,7 @@ async def check_and_log_sync_access(
             schema_name="public"
         )
     except Exception:
-        return int(interval_seconds)
+        return max(1, int(interval_seconds))
 
     if last_access and last_access.get("created_at"):
         last_ts = last_access["created_at"]
@@ -541,4 +694,4 @@ async def check_and_log_sync_access(
         retry_after = max(1, int(interval_seconds - elapsed))
         return retry_after
 
-    return int(interval_seconds)
+    return max(1, int(interval_seconds))

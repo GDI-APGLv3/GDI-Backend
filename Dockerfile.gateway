@@ -13,5 +13,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 RUN chown -R app:app /app
 USER app
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 EXPOSE 8080
-CMD ["uvicorn", "api_gateway.http_server:app", "--host", "::", "--port", "8080", "--workers", "2", "--timeout-keep-alive", "120"]
+# Workers configurable por env (default 2). 'exec' preserva el manejo de señales (SIGTERM de Fly).
+CMD exec uvicorn api_gateway.http_server:app --host :: --port 8080 --workers ${GUNICORN_WORKERS:-2} --timeout-keep-alive 120

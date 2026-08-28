@@ -96,7 +96,12 @@ dmypy.json
 
 # Project specific
 *.pdf
-test_*
+# Anclado a la raíz del repo (no a tests/): esto es para scratch files que
+# quedan sueltos ahí tras pruebas manuales (ej. test_output.pdf, ya cubierto
+# también por *.pdf arriba). Sin el "/" al inicio, el patrón "test_*" hacía
+# match en CUALQUIER directorio, incluido tests/, e ignoraba silenciosamente
+# el código de test real (hallazgo H-01 del crack sobre b1).
+/test_*
 backup_*
 
 # Temporary Claude files

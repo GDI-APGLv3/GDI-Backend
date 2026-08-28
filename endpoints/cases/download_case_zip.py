@@ -1,6 +1,3 @@
-"""
-Endpoint para descargar todos los documentos de un expediente como ZIP.
-"""
 
 import asyncio
 import zipfile
@@ -35,11 +32,6 @@ async def _download_pdf(
     official_number: str,
     pdf_url: str,
 ) -> tuple[int, str, bytes] | None:
-    """
-    Descarga un PDF desde R2 usando la URL presignada.
-
-    Retorna (order_number, official_number, bytes) o None si falla.
-    """
     try:
         response = await client.get(pdf_url, timeout=30.0)
         response.raise_for_status()
@@ -66,7 +58,6 @@ async def download_case_zip(
     El ZIP se nombra con el número del expediente.
     """
     try:
-        # 1. Validar usuario autenticado
         tenant_user_id = getattr(request.state, "tenant_user_id", None)
         if not tenant_user_id:
             raise ValidationError(USER_UNAUTHENTICATED_ERROR)
@@ -75,12 +66,10 @@ async def download_case_zip(
 
         db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
-        # 2. Verificar permisos de visualización (404 para no revelar existencia)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for ZIP download: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # 3. Obtener número del expediente (para el nombre del ZIP)
         from database import fetch_all
         from services.case_queries import get_case_number_query
 
@@ -89,17 +78,14 @@ async def download_case_zip(
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
         case_number = case_row[0]["case_number"]
 
-        # 4. Obtener documentos del expediente
         documents_data = await get_case_documents(case_id, schema_name=schema_name)
         official_docs = documents_data.get("official", [])
 
-        # Filtrar solo documentos activos con official_number y pdf_url
         docs_to_download = [
             d for d in official_docs
             if d.get("is_active") and d.get("official_number") and d.get("pdf_url")
         ]
 
-        # Ordenar por order_number ASC
         docs_to_download.sort(key=lambda d: d.get("order", 0))
 
         if not docs_to_download:
@@ -113,7 +99,6 @@ async def download_case_zip(
             f"{len(docs_to_download)} documents to include"
         )
 
-        # 5. Descargar todos los PDFs en paralelo
         async with httpx.AsyncClient() as client:
             tasks = [
                 _download_pdf(
@@ -126,7 +111,6 @@ async def download_case_zip(
             ]
             results = await asyncio.gather(*tasks)
 
-        # Filtrar los que fallaron (None)
         successful_downloads = [r for r in results if r is not None]
 
         if not successful_downloads:
@@ -136,7 +120,6 @@ async def download_case_zip(
                 detail="No se pudo descargar ningún documento del expediente"
             )
 
-        # Ordenar por order_number (por si asyncio.gather alteró el orden)
         successful_downloads.sort(key=lambda x: x[0])
 
         logger.info(
@@ -144,8 +127,7 @@ async def download_case_zip(
             f"PDFs for case {case_number}"
         )
 
-        # 6. Construir ZIP en memoria (SpooledTemporaryFile para expedientes grandes)
-        MAX_ZIP_BYTES = 500 * 1024 * 1024  # 500 MB
+        MAX_ZIP_BYTES = 500 * 1024 * 1024
         total_bytes = sum(len(r[2]) for r in successful_downloads)
         if total_bytes > MAX_ZIP_BYTES:
             raise BusinessLogicError(
@@ -162,14 +144,13 @@ async def download_case_zip(
 
         tmp.seek(0)
 
-        # 7. Nombre seguro para el archivo ZIP (remover caracteres problemáticos)
         safe_case_number = case_number.replace("/", "-").replace("\\", "-")
         zip_filename = f"{safe_case_number}.zip"
 
         logger.info(f"Serving ZIP: {zip_filename} ({len(successful_downloads)} files)")
 
         def iterfile():
-            chunk_size = 65536  # 64 KB
+            chunk_size = 65536
             while True:
                 chunk = tmp.read(chunk_size)
                 if not chunk:

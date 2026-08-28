@@ -1,7 +1,3 @@
-"""
-Endpoint para iniciar el proceso de firma de documentos.
-Optimizado siguiendo principios de Clean Code.
-"""
 from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
@@ -13,7 +9,6 @@ from services.documents.signing import start_document_signing_process
 from shared.exceptions import ValidationError, ExternalServiceError, exception_to_http_exception
 from shared.dependencies import get_tenant_schema
 
-# === CONFIGURACIÓN ===
 logger = get_logger("start_signing")
 router = APIRouter(tags=[Tags.DOCUMENTOS])
 

@@ -1,5 +1,10 @@
 # PgBouncer Transaction Mode - GDI Backend
 
+> ⚠️ **Estado al 2026-08-19:** PgBouncer se probo y quedo **REVERTIDO** en el ecosistema.
+> La config existe en GDI-BD (`fly.pgbouncer.toml`) y `prd-pgbouncer` figura como
+> pendiente de habilitar. Este documento describe como se habilita, no algo que
+> hoy este prendido.
+
 ## Resumen
 
 Modificación de `database.py` para soportar PgBouncer en **transaction mode**, permitiendo escalar a 300-500 conexiones concurrentes manteniendo seguridad multi-tenant.
@@ -100,11 +105,10 @@ PGBOUNCER_TRANSACTION_MODE = os.getenv("PGBOUNCER_TRANSACTION_MODE", "false").lo
 PGBOUNCER_TRANSACTION_MODE="true"
 ```
 
-### Railway
+### Fly.io
 
-En Railway variables:
-```
-PGBOUNCER_TRANSACTION_MODE=true
+```bash
+flyctl secrets set PGBOUNCER_TRANSACTION_MODE=true -a <app>
 ```
 
 ## Testing
@@ -164,8 +168,8 @@ git pull origin main
 # .env local
 echo 'PGBOUNCER_TRANSACTION_MODE="true"' >> .env
 
-# Railway
-railway variables set PGBOUNCER_TRANSACTION_MODE=true
+# Fly.io
+flyctl secrets set PGBOUNCER_TRANSACTION_MODE=true -a <app>
 ```
 
 ### Paso 3: Restart
@@ -173,8 +177,8 @@ railway variables set PGBOUNCER_TRANSACTION_MODE=true
 # Local
 uvicorn main:app --reload
 
-# Railway
-railway restart
+# Fly.io (setear un secret ya reinicia la app; forzar reinicio:)
+flyctl apps restart <app>
 ```
 
 ### Paso 4: Verificar logs

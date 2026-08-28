@@ -1,11 +1,8 @@
-"""
-Endpoint para archivar/desarchivar una nota.
-"""
 
 from fastapi import APIRouter, Depends, Path
 from shared.logging import get_logger
 from shared.dependencies import get_tenant_schema
-from shared.exceptions import exception_to_http_exception, ValidationError, AuthorizationError
+from shared.exceptions import exception_to_http_exception, AuthorizationError
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
 from models.notes.responses import ArchiveNoteRequest, ArchiveNoteResponse
@@ -55,7 +52,6 @@ async def archive_note(
     Archiva o desarchiva una nota para un sector específico.
     """
     try:
-        # Validar que el sector_id esté en los sectores del usuario con can_edit
         editable_sector_ids = get_editable_sector_ids(current_user)
 
         if request.sector_id not in editable_sector_ids:

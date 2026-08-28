@@ -1,50 +1,55 @@
-"""
-Módulo de consulta/recuperación de expedientes.
-Funciones para listar y buscar expedientes.
-"""
 
 from typing import List, Dict, Optional, Any
+import hashlib
 import json
+import os
+import asyncio
 from shared.logging import get_logger
 import re
 
 from database import fetch_all
 from services.case_queries import get_cases_list_query, get_cases_count_query, get_cases_summary_query
-from services.cache import get_cached
+from services.cache import get_cached, invalidate_cache
 from config.constants import (
     ACCESS_REASON_ADMIN,
     ACCESS_REASON_ASSIGNED,
     DATE_FILTER_OPTIONS,
     DEFAULT_PAGE_SIZE,
     CACHE_TTL_COUNTS,
-    CASE_INVALID_DATE_FILTER_ERROR
+    CASE_INVALID_DATE_FILTER_ERROR,
+    CASE_SEARCH_MIN_CHARS
 )
 from shared.exceptions import ValidationError, BusinessLogicError
 
 logger = get_logger(__name__)
 
 
-# ========================================
-# HELPERS PRIVADOS
-# ========================================
+def _cases_count_cache_ttl() -> int:
+    try:
+        return int(os.getenv("CASE_SEARCH_COUNT_CACHE_TTL", str(CACHE_TTL_COUNTS)))
+    except (TypeError, ValueError):
+        return CACHE_TTL_COUNTS
+
+
+def _build_cases_count_cache_key(
+    schema_name: str,
+    view: Optional[str],
+    count_params: tuple,
+) -> str:
+    raw = f"{schema_name}|{view or 'none'}|{repr(count_params)}"
+    return f"cases_count:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
 
 def _is_uuid(value: str) -> bool:
-    """Verifica si es un UUID válido."""
     uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     return bool(re.match(uuid_pattern, value.lower().strip()))
 
 
 def _looks_like_case_number(value: str) -> bool:
-    """Detecta si un string parece un número de expediente."""
     case_number_pattern = r'^[A-Za-z]+-\d{4}-\d+(-[A-Za-z]+)?\s*$'
     return bool(re.match(case_number_pattern, value.strip()))
 
 
 async def _resolve_trata_filter(trata_filter: str, *, schema_name: str) -> List[str]:
-    """
-    Resuelve trata_filter a lista de UUIDs.
-    Acepta: UUID, acronym único, o acronyms separados por coma.
-    """
     if not trata_filter:
         return []
 
@@ -64,10 +69,6 @@ async def _resolve_trata_filter(trata_filter: str, *, schema_name: str) -> List[
 
 
 async def _resolve_sector_filter(sector_filter: str, *, schema_name: str) -> Optional[str]:
-    """
-    Resuelve sector_filter a UUID.
-    Acepta: UUID o formato DEPT#SECTOR (ej: "HAC#PRIV").
-    """
     if not sector_filter:
         return None
 
@@ -109,69 +110,74 @@ def _build_where_conditions(
     is_global_search: bool = False,
     *,
     sector_param: int = 1,
+    user_id_param: int = 2,
     param_start: int = 3,
 ) -> tuple:
-    """
-    Construye las condiciones WHERE para la query.
-
-    Retorna (where_sql, next_param_idx) donde next_param_idx es el índice
-    del próximo $N disponible tras los params consumidos por esta función.
-
-    sector_param: índice $N del array de sector_ids (siempre $1)
-    param_start: índice del primer param dinámico (post sectors y user_id)
-    """
     where_conditions = []
     idx = param_start
 
-    if not is_global_search:
-        sector_conditions = f"""
+    sector_conditions = f"""
+        (
+            EXISTS (
+                SELECT 1 FROM case_movements cm
+                WHERE cm.case_id = c.id
+                AND cm.assigned_sector_id = ANY(${sector_param}::uuid[])
+                AND cm.is_active = true
+            )
+            OR
+            EXISTS (
+                SELECT 1 FROM case_movements cm
+                WHERE cm.case_id = c.id
+                AND cm.type = 'transfer'
+                AND cm.is_active = false
+                AND cm.admin_sector_id = ANY(${sector_param}::uuid[])
+                AND cm.closed_at = (
+                    SELECT MAX(cm2.closed_at)
+                    FROM case_movements cm2
+                    WHERE cm2.case_id = c.id
+                    AND cm2.type = 'transfer'
+                    AND cm2.is_active = false
+                )
+            )
+            OR
             (
                 EXISTS (
                     SELECT 1 FROM case_movements cm
                     WHERE cm.case_id = c.id
-                    AND cm.assigned_sector_id = ANY(${sector_param}::uuid[])
-                    AND cm.is_active = true
+                    AND cm.type = 'creation'
+                    AND cm.admin_sector_id = ANY(${sector_param}::uuid[])
                 )
-                OR
-                EXISTS (
+                AND NOT EXISTS (
                     SELECT 1 FROM case_movements cm
                     WHERE cm.case_id = c.id
                     AND cm.type = 'transfer'
-                    AND cm.is_active = false
-                    AND cm.admin_sector_id = ANY(${sector_param}::uuid[])
-                    AND cm.closed_at = (
-                        SELECT MAX(cm2.closed_at)
-                        FROM case_movements cm2
-                        WHERE cm2.case_id = c.id
-                        AND cm2.type = 'transfer'
-                        AND cm2.is_active = false
-                    )
-                )
-                OR
-                (
-                    EXISTS (
-                        SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = c.id
-                        AND cm.type = 'creation'
-                        AND cm.admin_sector_id = ANY(${sector_param}::uuid[])
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = c.id
-                        AND cm.type = 'transfer'
-                    )
                 )
             )
-        """
-        where_conditions.append(sector_conditions)
+        )
+    """
+
+    non_reserved_branch = sector_conditions if not is_global_search else "TRUE"
+
+    from services.cases.reserved_predicate import build_reserved_or_exists
+    reserved_branch = "(\n" + build_reserved_or_exists(
+        case_ref="c.id",
+        user_ph=f"${user_id_param}",
+    ) + "\n)"
+
+    where_conditions.append(f"""
+        (
+            (NOT ct.is_reserved AND ({non_reserved_branch}))
+            OR
+            (ct.is_reserved AND ({reserved_branch}))
+        )
+    """)
 
     where_conditions.append("c.status = 'active'")
 
     if search_filter:
         where_conditions.append(f"""(
-            unaccent(LOWER(c.reference)) LIKE unaccent(${idx})
-            OR unaccent(LOWER(c.case_number)) LIKE unaccent(${idx + 1})
-            OR similarity(unaccent(LOWER(c.reference)), unaccent(LOWER(${idx + 2}))) > 0.3
+            public.immutable_unaccent(LOWER(c.reference)) LIKE public.immutable_unaccent(LOWER(${idx}))
+            OR public.immutable_unaccent(LOWER(c.case_number)) LIKE public.immutable_unaccent(LOWER(${idx + 1}))
             OR EXISTS (
                 SELECT 1 FROM case_official_documents cod
                 JOIN official_documents od ON cod.official_document_id = od.id
@@ -179,14 +185,12 @@ def _build_where_conditions(
                 AND cod.is_active = true
                 AND od.signed_at IS NOT NULL
                 AND (
-                    unaccent(LOWER(COALESCE(od.official_number, ''))) LIKE unaccent(${idx + 3})
-                    OR unaccent(LOWER(COALESCE(od.reference, ''))) LIKE unaccent(${idx + 4})
-                    OR unaccent(LOWER(COALESCE(od.content->>'html', ''))) LIKE unaccent(${idx + 5})
-                    OR similarity(unaccent(LOWER(COALESCE(od.reference, ''))), unaccent(LOWER(${idx + 6}))) > 0.3
+                    public.immutable_unaccent(LOWER(COALESCE(od.official_number, ''))) LIKE public.immutable_unaccent(LOWER(${idx + 2}))
+                    OR public.immutable_unaccent(LOWER(od.reference)) LIKE public.immutable_unaccent(LOWER(${idx + 3}))
                 )
             )
         )""")
-        idx += 7
+        idx += 4
 
     if resolved_sector:
         where_conditions.append(f"""
@@ -242,7 +246,6 @@ def _build_where_conditions(
 
 
 def _get_date_filter_condition(date_filter: str) -> Optional[str]:
-    """Retorna la condición SQL para el filtro de fecha."""
     date_conditions = {
         "hoy": """DATE(GREATEST(
             COALESCE((SELECT MAX(cm.created_at) FROM case_movements cm WHERE cm.case_id = c.id), c.created_at),
@@ -271,17 +274,12 @@ def _build_where_params(
     date_from: Optional[str],
     date_to: Optional[str],
 ) -> list:
-    """
-    Construye los params dinámicos del WHERE (excluye $1=sector_ids y $2=user_id).
-    Orden: search(7) + sector(1) + tratas(1) + date_from(1) + date_to(1).
-    """
     params = []
 
     if search_filter:
         search_pattern = f"%{search_filter.lower()}%"
-        search_term = search_filter.lower()
-        params.extend([search_pattern, search_pattern, search_term,
-                       search_pattern, search_pattern, search_pattern, search_term])
+        params.extend([search_pattern, search_pattern,
+                       search_pattern, search_pattern])
 
     if resolved_sector:
         params.append(resolved_sector)
@@ -298,35 +296,13 @@ def _build_where_params(
     return params
 
 
-def _build_query_params(
-    user_sector_ids: List[str],
-    user_id: Optional[str],
-    where_params: list,
-    page_size: int,
-    offset: int,
-) -> tuple:
-    """
-    Construye params para la list query en orden posicional:
-    $1=sector_ids, $2=user_id, $3..=where_params, $N-1=page_size, $N=offset.
-    """
-    return (
-        user_sector_ids,
-        user_id or '00000000-0000-0000-0000-000000000000',
-        *where_params,
-        page_size,
-        offset,
-    )
-
-
 def _determine_access_reason(row: Dict[str, Any]) -> str:
-    """Determina la razón de acceso al expediente."""
     if row['is_admin_by_transfer'] or row['is_admin_by_creation']:
         return ACCESS_REASON_ADMIN
     return ACCESS_REASON_ASSIGNED
 
 
 def _build_case_response(row: Dict[str, Any], *, schema_name: str) -> Dict[str, Any]:
-    """Construye el objeto de respuesta para un caso."""
     access_reason = _determine_access_reason(row)
 
     admin_sector = None
@@ -337,7 +313,6 @@ def _build_case_response(row: Dict[str, Any], *, schema_name: str) -> Dict[str, 
             "sector_color": row['admin_sector_color'],
         }
 
-    # asyncpg decodifica json/jsonb automáticamente via set_type_codec
     assigned_sectors_raw = row['assigned_sectors_json'] or []
 
     if isinstance(assigned_sectors_raw, str):
@@ -347,9 +322,24 @@ def _build_case_response(row: Dict[str, Any], *, schema_name: str) -> Dict[str, 
         {
             "acronym": asg['sector_acronym'],
             "department": asg['department_name'],
-            "sector_color": asg.get('sector_color'),  # asg es dict Python (json_build_object)
+            "sector_color": asg.get('sector_color'),
         }
         for asg in assigned_sectors_raw
+    ]
+
+    responsibles_raw = row['responsibles_json'] or []
+    if isinstance(responsibles_raw, str):
+        responsibles_raw = json.loads(responsibles_raw) if responsibles_raw else []
+
+    responsibles = [
+        {
+            "sector_acronym": r['sector_acronym'],
+            "user_id": r['user_id'],
+            "full_name": r['full_name'],
+            "profile_picture_url": r.get('profile_picture_url'),
+            "type": r['type'],
+        }
+        for r in responsibles_raw
     ]
 
     return {
@@ -359,11 +349,13 @@ def _build_case_response(row: Dict[str, Any], *, schema_name: str) -> Dict[str, 
         "last_modified_at": row['last_modified_at'],
         "case_type": {
             "name": row['type_name'],
-            "acronym": row['case_type']
+            "acronym": row['case_type'],
+            "is_reserved": bool(row['case_type_is_reserved']),
         },
         "access_reason": access_reason,
         "admin_sector": admin_sector,
         "assigned_sectors": assigned_sectors,
+        "responsibles": responsibles,
         "short_ai_summary": row['short_ai_summary'],
         "ai_summary": row['ai_summary'],
         "is_favorite": bool(row['is_favorite']),
@@ -371,18 +363,12 @@ def _build_case_response(row: Dict[str, Any], *, schema_name: str) -> Dict[str, 
 
 
 async def _execute_count(count_query: str, where_params: list, schema_name: str) -> int:
-    """Ejecuta la count query y retorna el total."""
     result = await fetch_all(count_query, *where_params, schema_name=schema_name)
     return result[0]['total_count'] if result else 0
 
 
-# Importar función centralizada desde sector_utils
 from services.shared.sector_utils import get_user_sector_ids as _get_user_sector_ids
 
-
-# ========================================
-# FUNCIONES PÚBLICAS
-# ========================================
 
 def _build_view_clause(
     view: Optional[str],
@@ -390,16 +376,6 @@ def _build_view_clause(
     schema_name: str,
     user_id_param_idx: int,
 ) -> tuple:
-    """
-    Construye el fragmento SQL para la vista seleccionada.
-
-    Devuelve (sql_fragment, params_extra) donde params_extra es [user_id]
-    cuando se usa un placeholder, o [] si view es None/desconocido.
-
-    El user_id se pasa como parámetro $N::uuid para evitar interpolación directa
-    en SQL (previene SQL injection vía bypass de blacklist como dollar-quoting o
-    normalización Unicode).
-    """
     if not view:
         return "", []
 
@@ -414,6 +390,11 @@ def _build_view_clause(
                 FROM {qs}.case_responsibles
                 WHERE user_id = {uid_ph}::uuid
                 AND is_active = true
+                UNION
+                SELECT DISTINCT case_id
+                FROM {qs}.case_assignment_tasks
+                WHERE assigned_user_id = {uid_ph}::uuid
+                AND status = 'open'
             ) cr_view ON cr_view.case_id = c.id
             """,
             [user_id],
@@ -503,9 +484,9 @@ async def get_cases_by_user(
     view: Optional[str] = None,
     sort_order: str = "desc",
     *,
-    schema_name: str
+    schema_name: str,
+    search_flags: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Obtiene expedientes que puede ver un usuario con filtros avanzados."""
     logger.info(f"Listando expedientes para usuario={user_id}, page={page}")
 
     try:
@@ -514,13 +495,31 @@ async def get_cases_by_user(
                 CASE_INVALID_DATE_FILTER_ERROR.format(options=", ".join(DATE_FILTER_OPTIONS))
             )
 
-        from shared.utils import get_user_global_search_flags
-        flags = await get_user_global_search_flags(user_id, schema_name=schema_name)
-        can_global_search = flags.get('can_global_search_cases', False)
+        if search_filter is not None:
+            search_filter = search_filter.strip()
+            if len(search_filter) < CASE_SEARCH_MIN_CHARS:
+                if search_filter:
+                    logger.info(
+                        f"search='{search_filter}' descartado: "
+                        f"minimo {CASE_SEARCH_MIN_CHARS} caracteres"
+                    )
+                search_filter = None
 
-        is_global_search = (
+        if search_flags is not None:
+            can_global_search = search_flags.get('can_global_search_cases', False)
+            user_sector_ids = await _get_user_sector_ids(user_id, schema_name=schema_name)
+        else:
+            from shared.utils import get_user_global_search_flags
+            flags, user_sector_ids = await asyncio.gather(
+                get_user_global_search_flags(user_id, schema_name=schema_name),
+                _get_user_sector_ids(user_id, schema_name=schema_name),
+            )
+            can_global_search = flags.get('can_global_search_cases', False)
+
+        is_global_search = bool(
             can_global_search
-            and (not search_filter or _looks_like_case_number(search_filter))
+            and search_filter
+            and _looks_like_case_number(search_filter)
         )
 
         logger.info(
@@ -528,9 +527,6 @@ async def get_cases_by_user(
             f"is_global_search={is_global_search} "
             f"(search_filter={repr(search_filter)})"
         )
-
-        # Obtener sectores del usuario
-        user_sector_ids = await _get_user_sector_ids(user_id, schema_name=schema_name)
 
         logger.info(f"User {user_id[:8]} sectors: {user_sector_ids}")
         if not user_sector_ids and not is_global_search:
@@ -540,16 +536,11 @@ async def get_cases_by_user(
         if not user_sector_ids:
             user_sector_ids = ['00000000-0000-0000-0000-000000000000']
 
-        # Resolver filtros de acronym a UUID
         resolved_tratas = await _resolve_trata_filter(trata_filter, schema_name=schema_name) if trata_filter else []
         resolved_sector = await _resolve_sector_filter(sector_filter, schema_name=schema_name) if sector_filter else None
 
         logger.debug(f"Filtros resueltos - trata: {trata_filter} -> {resolved_tratas}, sector: {sector_filter} -> {resolved_sector}, global_search: {is_global_search}")
 
-        # Construir WHERE dinámico con $N numerados
-        # $1=sector_ids (array), $2=user_id (is_favorite en list query)
-        # Para count query: params dinámicos arrancan en $2
-        # Para list query: params dinámicos arrancan en $3 (después de user_id)
         offset = (page - 1) * page_size
 
         where_clause, next_idx = _build_where_conditions(
@@ -561,11 +552,12 @@ async def get_cases_by_user(
             date_to,
             is_global_search=is_global_search,
             sector_param=1,
-            param_start=3,  # list query: $1=sectors, $2=user_id, $3+=dynamic
+            user_id_param=2,
+            param_start=3,
         )
 
-        # Cuando is_global_search=True no hay $1 (sector) en count query → params arrancan en $1
-        count_param_start = 1 if is_global_search else 2
+        count_param_start = 2 if is_global_search else 3
+        count_user_id_param = 1 if is_global_search else 2
         count_where, count_next_idx = _build_where_conditions(
             search_filter,
             resolved_sector,
@@ -575,21 +567,18 @@ async def get_cases_by_user(
             date_to,
             is_global_search=is_global_search,
             sector_param=1,
+            user_id_param=count_user_id_param,
             param_start=count_param_start,
         )
 
-        # list query: $1=sectors, $2=user_id (is_favorite), $3+=where_params
-        # view_join usa $next_idx; LIMIT/OFFSET siguen después del param de view
         view_join_list, view_join_params_list = _build_view_clause(
             view, user_id, schema_name, user_id_param_idx=next_idx
         )
 
-        # count query: view_join usa count_next_idx (índice correcto para esa query)
         view_join_count, view_join_params_count = _build_view_clause(
             view, user_id, schema_name, user_id_param_idx=count_next_idx
         )
 
-        # LIMIT y OFFSET se desplazan 1 si hay view param
         list_view_offset = len(view_join_params_list)
         sort_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
 
@@ -606,8 +595,6 @@ async def get_cases_by_user(
             search_filter, resolved_sector, resolved_tratas, date_from, date_to,
         )
 
-        # Construir params para list query:
-        # $1=sectors, $2=user_id, $3..=where_params, $N=view_uid (si view), $N+1=page_size, $N+2=offset
         list_params = (
             user_sector_ids,
             user_id,
@@ -617,23 +604,23 @@ async def get_cases_by_user(
             offset,
         )
 
-        # Ejecutar count separado (cacheado 30s)
-        import hashlib
-        filter_hash = hashlib.md5(str(where_params).encode()).hexdigest()[:8]
-        view_key = view or "none"
-        cache_key = f"cases_count:{schema_name}:{view_key}:{filter_hash}"
-
-        # Global search: no sector filter en count → no pasar user_sector_ids como $1
         count_params = (
-            list(where_params) + view_join_params_count
+            [user_id, *where_params, *view_join_params_count]
             if is_global_search
-            else [user_sector_ids, *where_params, *view_join_params_count]
+            else [user_sector_ids, user_id, *where_params, *view_join_params_count]
         )
-        total = await get_cached(
-            cache_key,
-            lambda: _execute_count(count_query, count_params, schema_name),
-            ttl=CACHE_TTL_COUNTS
-        )
+
+        cache_ttl = _cases_count_cache_ttl()
+        cache_key = _build_cases_count_cache_key(schema_name, view, tuple(count_params))
+        if cache_ttl > 0:
+            total = await get_cached(
+                cache_key,
+                lambda: _execute_count(count_query, count_params, schema_name),
+                ttl=cache_ttl,
+                cache_if=lambda t: t != 0,
+            )
+        else:
+            total = await _execute_count(count_query, count_params, schema_name)
 
         if total == 0:
             return {
@@ -642,6 +629,16 @@ async def get_cases_by_user(
             }
 
         results = await fetch_all(cases_query, *list_params, schema_name=schema_name)
+
+        if not results:
+            if cache_ttl > 0:
+                await invalidate_cache(cache_key)
+            total = await _execute_count(count_query, count_params, schema_name)
+            return {
+                "cases": [], "total": total, "page": page,
+                "page_size": page_size,
+                "total_pages": (total + page_size - 1) // page_size if total else 0,
+            }
 
         cases = [_build_case_response(row, schema_name=schema_name) for row in results]
 
@@ -663,7 +660,6 @@ async def get_cases_by_user(
 
 
 async def get_cases_summary(user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Obtiene estadísticas/resumen de expedientes del usuario."""
     logger.info(f"Obteniendo estadísticas de expedientes para usuario={user_id}")
 
     try:

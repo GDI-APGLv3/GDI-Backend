@@ -1,35 +1,14 @@
-"""
-Servicios para gestión avanzada de usuarios.
-Maneja operaciones de administración y consultas especializadas de usuarios.
-"""
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from database import fetch_all, fetch_one
-from shared.exceptions import ValidationError, UserNotFoundError, UserInactiveError
-from shared.validation import validate_user_id, validate_email, validate_required_string
-from shared.utils import calculate_offset, calculate_total_pages
+from shared.exceptions import ValidationError, UserNotFoundError
+from shared.validation import validate_user_id
 
 async def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtiene estadísticas completas de actividad de un usuario.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant, compatible con PgBouncer transaction mode)
-
-    Returns:
-        Dict con estadísticas del usuario
-
-    Raises:
-        ValidationError: Si el user_id es inválido
-        UserNotFoundError: Si el usuario no existe
-    """
-    # Validar user_id
     user_error = await validate_user_id(user_id, schema_name=schema_name)
     if user_error:
         raise ValidationError(user_error)
 
-    # Verificar que el usuario existe
     user = await fetch_one(
         "SELECT id, first_name, last_name FROM users WHERE id = $1",
         user_id,
@@ -39,7 +18,6 @@ async def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, An
     if not user:
         raise UserNotFoundError(user_id)
 
-    # Estadísticas de documentos creados
     created_stats = await fetch_one(
         """
         SELECT
@@ -55,7 +33,6 @@ async def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, An
         schema_name=schema_name
     )
 
-    # Estadísticas de documentos para firmar
     signing_stats = await fetch_one(
         """
         SELECT
@@ -71,7 +48,6 @@ async def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, An
         schema_name=schema_name
     )
 
-    # Estadísticas de numeración (si es numerador)
     numeration_stats = await fetch_one(
         """
         SELECT
@@ -86,7 +62,6 @@ async def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, An
         schema_name=schema_name
     )
 
-    # Actividad reciente (últimos 30 días)
     recent_activity = await fetch_one(
         """
         SELECT
@@ -131,24 +106,10 @@ async def get_user_statistics(user_id: str, *, schema_name: str) -> Dict[str, An
     }
 
 async def get_user_document_activity(user_id: str, schema_name: str, days: int = 30) -> Dict[str, Any]:
-    """
-    Obtiene la actividad detallada de documentos de un usuario.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Nombre del schema de la base de datos
-        days: Número de días hacia atrás para la actividad
-
-    Returns:
-        Dict con actividad detallada
-    """
-    # Validar user_id
     user_error = await validate_user_id(user_id, schema_name=schema_name)
     if user_error:
         raise ValidationError(user_error)
 
-    # Documentos creados recientemente
-    # NOTE: interval no se puede parametrizar directamente — usamos cast de entero
     created_docs = await fetch_all(
         """
         SELECT d.id, d.reference, d.status, d.created_at,
@@ -164,7 +125,6 @@ async def get_user_document_activity(user_id: str, schema_name: str, days: int =
         schema_name=schema_name
     )
 
-    # Documentos firmados recientemente
     signed_docs = await fetch_all(
         """
         SELECT d.id, d.reference, d.status, dsig.signed_at,
@@ -183,7 +143,6 @@ async def get_user_document_activity(user_id: str, schema_name: str, days: int =
         schema_name=schema_name
     )
 
-    # Documentos pendientes de firma
     pending_docs = await fetch_all(
         """
         SELECT d.id, d.reference, d.status, d.updated_at,
@@ -203,7 +162,6 @@ async def get_user_document_activity(user_id: str, schema_name: str, days: int =
         schema_name=schema_name
     )
 
-    # Formatear resultados
     created_formatted = []
     for doc in created_docs:
         created_formatted.append({
@@ -253,15 +211,6 @@ async def get_user_document_activity(user_id: str, schema_name: str, days: int =
     }
 
 async def get_users_with_roles(schema_name: str) -> Dict[str, Any]:
-    """
-    Obtiene lista de usuarios con sus roles y capacidades especiales.
-
-    Args:
-        schema_name: Nombre del schema de la base de datos
-
-    Returns:
-        Dict con usuarios y sus roles
-    """
     users_data = await fetch_all(
         """
         SELECT DISTINCT
@@ -288,7 +237,6 @@ async def get_users_with_roles(schema_name: str) -> Dict[str, Any]:
         schema_name=schema_name
     )
 
-    # Categorizar usuarios por roles
     creators = []
     signers = []
     numerators = []
@@ -316,7 +264,6 @@ async def get_users_with_roles(schema_name: str) -> Dict[str, Any]:
             inactive_users.append(user_info)
             continue
 
-        # Clasificar por actividad
         if user['documents_created'] > 0:
             creators.append(user_info)
 
@@ -346,15 +293,6 @@ async def get_users_with_roles(schema_name: str) -> Dict[str, Any]:
     }
 
 async def get_department_users_summary(schema_name: str) -> Dict[str, Any]:
-    """
-    Obtiene resumen de usuarios por departamento.
-
-    Args:
-        schema_name: Nombre del schema de la base de datos
-
-    Returns:
-        Dict con usuarios agrupados por departamento
-    """
     departments_data = await fetch_all(
         """
         SELECT
@@ -421,24 +359,10 @@ async def get_department_users_summary(schema_name: str) -> Dict[str, Any]:
     }
 
 async def validate_user_permissions(user_id: str, schema_name: str, permission_type: str, resource_id: str = None) -> Dict[str, Any]:
-    """
-    Valida permisos específicos de un usuario.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Nombre del schema de la base de datos
-        permission_type: Tipo de permiso ('create', 'sign', 'numerate', 'view')
-        resource_id: ID del recurso específico (opcional)
-
-    Returns:
-        Dict con resultado de validación
-    """
-    # Validar user_id
     user_error = await validate_user_id(user_id, schema_name=schema_name)
     if user_error:
         return {"has_permission": False, "reason": user_error}
 
-    # Verificar que el usuario existe y está activo
     user_result = await fetch_all(
         "SELECT id, is_active FROM users WHERE id = $1",
         user_id,
@@ -451,16 +375,13 @@ async def validate_user_permissions(user_id: str, schema_name: str, permission_t
     if not user_result[0]['is_active']:
         return {"has_permission": False, "reason": "Usuario inactivo"}
 
-    # Validar permisos específicos
     if permission_type == "create":
-        # Todos los usuarios activos pueden crear documentos
         return {"has_permission": True, "reason": "Usuario activo puede crear documentos"}
 
     elif permission_type == "sign":
         if not resource_id:
             return {"has_permission": False, "reason": "Se requiere ID de documento para validar firma"}
 
-        # Verificar si es firmante del documento
         signer_result = await fetch_all(
             "SELECT user_id FROM document_signers WHERE document_id = $1 AND user_id = $2",
             resource_id, user_id,
@@ -474,7 +395,6 @@ async def validate_user_permissions(user_id: str, schema_name: str, permission_t
 
     elif permission_type == "numerate":
         if not resource_id:
-            # Verificar si puede numerar en general
             numerator_result = await fetch_one(
                 "SELECT COUNT(*) as count FROM document_signers WHERE user_id = $1 AND is_numerator = true",
                 user_id,
@@ -486,7 +406,6 @@ async def validate_user_permissions(user_id: str, schema_name: str, permission_t
             else:
                 return {"has_permission": False, "reason": "Usuario no tiene capacidad de numeración"}
         else:
-            # Verificar si es numerador del documento específico
             doc_numerator_result = await fetch_all(
                 "SELECT user_id FROM document_signers WHERE document_id = $1 AND user_id = $2 AND is_numerator = true",
                 resource_id, user_id,
@@ -502,7 +421,6 @@ async def validate_user_permissions(user_id: str, schema_name: str, permission_t
         if not resource_id:
             return {"has_permission": True, "reason": "Usuario puede ver documentos generales"}
 
-        # Verificar acceso al documento específico (creador o firmante)
         access_result = await fetch_all(
             """
             SELECT

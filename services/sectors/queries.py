@@ -1,7 +1,5 @@
-"""Queries para operaciones de sectores y departamentos."""
 
 def get_all_sectors_with_departments_query() -> str:
-    """Query para obtener sectores activos con sus departamentos (incluyendo nombres)."""
     return """
         SELECT
             s.id as sector_id,

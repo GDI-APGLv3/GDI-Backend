@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener los documentos de un usuario con filtros y paginación.
-Refactorizado aplicando Clean Code y SOLID principles.
-"""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
@@ -27,10 +23,10 @@ router = APIRouter(tags=[Tags.USERS])
                     "content": {
                         "application/json": {
                             "example": {
-                                "total": 10,
+                                "total": None,
                                 "page": 1,
                                 "page_size": 10,
-                                "total_pages": 1,
+                                "total_pages": None,
                                 "has_next": False,
                                 "has_previous": False,
                                 "documents": [
@@ -90,7 +86,7 @@ async def get_user_documents(
     schema_name: str = Depends(get_tenant_schema),
     status_filter: Optional[str] = Query(
         None,
-        description="Filtrar por estado visual: En edición, En proceso de firma, Firmar ahora, Firmado"
+        description="Filtrar por estado visual: En edición, En proceso de firma, Firmar ahora, A mi firma, Firmado"
     ),
     date_filter: Optional[str] = Query(
         None,
@@ -125,6 +121,19 @@ async def get_user_documents(
         None,
         description="Filtrar por origen: 'mine' = solo propios (creator/signer/numerator), 'sector' = solo documentos de mi sector"
     ),
+    exclude_reserved: bool = Query(
+        False,
+        description="GDI-069: si true, excluye documentos cuyo tipo es reservado. Lo usa el modal Vincular documento cuando el expediente destino NO es reservado."
+    ),
+    signature_mode: str = Query(
+        "electronic",
+        description=(
+            "GDI-167: solo afecta a status_filter='Firmar ahora' (el PortaFirma). "
+            "'electronic' (default) = lo que se firma SIN token, igual que siempre. "
+            "'digital' = la solapa nueva: lo que EXIGE token. Los dos conjuntos son "
+            "complementarios y no se pisan."
+        ),
+    ),
     page: int = Query(
         1,
         description="Número de página (inicia en 1)",
@@ -152,10 +161,13 @@ async def get_user_documents(
     ## Respuesta
 
     La respuesta incluye:
-    - `total`: Número total de documentos encontrados que cumplen con los criterios de filtrado
+    - `total`: `null` desde GDI-369 -- dejamos de contar el universo para no retener
+      conexiones del pool. Usar `has_next` / `has_previous` para paginar.
     - `page`: Número de página actual
     - `page_size`: Número de documentos por página
-    - `total_pages`: Número total de páginas
+    - `total_pages`: `null` desde GDI-369. Ver nota de `total`.
+    - `has_next`: si hay pagina siguiente (calculado con LIMIT page_size + 1).
+    - `has_previous`: si `page > 1`.
     - `documents`: Lista paginada de documentos con información detallada
 
     Cada documento incluye:
@@ -179,8 +191,9 @@ async def get_user_documents(
     - `page`: Número de página que se desea mostrar (comienza en 1)
     - `page_size`: Cantidad de documentos por página (entre 1 y 100)
 
-    El conteo total de documentos (`total`) refleja el número de documentos después de aplicar todos los filtros.
     Los documentos se devuelven paginados según los parámetros `page` y `page_size`.
+    GDI-369: la respuesta ya no incluye conteo total; usar `has_next` para saber
+    si hay pagina siguiente.
 
     ## Notas:
 
@@ -192,18 +205,15 @@ async def get_user_documents(
     logger.info(f"GET /users/documents - User: {request.state.tenant_user_id}")
 
     try:
-        # Usar el user_id del usuario autenticado
         user_id = request.state.tenant_user_id
 
-        # Validar el status_filter si está presente
-        if status_filter and status_filter not in ["En edición", "En proceso de firma", "Firmar ahora", "Firmado"]:
+        if status_filter and status_filter not in ["En edición", "En proceso de firma", "Firmar ahora", "A mi firma", "Firmado"]:
             logger.warning(f"Invalid status_filter: {status_filter}")
             raise HTTPException(
                 status_code=400,
-                detail="status_filter debe ser uno de: En edición, En proceso de firma, Firmar ahora, Firmado"
+                detail="status_filter debe ser uno de: En edición, En proceso de firma, Firmar ahora, A mi firma, Firmado"
             )
 
-        # Validar el filtro de fecha predefinido
         if date_filter and date_filter not in ["hoy", "ayer", "ultimos_7_dias", "ultimos_30_dias"]:
             logger.warning(f"Invalid date_filter: {date_filter}")
             raise HTTPException(
@@ -211,7 +221,6 @@ async def get_user_documents(
                 detail="date_filter debe ser uno de: hoy, ayer, ultimos_7_dias, ultimos_30_dias"
             )
 
-        # Llamar al servicio para obtener documentos
         logger.debug(f"Calling document_service.get_user_documents with filters: status={status_filter}, date={date_filter}, search={search}")
         response_data = await document_service.get_user_documents(
             user_id,
@@ -226,20 +235,19 @@ async def get_user_documents(
             search=search,
             min_signers=min_signers,
             sector_filter=sector_filter,
+            exclude_reserved=exclude_reserved,
+            signature_mode=signature_mode,
             schema_name=schema_name
         )
 
-        # Obtener información de paginación y documentos
-        total = response_data["total"]
         page = response_data["page"]
         page_size = response_data["page_size"]
-        total_pages = response_data["total_pages"]
         documents = response_data["documents"]
+        has_next = response_data["has_next"]
+        has_previous = response_data["has_previous"]
 
-        # Convertir a lista de diccionarios que coincida con UserDocumentInfo model
         formatted_documents = []
         for doc in documents:
-            # Map rol_usuario to user_role format expected by frontend
             user_role_mapping = {
                 'creador': 'creator',
                 'firmante': 'signer',
@@ -255,12 +263,16 @@ async def get_user_documents(
                 "display_status": doc["display_status"],
                 "updated_at": doc["last_modified_at"].isoformat() if doc["last_modified_at"] else None,
                 "document_type": {
-                    "name": "Documento",  # Default name since it's not in the query
-                    "acronym": doc["acronym"]
+                    "name": "Documento",
+                    "acronym": doc["acronym"],
+                    "is_reserved": bool(doc.get("document_type_is_reserved")),
+                    "is_public": doc.get("document_type_visibility") == "publico",
                 },
                 "user_role": user_role,
                 "last_editor_name": doc["last_editor_full_name"],
                 "last_editor_profile_picture_url": doc.get("last_editor_profile_picture_url"),
+                "last_editor_citizen_id": str(doc["last_editor_citizen_id"]) if doc.get("last_editor_citizen_id") else None,
+                "last_editor_citizen_country_id": doc.get("last_editor_citizen_country_id"),
                 "official_number": doc["official_number"],
                 "creator_sector": f"{doc.get('creator_dept_acronym', '')}#{doc.get('creator_sector_acronym', '')}" if doc.get('creator_sector_acronym') else None,
                 "sent_by_name": doc.get("sent_by_name"),
@@ -271,17 +283,19 @@ async def get_user_documents(
                 "signers": doc.get("signers") or [],
             })
 
-        logger.info(f"Returning {len(formatted_documents)} documents (page {page}/{total_pages})")
-        
-        # Devolver respuesta completa con información de paginación y documentos
+        logger.info(
+            f"Returning {len(formatted_documents)} documents "
+            f"(page {page}, has_next={has_next})"
+        )
+
         return {
-            "total": total,
+            "total": None,
             "page": page,
             "page_size": page_size,
-            "total_pages": total_pages,
-            "has_next": page < total_pages,
-            "has_previous": page > 1,
-            "documents": formatted_documents
+            "total_pages": None,
+            "has_next": has_next,
+            "has_previous": has_previous,
+            "documents": formatted_documents,
         }
 
     except HTTPException:

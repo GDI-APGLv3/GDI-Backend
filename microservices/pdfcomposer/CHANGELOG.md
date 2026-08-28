@@ -98,7 +98,7 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ---
 
-**Repositorio**: https://github.com/GDI-APGLv3/GDI-Backend
+**Repositorio**: https://github.com/GDI-AGPLv3/GDI-Backend
 - **Guía de despliegue**: Instrucciones específicas para Railway
 
 ## [1.0.0] - 2025-09-15

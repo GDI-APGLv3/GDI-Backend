@@ -1,15 +1,12 @@
-"""
-Servicio para guardar recipients de MEMOS.
-Usa la conexión asyncpg de la transacción padre para atomicidad.
-
-Diferencias clave con NOTAS:
-- INSERT incluye recipient_sector_id y sender_sector_id (snapshots)
-- Se obtiene el sector_id actual de cada usuario para el snapshot
-"""
 
 from typing import Dict, List
 from shared.logging import get_logger
-from .queries import insert_memo_recipient_query, get_user_sector_id_query
+from database import execute_many
+from .queries import (
+    insert_memo_recipients_bulk_query,
+    get_user_sector_id_query,
+    get_users_sector_ids_bulk_query,
+)
 
 logger = get_logger(__name__)
 
@@ -21,55 +18,35 @@ async def save_memo_recipients(
     recipients: Dict[str, List[str]],
     *, schema_name: str
 ) -> int:
-    """
-    Guarda los recipients de un MEMO en la base de datos.
-    Usa la conexión asyncpg de la transacción padre para garantizar atomicidad.
-
-    Obtiene el sector_id actual de cada recipient y del sender como snapshot.
-
-    Args:
-        conn: Conexión asyncpg con tenant ya seteado.
-        document_id: UUID del documento (document_draft.id)
-        sender_user_id: UUID del usuario emisor
-        recipients: Dict con {to: [], cc: [], bcc: []}
-        schema_name: Schema del tenant (keyword-only, para logging)
-
-    Returns:
-        Cantidad de recipients insertados
-    """
-    insert_count = 0
-    query = insert_memo_recipient_query()
-    sector_query = get_user_sector_id_query()
-
-    # Obtener sector_id del sender (snapshot)
-    sender_row = await conn.fetchrow(sector_query, sender_user_id)
+    sender_row = await conn.fetchrow(get_user_sector_id_query(), sender_user_id)
     sender_sector_id = sender_row['sector_id'] if sender_row and sender_row['sector_id'] else None
 
-    # Cache de sector_ids para evitar queries repetidas
-    sector_cache: Dict[str, str | None] = {}
-
-    # Procesar cada tipo de recipient
+    user_ids: List[str] = []
+    recipient_types: List[str] = []
     for recipient_type in ['TO', 'CC', 'BCC']:
-        user_ids = recipients.get(recipient_type.lower(), [])
+        for user_id in recipients.get(recipient_type.lower(), []):
+            user_ids.append(user_id)
+            recipient_types.append(recipient_type)
 
-        for user_id in user_ids:
-            # Obtener sector_id del recipient (snapshot, con cache)
-            if user_id not in sector_cache:
-                row = await conn.fetchrow(sector_query, user_id)
-                sector_cache[user_id] = row['sector_id'] if row and row['sector_id'] else None
+    insert_count = 0
+    if user_ids:
+        distinct_user_ids = list(dict.fromkeys(user_ids))
+        sector_rows = await conn.fetch(get_users_sector_ids_bulk_query(), distinct_user_ids)
+        sector_by_user = {str(row['id']): row['sector_id'] for row in sector_rows}
+        recipient_sector_ids = [sector_by_user.get(uid) for uid in user_ids]
 
-            recipient_sector_id = sector_cache[user_id]
-
-            await conn.execute(
-                query,
-                document_id,
-                user_id,
-                sender_user_id,
-                recipient_type,
-                recipient_sector_id,
-                sender_sector_id
-            )
-            insert_count += 1
+        query = insert_memo_recipients_bulk_query()
+        status = await execute_many(
+            conn,
+            query,
+            document_id,
+            sender_user_id,
+            sender_sector_id,
+            user_ids,
+            recipient_types,
+            recipient_sector_ids,
+        )
+        insert_count = int(status.split()[-1])
 
     logger.info(
         f"[{schema_name}] Guardados {insert_count} recipients para memo {document_id}: "
@@ -82,18 +59,6 @@ async def save_memo_recipients(
 
 
 async def delete_memo_recipients(conn, document_id: str, *, schema_name: str) -> int:
-    """
-    Elimina todos los recipients de un documento MEMO.
-    Usa la conexión asyncpg de la transacción padre para garantizar atomicidad.
-
-    Args:
-        conn: Conexión asyncpg con tenant ya seteado.
-        document_id: UUID del documento (document_draft.id)
-        schema_name: Schema del tenant (keyword-only, para logging)
-
-    Returns:
-        Numero de registros eliminados
-    """
     query = "DELETE FROM memo_recipients WHERE document_id = $1"
     status = await conn.execute(query, document_id)
     deleted_count = int(status.split()[-1])

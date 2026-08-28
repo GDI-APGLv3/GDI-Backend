@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-Script para generar certificados auto-firmados de prueba para firma PAdES.
-
-Este script genera certificados PKCS#12 (.p12) auto-firmados para pruebas
-de firma digital. NO USAR EN PRODUCCION - los certificados de producción
-deben ser emitidos por una Autoridad Certificadora (CA) reconocida.
-
-Uso:
-    python generate_test_cert.py --tenant 100_test
-    python generate_test_cert.py --tenant municipio_demo --password mi_clave
-    python generate_test_cert.py --tenant 100_test --output ../certs
-
-Autor: GDI Latam
-Versión: 1.0.0
-"""
 
 import argparse
 import json
@@ -42,34 +27,17 @@ def generate_test_certificate(
     common_name: str = None,
     organization: str = None,
 ) -> Path:
-    """
-    Genera un certificado auto-firmado en formato PKCS#12.
-
-    Args:
-        tenant_id: Identificador del tenant (nombre del archivo)
-        password: Contraseña para proteger el archivo .p12
-        output_dir: Directorio de salida
-        validity_days: Días de validez del certificado
-        common_name: Nombre común (CN) del certificado
-        organization: Organización (O) del certificado
-
-    Returns:
-        Path: Ruta al archivo .p12 generado
-    """
-    # Valores por defecto basados en tenant_id
     if common_name is None:
         common_name = f"GDI Test Certificate - {tenant_id}"
     if organization is None:
         organization = f"Municipio {tenant_id} (TEST)"
 
-    # Generar clave privada RSA 2048 bits
     private_key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048,
         backend=default_backend()
     )
 
-    # Datos del sujeto/emisor (auto-firmado)
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, "AR"),
         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Buenos Aires"),
@@ -79,11 +47,9 @@ def generate_test_certificate(
         x509.NameAttribute(NameOID.COMMON_NAME, common_name),
     ])
 
-    # Fechas de validez (usar timezone-aware datetime)
     not_valid_before = datetime.now(timezone.utc)
     not_valid_after = not_valid_before + timedelta(days=validity_days)
 
-    # Construir el certificado
     cert_builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -100,7 +66,7 @@ def generate_test_certificate(
             x509.KeyUsage(
                 digital_signature=True,
                 key_encipherment=False,
-                content_commitment=True,  # Non-repudiation
+                content_commitment=True,
                 data_encipherment=False,
                 key_agreement=False,
                 key_cert_sign=False,
@@ -113,19 +79,15 @@ def generate_test_certificate(
         .add_extension(
             x509.ExtendedKeyUsage([
                 x509.oid.ExtendedKeyUsageOID.CODE_SIGNING,
-                # Agregar OID para firma de documentos si es necesario
             ]),
             critical=False,
         )
     )
 
-    # Firmar el certificado (auto-firmado)
     certificate = cert_builder.sign(private_key, hashes.SHA256(), default_backend())
 
-    # Crear directorio de salida si no existe
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Guardar como PKCS#12 (.p12)
     from cryptography.hazmat.primitives.serialization import pkcs12
     p12_path = output_dir / f"{tenant_id}.p12"
     p12_data = pkcs12.serialize_key_and_certificates(
@@ -151,27 +113,16 @@ def generate_test_certificate(
 
 
 def update_passwords_file(output_dir: Path, tenant_id: str, password: str):
-    """
-    Actualiza el archivo passwords.json con la nueva contraseña.
-
-    Args:
-        output_dir: Directorio donde está passwords.json
-        tenant_id: ID del tenant
-        password: Contraseña del certificado
-    """
     passwords_file = output_dir / "passwords.json"
 
-    # Cargar passwords existentes o crear nuevo dict
     if passwords_file.exists():
         with open(passwords_file, 'r') as f:
             passwords = json.load(f)
     else:
         passwords = {}
 
-    # Agregar o actualizar password
     passwords[tenant_id] = password
 
-    # Guardar
     with open(passwords_file, 'w') as f:
         json.dump(passwords, f, indent=2)
 
@@ -236,7 +187,6 @@ Para producción, use certificados de una CA reconocida.
 
     args = parser.parse_args()
 
-    # Resolver directorio de salida relativo al script
     script_dir = Path(__file__).parent
     output_dir = (script_dir / args.output).resolve()
 
@@ -248,7 +198,6 @@ Para producción, use certificados de una CA reconocida.
     print("NO usar en producción. Use certificados de una CA reconocida.")
     print()
 
-    # Generar certificado
     p12_path = generate_test_certificate(
         tenant_id=args.tenant,
         password=args.password,
@@ -258,7 +207,6 @@ Para producción, use certificados de una CA reconocida.
         organization=args.org,
     )
 
-    # Actualizar passwords.json
     if not args.no_passwords_file:
         print()
         update_passwords_file(output_dir, args.tenant, args.password)

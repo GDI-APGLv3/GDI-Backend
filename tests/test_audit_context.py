@@ -1,20 +1,10 @@
-"""
-Tests para la funcionalidad de contexto de auditoría (auth_source).
-
-Verifica que:
-1. set_audit_context inyecta correctamente las variables GUC
-2. Los triggers de auditoría leen las variables
-3. Las funciones de BD aceptan los parámetros correctos (asyncpg API)
-"""
 
 import pytest
 import pytest_asyncio
 import asyncpg
 import os
-from datetime import datetime
 
 def _build_db_url() -> str:
-    """Construye DATABASE_URL desde variables individuales (igual que database.py)."""
     if url := os.getenv("DATABASE_URL"):
         return url
     host = os.getenv("DB_HOST", "localhost")
@@ -32,7 +22,6 @@ TEST_AUDIT_SCHEMA = "100_test_audit"
 
 @pytest_asyncio.fixture
 async def db_connection():
-    """Conexión asyncpg a la BD de pruebas."""
     conn = await asyncpg.connect(DATABASE_URL)
     tr = conn.transaction()
     await tr.start()
@@ -42,11 +31,9 @@ async def db_connection():
 
 
 class TestAuditContext:
-    """Tests para el contexto de auditoría."""
 
     @pytest.mark.asyncio
     async def test_audit_log_has_auth_source_column(self, db_connection):
-        """Verifica que la tabla audit_log tiene la columna auth_source."""
         result = await db_connection.fetchrow(
             """
             SELECT column_name, data_type
@@ -63,7 +50,6 @@ class TestAuditContext:
 
     @pytest.mark.asyncio
     async def test_set_audit_context_injects_guc(self, db_connection):
-        """Verifica que set_config inyecta las variables GUC correctamente."""
         test_user_id = "9a6156db-c7b6-4698-9af2-5bdaeb46c18a"
         test_auth_source = "jwt"
 
@@ -78,7 +64,6 @@ class TestAuditContext:
 
     @pytest.mark.asyncio
     async def test_fn_log_change_reads_context(self, db_connection):
-        """Verifica que fn_log_change lee el contexto GUC."""
         test_user_id = "9a6156db-c7b6-4698-9af2-5bdaeb46c18a"
         test_auth_source = "testing"
 
@@ -130,29 +115,24 @@ class TestAuditContext:
         )
 
     def test_audit_context_helper_import(self):
-        """Verifica que el helper audit_context.py se puede importar."""
         from shared.audit_context import set_audit_context, clear_audit_context
         assert callable(set_audit_context)
         assert callable(clear_audit_context)
 
     def test_dependencies_get_auth_source(self):
-        """Verifica que la dependency get_auth_source existe."""
         from shared.dependencies import get_auth_source, get_tenant_schema
         assert callable(get_auth_source)
         assert callable(get_tenant_schema)
 
 
 class TestDatabaseFunctionsSignature:
-    """Tests para verificar que las funciones de la API asyncpg (database.py) existen y son correctas."""
 
     def test_get_conn_is_async_context_manager(self):
-        """Verifica que get_conn es un async context manager."""
         import inspect
         from database import get_conn
         assert inspect.isfunction(get_conn) or callable(get_conn), "get_conn no existe"
 
     def test_fetch_all_accepts_schema_name(self):
-        """Verifica que fetch_all acepta schema_name keyword-only."""
         import inspect
         from database import fetch_all
         sig = inspect.signature(fetch_all)
@@ -162,7 +142,6 @@ class TestDatabaseFunctionsSignature:
             "schema_name debe ser keyword-only en fetch_all"
 
     def test_fetch_one_accepts_schema_name(self):
-        """Verifica que fetch_one acepta schema_name keyword-only."""
         import inspect
         from database import fetch_one
         sig = inspect.signature(fetch_one)
@@ -172,7 +151,6 @@ class TestDatabaseFunctionsSignature:
             "schema_name debe ser keyword-only en fetch_one"
 
     def test_execute_accepts_schema_name(self):
-        """Verifica que execute acepta schema_name y audit params keyword-only."""
         import inspect
         from database import execute
         sig = inspect.signature(execute)
@@ -183,7 +161,6 @@ class TestDatabaseFunctionsSignature:
         assert 'auth_source' in params, "execute no acepta auth_source"
 
     def test_transaction_accepts_schema_name(self):
-        """Verifica que transaction acepta schema_name y audit params keyword-only."""
         import inspect
         from database import transaction
         sig = inspect.signature(transaction)
@@ -194,7 +171,6 @@ class TestDatabaseFunctionsSignature:
         assert 'auth_source' in params, "transaction no acepta auth_source"
 
     def test_validate_schema_name_rejects_injection(self):
-        """Verifica que validate_schema_name rechaza SQL injection."""
         from database import validate_schema_name
         with pytest.raises(ValueError):
             validate_schema_name("schema; DROP TABLE users")
@@ -204,10 +180,8 @@ class TestDatabaseFunctionsSignature:
 
 
 class TestMCPContextAuthSource:
-    """Tests para MCPContext con auth_source."""
 
     def test_mcp_context_has_auth_source(self):
-        """Verifica que MCPContext tiene el campo auth_source."""
         from api_gateway.context import MCPContext
 
         ctx = MCPContext(
@@ -220,7 +194,6 @@ class TestMCPContextAuthSource:
         assert ctx.auth_source == "mcp_oauth"
 
     def test_mcp_context_default_auth_source(self):
-        """Verifica que MCPContext tiene default auth_source=api_key."""
         from api_gateway.context import MCPContext
 
         ctx = MCPContext(

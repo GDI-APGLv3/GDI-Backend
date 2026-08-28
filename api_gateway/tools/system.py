@@ -1,31 +1,15 @@
-"""
-Tools MCP para consultas del sistema (lectura y operaciones).
-Tipos de documentos, estados y usuarios.
-"""
-import logging
+from shared.logging import get_logger
 from typing import Dict, Any
 from api_gateway.context import MCPContext
 from services.documents.catalog.types import get_all_document_types
 from services.documents.catalog.states import get_all_display_states, get_all_state_mappings
 from database import fetch_one, fetch_all
-from shared.exceptions import ValidationError
+from shared.exceptions import ValidationError, GDIBaseException
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def get_document_types(ctx: MCPContext) -> Dict[str, Any]:
-    """
-    Obtener todos los tipos de documentos activos.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-
-    Returns:
-        Dict con document_types (lista) y total
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_document_types - schema={ctx.schema_name}")
 
     try:
@@ -38,38 +22,20 @@ async def get_document_types(ctx: MCPContext) -> Dict[str, Any]:
             "total": len(types)
         }
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_document_types - error: {e}")
-        raise RuntimeError(f"Error obteniendo tipos de documentos: {str(e)}")
+        raise RuntimeError("Error obteniendo tipos de documentos")
 
 
 async def get_user_info(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
-    """
-    Obtener información del usuario actual.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-
-    Returns:
-        Dict con:
-        - user_id, full_name, email, profile_picture_url
-        - sector: sector actual del usuario
-        - department: departamento del usuario
-        - roles: lista de roles asignados
-        - additional_sectors: sectores adicionales con permisos
-
-    Raises:
-        ValueError: Si user_id no proporcionado o usuario no existe
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_user_info - user_id={user_id}, schema={ctx.schema_name}")
 
     if not user_id:
         raise ValueError("user_id es requerido")
 
     try:
-        # Query principal para obtener datos del usuario
         query_user = """
             SELECT
                 u.id as user_id,
@@ -95,7 +61,6 @@ async def get_user_info(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
         if not user_data:
             raise ValueError(f"Usuario no encontrado: {user_id}")
 
-        # Query para obtener roles
         query_roles = """
             SELECT r.role_name
             FROM user_roles ur
@@ -106,7 +71,6 @@ async def get_user_info(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
         roles_data = await fetch_all(query_roles, user_id, schema_name=ctx.schema_name)
         roles = [row["role_name"] for row in roles_data]
 
-        # Query para obtener sectores adicionales con permisos
         query_additional = """
             SELECT
                 s.id as sector_id,
@@ -156,36 +120,19 @@ async def get_user_info(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
         logger.info(f"[MCP] get_user_info - usuario encontrado: {user_data['full_name']}")
         return result
 
-    except ValueError:
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] get_user_info - error: {e}")
-        raise RuntimeError(f"Error obteniendo información del usuario: {str(e)}")
+        raise RuntimeError("Error obteniendo información del usuario")
 
 
 async def get_document_states(ctx: MCPContext) -> Dict[str, Any]:
-    """
-    Obtener catálogo de estados de documentos.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-
-    Returns:
-        Dict con:
-        - states: lista de estados con display_state (nombre) y code (código interno)
-        - mappings: diccionario de código → nombre para mapeo rápido
-        - total: cantidad de estados
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_document_states - schema={ctx.schema_name}")
 
     try:
-        # Obtener estados de visualización
         states = await get_all_display_states(schema_name=ctx.schema_name)
 
-        # Obtener mapeos de códigos
         mappings = await get_all_state_mappings(schema_name=ctx.schema_name)
 
         logger.info(f"[MCP] get_document_states - {len(states)} estados encontrados")
@@ -196,24 +143,14 @@ async def get_document_states(ctx: MCPContext) -> Dict[str, Any]:
             "total": len(states)
         }
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_document_states - error: {e}")
-        raise RuntimeError(f"Error obteniendo estados de documentos: {str(e)}")
+        raise RuntimeError("Error obteniendo estados de documentos")
 
 
 async def get_sectors(ctx: MCPContext) -> Dict[str, Any]:
-    """
-    Obtener todos los sectores activos con sus departamentos.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-
-    Returns:
-        Dict con sectores y departamentos
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_sectors - schema={ctx.schema_name}")
 
     try:
@@ -225,25 +162,14 @@ async def get_sectors(ctx: MCPContext) -> Dict[str, Any]:
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_sectors - error: {e}")
-        raise RuntimeError(f"Error obteniendo sectores: {str(e)}")
+        raise RuntimeError("Error obteniendo sectores")
 
 
 async def get_case_templates(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
-    """
-    Obtener plantillas de expedientes disponibles para el usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-
-    Returns:
-        Dict con templates (lista) y total
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_case_templates - user_id={user_id}, schema={ctx.schema_name}")
 
     try:
@@ -258,27 +184,14 @@ async def get_case_templates(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
             "total": len(result)
         }
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_case_templates - error: {e}")
-        raise RuntimeError(f"Error obteniendo templates de expedientes: {str(e)}")
+        raise RuntimeError("Error obteniendo templates de expedientes")
 
 
 async def search_users(ctx: MCPContext, search: str, limit: int = 10) -> Dict[str, Any]:
-    """
-    Buscar usuarios para autocompletado.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        search: Término de búsqueda (mínimo 2 caracteres)
-        limit: Cantidad máxima de resultados (default 10)
-
-    Returns:
-        Dict con resultados de búsqueda
-
-    Raises:
-        ValueError: Si search tiene menos de 2 caracteres
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] search_users - search='{search}', limit={limit}, schema={ctx.schema_name}")
 
     if not search or len(search) < 2:
@@ -293,7 +206,6 @@ async def search_users(ctx: MCPContext, search: str, limit: int = 10) -> Dict[st
             schema_name=ctx.schema_name
         )
 
-        # Filter response to only full_name and sector for MCP privacy
         if result and "users" in result:
             filtered_users = []
             for user in result["users"]:
@@ -313,28 +225,14 @@ async def search_users(ctx: MCPContext, search: str, limit: int = 10) -> Dict[st
 
         return result
 
-    except ValidationError as e:
-        logger.error(f"[MCP] search_users - validation error: {e}")
-        raise RuntimeError(f"Error de validación: {str(e)}")
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] search_users - error: {e}")
-        raise RuntimeError(f"Error buscando usuarios: {str(e)}")
+        raise RuntimeError("Error buscando usuarios")
 
 
 async def get_dashboard_stats(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
-    """
-    Obtener estadísticas del dashboard para el usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-
-    Returns:
-        Dict con estadísticas del dashboard
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_dashboard_stats - user_id={user_id}, schema={ctx.schema_name}")
 
     try:
@@ -346,27 +244,14 @@ async def get_dashboard_stats(ctx: MCPContext, user_id: str) -> Dict[str, Any]:
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_dashboard_stats - error: {e}")
-        raise RuntimeError(f"Error obteniendo estadísticas del dashboard: {str(e)}")
+        raise RuntimeError("Error obteniendo estadísticas del dashboard")
 
 
 async def get_dashboard_feed(ctx: MCPContext, user_id: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-    """
-    Obtener feed de actividad del dashboard para el usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Número de página (default 1)
-        page_size: Tamaño de página (default 20)
-
-    Returns:
-        Dict con feed de actividad
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_dashboard_feed - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     try:
@@ -383,26 +268,14 @@ async def get_dashboard_feed(ctx: MCPContext, user_id: str, page: int = 1, page_
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_dashboard_feed - error: {e}")
-        raise RuntimeError(f"Error obteniendo feed del dashboard: {str(e)}")
+        raise RuntimeError("Error obteniendo feed del dashboard")
 
 
 async def list_all_users(ctx: MCPContext) -> Dict[str, Any]:
-    """
-    Listar todos los usuarios activos del tenant.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-
-    Returns:
-        Dict con:
-        - users: lista de usuarios [{user_id, full_name, email}]
-        - total: cantidad de usuarios
-
-    Raises:
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] list_all_users - schema={ctx.schema_name}")
 
     try:
@@ -417,9 +290,11 @@ async def list_all_users(ctx: MCPContext) -> Dict[str, Any]:
             "total": len(users)
         }
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] list_all_users - error: {e}")
-        raise RuntimeError(f"Error listando usuarios: {str(e)}")
+        raise RuntimeError("Error listando usuarios")
 
 
 async def check_signer_permissions(
@@ -427,30 +302,6 @@ async def check_signer_permissions(
     user_id_to_check: str,
     document_type_acronym: str
 ) -> Dict[str, Any]:
-    """
-    Verificar si un usuario puede numerar un tipo de documento.
-    Usa el validador único de permisos de numeración (numbering_permissions.py),
-    la misma fuente de verdad que numerator.py, dispatcher.py y el endpoint REST.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id_to_check: UUID del usuario firmante a validar
-        document_type_acronym: Acronimo del tipo de documento (ej: DEC, IF, RES)
-
-    Returns:
-        Dict con:
-        - can_sign: bool
-        - has_rank_permission: bool (titularidad de repartición con rango permitido)
-        - has_sector_permission: bool (sector habilitado)
-        - user_rank: None (campo mantenido por compatibilidad; la regla ya no usa sello)
-        - required_rank: None (ídem)
-        - document_type: nombre del tipo de documento (o None)
-        - message: "OK" o descripción del rechazo
-
-    Raises:
-        ValueError: Si faltan parametros requeridos
-        RuntimeError: Si hay error de BD
-    """
     logger.info(
         f"[MCP] check_signer_permissions - user={user_id_to_check}, "
         f"doc_type={document_type_acronym}, schema={ctx.schema_name}"
@@ -462,7 +313,6 @@ async def check_signer_permissions(
         raise ValueError("document_type_acronym es requerido")
 
     try:
-        # Resolver acronym → document_type_id + nombre
         type_row = await fetch_one(
             "SELECT id, name FROM document_types WHERE acronym = $1",
             document_type_acronym,
@@ -490,7 +340,6 @@ async def check_signer_permissions(
         document_type_id: int = type_row["id"]
         document_type_name: str = type_row["name"]
 
-        # Validador único — misma lógica que numerator.py y dispatcher.py
         from services.documents.signing.numbering_permissions import (
             can_user_number_document_type,
         )
@@ -512,14 +361,14 @@ async def check_signer_permissions(
             "can_sign": can_sign,
             "has_rank_permission": has_rank,
             "has_sector_permission": has_sector,
-            # user_rank y required_rank son null: la regla nueva usa titularidad
-            # de departamento, no el sello. Mantenidos por compatibilidad de contrato.
             "user_rank": None,
             "required_rank": None,
             "document_type": document_type_name,
             "message": reason,
         }
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] check_signer_permissions - error: {e}")
-        raise RuntimeError(f"Error verificando permisos de firma: {str(e)}")
+        raise RuntimeError("Error verificando permisos de firma")

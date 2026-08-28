@@ -1,4 +1,3 @@
-"""Endpoint para listar expedientes del usuario autenticado."""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, Query, Request
@@ -10,7 +9,7 @@ from auth import get_current_user
 from models.schemas import AuthenticatedUser
 from services.case_service import CaseService
 from shared.exceptions import exception_to_http_exception, ValidationError, BusinessLogicError
-from shared.utils import get_authenticated_user
+from shared.utils import get_authenticated_user_with_flags
 from shared.dependencies import get_tenant_schema
 from config.constants import (
     CASE_LIST_SUCCESS_MESSAGE,
@@ -25,20 +24,26 @@ router = APIRouter(tags=["expedientes"])
 
 
 class CaseType(BaseModel):
-    """Tipo de expediente"""
     name: str = Field(..., example="Expediente Administrativo")
     acronym: str = Field(..., example="EXP-ADM")
+    is_reserved: bool = Field(False, description="Si el tipo de expediente es reservado (GDI-069)")
 
 
 class Sector(BaseModel):
-    """Sector con departamento"""
     acronym: str = Field(..., example="SECOBRA")
     department: str = Field(..., example="Secretaría de Obras Públicas")
     sector_color: Optional[str] = Field(None, example="#FF6B6B")
 
 
+class Responsible(BaseModel):
+    sector_acronym: str = Field(..., example="OBRA#PRIV")
+    user_id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000")
+    full_name: str = Field(..., example="Pablo Ríos")
+    profile_picture_url: Optional[str] = Field(None)
+    type: str = Field(..., example="ADMIN", description="ADMIN o ADDITIONAL")
+
+
 class CaseItem(BaseModel):
-    """Datos de un expediente en la lista"""
     id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000")
     case_number: str = Field(..., example="EXP-2024-00001-SMG-ADGEN")
     reference: str = Field(..., example="Expediente de prueba")
@@ -47,13 +52,13 @@ class CaseItem(BaseModel):
     access_reason: str = Field(..., example="ADMINSECTOR", description="Nivel de acceso: ADMINSECTOR, ASSIGNEDSECTOR, VIEW")
     admin_sector: Optional[Sector] = Field(None, description="Sector administrativo propietario")
     assigned_sectors: List[Sector] = Field(default_factory=list, description="Sectores asignados al expediente")
+    responsibles: List[Responsible] = Field(default_factory=list, description="Responsables activos (caritas por sector)")
     short_ai_summary: Optional[str] = Field(None, description="Resumen corto generado por IA")
     ai_summary: Optional[str] = Field(None, description="Resumen completo generado por IA")
     is_favorite: bool = Field(False, description="Indica si el usuario marcó este expediente como favorito")
 
 
 class CaseListData(BaseModel):
-    """Estructura de datos para lista de expedientes"""
     cases: List[CaseItem] = Field(..., example=[
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -62,7 +67,8 @@ class CaseListData(BaseModel):
             "last_modified_at": "2024-12-09T10:30:00",
             "case_type": {
                 "name": "Expediente Administrativo",
-                "acronym": "EXP-ADM"
+                "acronym": "EXP-ADM",
+                "is_reserved": False
             },
             "access_reason": "ADMINSECTOR",
             "admin_sector": {
@@ -84,7 +90,6 @@ class CaseListData(BaseModel):
 
 
 class CaseListResponse(BaseModel):
-    """Modelo de respuesta para lista de expedientes"""
     success: bool = Field(..., example=True)
     data: CaseListData
     message: str = Field(..., example="Se encontraron 25 expedientes")
@@ -109,17 +114,15 @@ async def list_cases(
 ) -> CaseListResponse:
     """Lista expedientes del usuario autenticado con filtros avanzados."""
     try:
-        # Validar usuario autenticado primero (antes de logging)
         tenant_user_id = getattr(request.state, 'tenant_user_id', None)
         if not tenant_user_id:
             raise ValidationError(USER_UNAUTHENTICATED_ERROR)
 
         logger.info(f"Listing cases - User: {tenant_user_id[:8]}, Page: {page}, View: {view}")
 
-        # Obtener usuario validado
-        db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
+        user_data = await get_authenticated_user_with_flags(tenant_user_id, schema_name=schema_name)
+        db_user_id = user_data["user_id"]
 
-        # Sanitizar sort_order antes de pasar al service
         sort_order_safe = "asc" if sort_order.lower() == "asc" else "desc"
 
         result = await CaseService.get_cases_by_user(
@@ -135,7 +138,8 @@ async def list_cases(
             trata_filter=trata_filter,
             view=view,
             sort_order=sort_order_safe,
-            schema_name=schema_name
+            schema_name=schema_name,
+            search_flags=user_data,
         )
         
         logger.info(f"Found {result['total']} cases")
@@ -180,7 +184,8 @@ async def search_cases(
 
         logger.info(f"Searching cases - User: {tenant_user_id[:8]}, Page: {page}, search={search}")
 
-        db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
+        user_data = await get_authenticated_user_with_flags(tenant_user_id, schema_name=schema_name)
+        db_user_id = user_data["user_id"]
 
         result = await CaseService.get_cases_by_user(
             user_id=db_user_id,
@@ -190,7 +195,8 @@ async def search_cases(
             search_filter=search,
             date_filter=date_filter,
             sector_filter=sector_filter,
-            schema_name=schema_name
+            schema_name=schema_name,
+            search_flags=user_data,
         )
 
         logger.info(f"Found {result['total']} cases")

@@ -1,13 +1,3 @@
-"""
-Servicios de tracking para MEMOS.
-Registro de apertura y detalle de memos.
-
-Diferencias clave con NOTAS:
-- opened_at es inline en memo_recipients (no tabla notes_openings separada)
-- record_memo_opening hace UPDATE en vez de INSERT
-- Acceso verificado por user_id (no sector_id)
-- No hay variante multi_sector
-"""
 
 from typing import Dict, Any
 from shared.logging import get_logger
@@ -23,7 +13,7 @@ from .queries import (
     get_memo_recipient_info_query,
     get_sender_user_query
 )
-from .recipients import get_visible_memo_recipients, check_memo_user_access
+from .recipients import get_visible_memo_recipients
 from services.documents.lifecycle.editing import _fetch_proposed_cases
 
 logger = get_logger(__name__)
@@ -34,24 +24,12 @@ async def record_memo_opening(
     user_id: str,
     *, schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Registra la apertura de un memo por un usuario.
-    Solo se registra una vez (UPDATE WHERE opened_at IS NULL).
-
-    Returns:
-        Dict con {
-            recorded: bool (True si es primera apertura),
-            opened_at: datetime (fecha de apertura)
-        }
-    """
-    # Verificar que el usuario sea recipient (no sender)
     recipient_result = await fetch_one(
         check_user_is_recipient_query(), document_id, user_id,
         schema_name=schema_name
     )
 
     if not recipient_result:
-        # No es recipient, verificar si es sender
         is_sender_result = await fetch_one(
             check_user_is_sender_query(), document_id, user_id,
             schema_name=schema_name
@@ -62,19 +40,16 @@ async def record_memo_opening(
         else:
             raise AuthorizationError("No tenes acceso a este memo")
 
-    # Intentar marcar como abierto (solo si opened_at IS NULL)
     async with transaction(schema_name=schema_name) as conn:
         result = await conn.fetchrow(record_memo_opening_query(), document_id, user_id)
 
         if result:
-            # Primera apertura
             logger.info(f"[{schema_name}] Usuario {user_id} abrio memo {document_id} por primera vez")
             return {
                 'recorded': True,
                 'opened_at': result['opened_at'].isoformat() if result['opened_at'] else None
             }
         else:
-            # Ya habia sido abierto
             opening = await conn.fetchrow(get_memo_opening_query(), document_id, user_id)
             logger.debug(f"[{schema_name}] Usuario {user_id} reabrio memo {document_id}")
             return {
@@ -90,15 +65,6 @@ async def get_memo_detail(
     register_opening: bool = True,
     schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Obtiene el detalle completo de un memo.
-    Registra la apertura si es recipient y no es sender.
-
-    Raises:
-        NotFoundError: Si el memo no existe
-        AuthorizationError: Si el usuario no tiene acceso
-    """
-    # Obtener detalle del memo (official_documents)
     memo = await fetch_one(
         get_memo_detail_query(), document_id,
         schema_name=schema_name
@@ -107,10 +73,8 @@ async def get_memo_detail(
     if not memo:
         raise NotFoundError(f"Memo {document_id} no encontrado")
 
-    # official_documents.id ES el mismo UUID que document_draft.id
     draft_id = document_id
 
-    # Obtener sender info
     sender_info = None
     sender_row = await fetch_one(
         get_sender_user_query(), draft_id,
@@ -133,10 +97,8 @@ async def get_memo_detail(
                 'sector_acronym': sender_user_row['sector_acronym'] or ''
             }
 
-    # Verificar acceso y obtener recipients visibles (usa draft_id para memo_recipients)
     recipients = await get_visible_memo_recipients(draft_id, requesting_user_id, schema_name=schema_name)
 
-    # Registrar apertura si corresponde
     if register_opening:
         opening_result = await record_memo_opening(
             draft_id, requesting_user_id,
@@ -145,7 +107,6 @@ async def get_memo_detail(
     else:
         opening_result = {'recorded': False, 'opened_at': None, 'reason': 'view_only'}
 
-    # Obtener aperturas si es sender
     openings = None
     if recipients['is_sender']:
         openings_raw = await fetch_all(
@@ -156,14 +117,17 @@ async def get_memo_detail(
             {
                 'user_id': str(o['user_id']),
                 'full_name': o['user_name'],
+                'sector_id': str(o['sector_id']) if o.get('sector_id') else None,
                 'sector_acronym': o['sector_acronym'] or '',
+                'sector_color': o.get('sector_color'),
+                'profile_picture_url': o.get('profile_picture_url'),
+                'seal_name': o.get('seal_name'),
                 'recipient_type': o['recipient_type'],
                 'opened_at': o['opened_at'].isoformat() if o['opened_at'] else None
             }
             for o in openings_raw
         ]
 
-    # Obtener estado de archivado si es recipient
     is_archived = False
     archived_at = None
     if not recipients['is_sender']:
@@ -175,7 +139,6 @@ async def get_memo_detail(
             is_archived = recipient_info['is_archived']
             archived_at = recipient_info['archived_at'].isoformat() if recipient_info['archived_at'] else None
 
-    # Construir respuesta
     result = {
         'document_id': str(memo['id']),
         'official_number': memo['official_number'],
@@ -202,11 +165,9 @@ async def get_memo_detail(
         }
     }
 
-    # Incluir openings solo si es sender
     if openings is not None:
         result['openings'] = openings
 
-    # Incluir expedientes propuestos
     try:
         proposed_cases = await _fetch_proposed_cases(document_id, schema_name=schema_name)
         if proposed_cases:

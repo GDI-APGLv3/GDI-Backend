@@ -1,9 +1,36 @@
-"""
-Rate limiter in-memory para Gateway MCP.
-Sliding window por key (IP, user, api_key).
-"""
 import time
 from collections import defaultdict
+
+from shared.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+MAX_RATE_LIMIT_BY_KEY_TYPE = {
+    "backup": 120,
+    "api": 200_000,
+    "public": 200_000,
+    "tad": 200_000,
+}
+DEFAULT_MAX_RATE_LIMIT = 200_000
+
+MAX_RATE_LIMIT_TENANT_CAN_SET = {
+    "api": 600,
+    "public": 600,
+    "tad": 120,
+    "backup": 120,
+}
+
+
+def cap_rate_limit(value, key_type: str, *, key_id: str = "") -> int:
+    tope = MAX_RATE_LIMIT_BY_KEY_TYPE.get(key_type, DEFAULT_MAX_RATE_LIMIT)
+    if value and value > tope:
+        logger.warning(
+            f"[RateLimit] key_type={key_type} key={key_id or '?'} pide "
+            f"{value} req/min y el techo es {tope} (GDI-380): se aplica {tope}"
+        )
+        return tope
+    return value
 
 
 class RateLimitExceeded(Exception):
@@ -17,7 +44,6 @@ class InMemoryRateLimiter:
         self._requests: dict[str, list[float]] = defaultdict(list)
 
     def check(self, key: str, limit: int, window_seconds: int = 60) -> tuple[bool, int]:
-        """Check rate limit. Returns (allowed, remaining). Raises RateLimitExceeded."""
         now = time.time()
         window_start = now - window_seconds
 
@@ -33,7 +59,6 @@ class InMemoryRateLimiter:
         return True, max(limit - len(timestamps), 0)
 
     def cleanup(self):
-        """Purge expired entries."""
         now = time.time()
         stale = [k for k, ts in self._requests.items() if not ts or ts[-1] < now - 120]
         for k in stale:
@@ -41,7 +66,6 @@ class InMemoryRateLimiter:
 
 
 def get_client_ip(request) -> str:
-    """Extract client IP from request (Fly.io aware)."""
     return (
         request.headers.get("fly-client-ip")
         or (request.headers.get("x-forwarded-for", "").split(",")[0].strip())
@@ -49,5 +73,4 @@ def get_client_ip(request) -> str:
     )
 
 
-# Singleton
 rate_limiter = InMemoryRateLimiter()

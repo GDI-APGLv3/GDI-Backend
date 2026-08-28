@@ -1,6 +1,3 @@
-"""
-Endpoint para obtener notas ARCHIVADAS por TODOS los sectores del usuario con can_view=true.
-"""
 
 from fastapi import APIRouter, Depends, Query
 from shared.logging import get_logger

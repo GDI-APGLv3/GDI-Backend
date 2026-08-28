@@ -13,5 +13,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 RUN chown -R app:app /app
 USER app
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 EXPOSE 8080
-CMD ["gunicorn", "main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "[::]:8080", "--timeout", "120", "--workers", "2"]
+# Workers configurable por env (default 2). 'exec' preserva el manejo de señales (SIGTERM de Fly).
+CMD exec gunicorn main:app -k uvicorn.workers.UvicornWorker --bind "[::]:8080" --timeout 120 --workers ${GUNICORN_WORKERS:-2}

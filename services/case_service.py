@@ -1,19 +1,5 @@
-"""
-Servicio de negocio para el manejo de expedientes - FACHADA
-Re-exporta funciones de módulos especializados para backward compatibility.
-
-Los módulos especializados están en services/cases/:
-- permissions.py: Funciones de permisos
-- history.py: Historial de movimientos
-- retrieval.py: Listado y búsqueda
-- queries.py: Consultas individuales
-- transfer.py: Transferencias
-- documents.py: Documentos del expediente
-- creation.py: Creación de expedientes
-"""
 
 from shared.logging import get_logger
-# Imports de módulos especializados
 from services.cases.permissions import (
     _calculate_access_reason,
     get_user_editable_sector_ids,
@@ -22,7 +8,6 @@ from services.cases.permissions import (
     can_user_view_case,
     can_user_edit_case,
 )
-# Re-exportar desde sector_utils
 from services.shared.sector_utils import get_user_sector_ids as _get_user_sector_ids
 from services.cases.history import (
     get_case_movements,
@@ -58,12 +43,7 @@ logger = get_logger(__name__)
 
 
 class CaseService:
-    """
-    Fachada para manejo de expedientes.
-    Mantiene backward compatibility con código existente que usa CaseService.method()
-    """
 
-    # Permisos
     _calculate_access_reason = staticmethod(_calculate_access_reason)
     get_user_editable_sector_ids = staticmethod(get_user_editable_sector_ids)
     get_user_viewable_sector_ids = staticmethod(get_user_viewable_sector_ids)
@@ -72,71 +52,57 @@ class CaseService:
     can_user_view_case = staticmethod(can_user_view_case)
     can_user_edit_case = staticmethod(can_user_edit_case)
 
-    # Historial
     get_case_movements = staticmethod(get_case_movements)
     create_movement = staticmethod(create_movement)
     get_case_history = staticmethod(get_case_history)
 
-    # Listado y búsqueda
     get_cases_by_user = staticmethod(get_cases_by_user)
     get_cases_summary = staticmethod(get_cases_summary)
 
-    # Consultas individuales
     get_case_detail = staticmethod(get_case_detail)
     get_case_by_exact_number = staticmethod(get_case_by_exact_number)
     get_case_by_exact_number_unrestricted = staticmethod(get_case_by_exact_number_unrestricted)
     get_available_templates = staticmethod(get_available_templates)
 
-    # Transferencias
     transfer_case = staticmethod(transfer_case)
     close_assignment = staticmethod(close_assignment)
     get_available_sectors_for_transfer = staticmethod(get_available_sectors_for_transfer)
     get_sector_users = staticmethod(get_sector_users)
 
-    # Documentos
     get_case_documents = staticmethod(get_case_documents)
     link_official_document = staticmethod(link_official_document)
     accept_proposed_document = staticmethod(accept_proposed_document)
     reject_proposed_document = staticmethod(reject_proposed_document)
 
-    # Creación
     create_case = staticmethod(create_case)
     create_case_with_cover_service = staticmethod(create_case_with_cover_service)
 
 
-# Re-exportaciones para imports directos
 __all__ = [
     'CaseService',
-    # Permisos
     '_calculate_access_reason',
     'get_user_editable_sector_ids',
     'get_user_viewable_sector_ids',
     '_get_user_sector_ids',
     'get_user_case_permissions',
     'can_user_view_case',
-    # Historial
     'get_case_movements',
     'create_movement',
     'get_case_history',
-    # Listado
     'get_cases_by_user',
     'get_cases_summary',
-    # Consultas
     'get_case_detail',
     'get_case_by_exact_number',
     'get_case_by_exact_number_unrestricted',
     'get_available_templates',
-    # Transferencias
     'transfer_case',
     'close_assignment',
     'get_available_sectors_for_transfer',
     'get_sector_users',
-    # Documentos
     'get_case_documents',
     'link_official_document',
     'accept_proposed_document',
     'reject_proposed_document',
-    # Creación
     'create_case',
     'create_case_with_cover_service',
 ]

@@ -1,30 +1,15 @@
-"""
-Notary - Servicio de Firma Visual de PDFs
-
-Este módulo implementa un servicio web FastAPI para la firma visual de documentos PDF.
-El servicio utiliza un sistema de firma visual para posicionar automáticamente
-las firmas en documentos PDF con formato Letter (612x792 puntos).
-
-Características principales:
-- Posicionamiento automático de firmas basado en detección de texto "end-text"
-- Layout inteligente de 2 columnas para múltiples firmas
-- Estampado opcional con número de documento, ciudad y fecha
-- Validación de formato PDF y parámetros de entrada
-- API REST con autenticación por API key
-- Nomenclatura inteligente de archivos de salida
-
-Autor: Sistema de Firma Visual
-Versión: 2.0.0
-"""
-from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException, Request
+from fastapi.responses import Response, JSONResponse
 from typing import Optional
 import asyncio
 import hashlib
 import logging
+import os
 import traceback
 
 from .auth import validate_api_key
+from .internal_hmac import validate_internal_hmac
+from .config import MAX_SIGNABLE_PDF_SIZE, MAX_SIGNABLE_PDF_SIZE_MB
 from .validators import (
     validate_pdf_format, validate_signature_params,
     validate_stamp_params, validate_stamp_position, sanitize_filename,
@@ -33,7 +18,10 @@ from .validators import (
 from .signature_inserter import sign_pdf_document, get_signature_info, SignatureError
 from .document_stamper import stamp_document, StampError
 from .layout import LayoutError
-from .config import SERVICE_NAME, SERVICE_VERSION, FALLBACK_TO_VISUAL
+from .config import (
+    SERVICE_NAME, FALLBACK_TO_VISUAL,
+    REQUIRE_EXPECTED_SHA256, MAX_REQUEST_BODY_SIZE,
+)
 from .certificate_loader import (
     certificate_exists, load_certificate, load_certificate_from_bytes,
     get_certificate_info, list_available_certificates,
@@ -41,55 +29,193 @@ from .certificate_loader import (
 )
 from .pades_signer import (
     sign_pdf_combined,
-    get_pades_signature_info, PAdESSigningError, PAdESTsaUnavailableError
+    async_add_document_timestamp,
+    count_pades_signatures,
+    count_pades_timestamps,
+    get_tsa_breaker_state,
+    get_pades_signature_info,
+    PAdESSigningError, PAdESTimestampError, PAdESTsaUnavailableError,
 )
+from app.error_alerts import report_error
+from .version import VERSION, GIT_SHA
 
-# Configurar logging para el servicio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Crear la aplicación FastAPI con metadatos completos
+
+class RequestBodyTooLargeError(Exception):
+    pass
+
+
+class MaxBodySizeMiddleware:
+
+    def __init__(self, app, max_body_size: int):
+        self.app = app
+        self.max_body_size = max_body_size
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > self.max_body_size:
+                response = JSONResponse(
+                    {
+                        "detail": (
+                            f"Request body too large. Maximum: "
+                            f"{self.max_body_size} bytes"
+                        ),
+                        "error_code": "REQUEST_BODY_TOO_LARGE",
+                    },
+                    status_code=413,
+                )
+                await response(scope, receive, send)
+                return
+
+        max_body_size = self.max_body_size
+        total_read = 0
+
+        async def limited_receive():
+            nonlocal total_read
+            message = await receive()
+            if message["type"] == "http.request":
+                total_read += len(message.get("body", b""))
+                if total_read > max_body_size:
+                    raise RequestBodyTooLargeError(
+                        f"Request body too large. Maximum: {max_body_size} bytes"
+                    )
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
 app = FastAPI(
     title="Notary - Visual PDF Signing Service",
     description="Servicio de firma visual de documentos PDF con layout automático",
-    version="2.0.0",
+    version=VERSION,
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
+
+@app.exception_handler(RequestBodyTooLargeError)
+async def _handle_request_body_too_large(request, exc: RequestBodyTooLargeError):
+    logger.warning(f"notary.request_body_too_large path={request.url.path}: {exc}")
+    return JSONResponse(
+        {"detail": str(exc), "error_code": "REQUEST_BODY_TOO_LARGE"},
+        status_code=413,
+    )
+
+
+app.add_middleware(MaxBodySizeMiddleware, max_body_size=MAX_REQUEST_BODY_SIZE)
+
+if os.getenv("ENABLE_DEBUG_BOOM") == "1":
+    @app.get("/_debug/boom", include_in_schema=False)
+    async def _debug_boom(api_key: str = Depends(validate_api_key)):
+        raise RuntimeError("Error de prueba (DIY error-mail): validacion del pipeline de alertas")
+
 @app.get("/health")
 async def health_check():
     """
-    Endpoint de verificación de salud del servicio
+    T-3.4 — Health real de Notary.
 
-    Verifica el estado general del servicio y la disponibilidad del sistema
-    de firma visual y PAdES.
+    Responde la pregunta "¿puede este Notary firmar un PDF ahora?".
+    El sello de tiempo (TSA) es diferible (B-B es válido por Ley 25.506),
+    así que TSA caído NO da 503 — solo degrada el status a "degraded".
 
-    Returns:
-        dict: Estado del servicio con información del sistema de firma:
-            - status: Estado general ("healthy" o "unhealthy")
-            - service: Nombre del servicio
-            - version: Versión del servicio
-            - signature_system: Información del sistema de firma visual
-            - pades_system: Información del sistema de firma PAdES
-            - available_certificates: Lista de certificados disponibles
+    Lógica de status:
+        "healthy"  → pipeline de firma operativo Y breaker TSA CLOSED.
+        "degraded" → pipeline de firma operativo PERO breaker TSA OPEN/HALF_OPEN
+                     (las firmas salen en B-B; el sello se agrega después vía /timestamp-pdf).
+        "unhealthy"→ pipeline de firma roto (503). No se puede firmar en absoluto.
+
+    Chequeos realizados (todos < 500ms, ninguno llama al TSA):
+        1. signing_infrastructure: intenta crear un canvas ReportLab en memoria
+           y verificar que pyHanko + pypdf son importables. Cubre el pipeline
+           visual y el pipeline PAdES (sin necesitar un certificado concreto,
+           que llega vía multipart en cada request de firma).
+        2. tsa_breaker: lee el estado en memoria del TsaCircuitBreaker
+           (closed / open / half_open). Lectura instantánea, sin red.
+
+    Returns (HTTP 200 para healthy/degraded, HTTP 503 para unhealthy):
+        {
+          "status": "healthy" | "degraded" | "unhealthy",
+          "service": "Notary",
+          "version": "<VERSION>",
+          "commit": "<GIT_SHA>",
+          "can_sign_bb": true | false,
+          "tsa_breaker": "closed" | "open" | "half_open",
+          "checks": {
+            "signing_infrastructure": "ok" | "error: <motivo>",
+            "tsa_timestamp": "ok" | "degraded" | "half_open"
+          },
+          "available_disk_certs": <int>,
+          "fallback_to_visual": true | false
+        }
     """
-    signature_info = get_signature_info()
-    pades_info = get_pades_signature_info()
-    available_certs = list_available_certificates()
+    signing_ok = True
+    signing_error = None
+    try:
+        import io as _io
+        from reportlab.pdfgen import canvas as _rl_canvas
+        _buf = _io.BytesIO()
+        _c = _rl_canvas.Canvas(_buf)
+        _c.save()
 
-    return {
-        "status": "healthy",
+        from pyhanko.pdf_utils.reader import PdfFileReader as _PdfReader
+        _PdfReader(_io.BytesIO(_buf.getvalue()))
+
+    except Exception as exc:
+        signing_ok = False
+        signing_error = str(exc)
+        logger.warning(f"health_check: signing_infrastructure KO — {exc}")
+
+    tsa_breaker = get_tsa_breaker_state()
+
+    can_sign_bb = signing_ok
+    if not can_sign_bb:
+        status = "unhealthy"
+    elif tsa_breaker != "closed":
+        status = "degraded"
+    else:
+        status = "healthy"
+
+    tsa_check = (
+        "ok" if tsa_breaker == "closed"
+        else ("half_open" if tsa_breaker == "half_open" else "degraded")
+    )
+
+    body = {
+        "status": status,
         "service": "Notary",
-        "version": "2.1.0",
-        "signature_system": signature_info,
-        "pades_system": pades_info,
-        "available_certificates": available_certs,
-        "fallback_to_visual": FALLBACK_TO_VISUAL
+        "version": VERSION,
+        "commit": GIT_SHA,
+        "can_sign_bb": can_sign_bb,
+        "tsa_breaker": tsa_breaker,
+        "checks": {
+            "signing_infrastructure": "ok" if signing_ok else f"error: {signing_error}",
+            "tsa_timestamp": tsa_check,
+        },
+        "available_disk_certs": len(list_available_certificates()),
+        "fallback_to_visual": FALLBACK_TO_VISUAL,
     }
+
+    if not signing_ok:
+        logger.error(f"health_check: unhealthy — {signing_error}")
+
+    http_status = 503 if not can_sign_bb else 200
+    return JSONResponse(content=body, status_code=http_status)
 
 @app.post("/sign-pdf")
 async def sign_pdf(
+    request: Request,
     pdf_file: UploadFile = File(..., description="PDF file to sign (Letter format only)"),
     name: str = Form(..., description="Signer name (1-100 characters)"),
     seal: str = Form(..., description="Seal (1-50 characters)"),
@@ -103,7 +229,8 @@ async def sign_pdf(
     cert_file: Optional[UploadFile] = File(None, description="Optional .p12 certificate bytes (from Backend)"),
     cert_password: Optional[str] = Form(None, description="Optional certificate password (from Backend)"),
     expected_sha256: Optional[str] = Form(None, description="SHA-256 hex digest esperado del PDF (opcional). Si se envía, se verifica integridad antes de firmar."),
-    api_key: str = Depends(validate_api_key)
+    defer_timestamp: Optional[str] = Form("false", description="N-1a: si 'true', firma PAdES-B-B (sin TSA, < 2s). Default 'false' = comportamiento actual B-T intacto."),
+    api_key: str = Depends(validate_api_key),
 ):
     """
     Firma documentos PDF con firma PAdES digital o visual, usando layout automático de 2 columnas.
@@ -117,7 +244,7 @@ async def sign_pdf(
         - Visual (actual): Si no hay certificado o use_pades=false
 
     Proceso:
-        1. Valida archivo PDF (max 10MB, signatura %PDF válida)
+        1. Valida archivo PDF (max 64MB, signatura %PDF válida)
         2. Valida parámetros de firma (no vacíos, dentro de límites)
         3. Valida parámetros de estampado si aplica (city requerido con document_number)
         4. Valida stamp_position si se proporciona (debe ser 'first' o 'last')
@@ -133,7 +260,7 @@ async def sign_pdf(
         10. Genera nombre archivo: {document_number}.pdf o nombre original
 
     Args:
-        pdf_file: Archivo PDF a firmar. Max 10MB, debe contener "end-text" en última página.
+        pdf_file: Archivo PDF a firmar. Max 64MB, debe contener "end-text" en última página.
         name: Nombre del firmante (1-100 caracteres, no vacío).
         seal: Cargo o sello del firmante (1-50 caracteres, no vacío).
         department: Departamento del firmante (1-100 caracteres, no vacío).
@@ -150,7 +277,7 @@ async def sign_pdf(
 
     Raises:
         HTTPException 400:
-            - FILE_TOO_LARGE: PDF excede 10MB
+            - FILE_TOO_LARGE: PDF excede 64MB
             - INVALID_PDF_FILE: No se puede leer el archivo
             - INVALID_PDF_FORMAT: No comienza con %PDF
             - INVALID_PARAMETERS: Parámetros de firma inválidos
@@ -165,25 +292,21 @@ async def sign_pdf(
         - DEBE contener texto "end-text" en la última página
         - Debe tener espacio suficiente para firmas (Y >= 100pts del borde inferior)
     """
-    # Inicializar antes del try para que el finally no lance UnboundLocalError
-    # si una excepción ocurre antes de la asignación real (ej. validate_pdf_format).
     loaded_cert = None
 
     try:
-        # Validar tenant_id si se proporcionó (previene path traversal)
         if tenant_id:
             validate_tenant_id(tenant_id)
 
-        # Log del inicio del proceso de firma
         logger.info(f"Iniciando proceso de firma para: {name}")
         if tenant_id:
             logger.info(f"  - Tenant ID: {tenant_id}")
             logger.info(f"  - Use PAdES: {use_pades}")
 
-        # Validar formato del PDF (debe ser Letter) - pasar el objeto UploadFile
         pdf_content = validate_pdf_format(pdf_file)
 
-        # Verificar integridad del PDF si el Backend envió un hash esperado (SU-009)
+        await validate_internal_hmac(request, body=pdf_content)
+
         if expected_sha256:
             calculated_sha256 = hashlib.sha256(pdf_content).hexdigest()
             if calculated_sha256.lower() != expected_sha256.lower():
@@ -201,31 +324,51 @@ async def sign_pdf(
             logger.info(
                 f"Integridad del PDF verificada OK (sha256={calculated_sha256[:8]}...)"
             )
+        elif REQUIRE_EXPECTED_SHA256:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "MISSING_EXPECTED_SHA256",
+                    "detail": "expected_sha256 es obligatorio (REQUIRE_EXPECTED_SHA256=true)"
+                }
+            )
+        else:
+            logger.warning(f"notary.sha256_check_skipped endpoint=/sign-pdf name={name}")
 
-        # Validar parámetros de la firma
         validate_signature_params(name, seal, department, entity)
 
-        # Validar parámetros de estampado si se proporcionan
         if document_number or city:
             validate_stamp_params(document_number, city)
 
-        # Validar posición del estampado si se proporciona
         if stamp_position:
             validate_stamp_position(stamp_position)
 
-        # Determinar modo de firma (PAdES o visual)
         use_pades_signature = False
 
-        # Convertir use_pades de string a boolean (FastAPI Form envía strings)
         use_pades_bool = use_pades.lower() in ("true", "1", "yes") if use_pades else True
+
+        if not FALLBACK_TO_VISUAL and not use_pades_bool:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "USE_PADES_FALSE_NOT_ALLOWED: firma puramente visual "
+                    "deshabilitada en este ambiente (FALLBACK_TO_VISUAL=false); "
+                    "use_pades no puede ser false"
+                ),
+                headers={"error_code": "USE_PADES_FALSE_NOT_ALLOWED"},
+            )
+
+        defer_timestamp_bool = defer_timestamp.lower() in ("true", "1", "yes") if defer_timestamp else False
+        if defer_timestamp_bool:
+            logger.info("  - defer_timestamp=true: se firmará B-B (sin TSA)")
 
         logger.info(f"DEBUG: tenant_id={tenant_id}, use_pades={use_pades_bool}, cert_file={'SI' if cert_file and cert_file.filename else 'NO'}")
 
-        # Modo 1: Certificado enviado por Backend (R2 → multipart)
         if cert_file and cert_file.filename and cert_password and use_pades_bool:
             try:
                 cert_bytes = await cert_file.read()
-                loaded_cert = load_certificate_from_bytes(
+                loaded_cert = await asyncio.to_thread(
+                    load_certificate_from_bytes,
                     cert_bytes, cert_password, tenant_id=tenant_id or ""
                 )
                 use_pades_signature = True
@@ -239,7 +382,6 @@ async def sign_pdf(
                     )
                 logger.info("Fallback a firma visual activado")
 
-        # Modo 2 deshabilitado - certificados solo via Modo 1 (R2 → multipart)
         elif tenant_id and use_pades_bool:
             logger.warning(f"No se recibio certificado via multipart para tenant '{tenant_id}'")
             if not FALLBACK_TO_VISUAL:
@@ -249,14 +391,11 @@ async def sign_pdf(
                 )
             logger.info("Fallback a firma visual activado")
 
-        # Procesar la firma digital del documento
         from .layout import calculate_signature_position, count_existing_signatures
 
-        # Calcular posición de la firma
         existing_signatures = count_existing_signatures(pdf_content)
         x, y = calculate_signature_position(existing_signatures, pdf_content)
 
-        # Preparar parámetros de la firma
         signature_params = {
             "name": name,
             "seal": seal,
@@ -264,15 +403,11 @@ async def sign_pdf(
             "entity": entity
         }
 
-        # Agregar parámetros opcionales si están presentes
         if document_number:
             signature_params["document_number"] = document_number
         if city:
             signature_params["city"] = city
 
-        # Aplicar estampado si se proporcionan document_number y city.
-        # stamp_document usa pypdf + ReportLab (CPU/IO bound) → se corre en un
-        # thread separado para no bloquear el event loop de asyncio.
         if document_number and city:
             position = stamp_position or "first"
             pdf_content = await asyncio.to_thread(
@@ -280,11 +415,9 @@ async def sign_pdf(
             )
             logger.info(f"Estampado aplicado con número: {document_number}, ciudad: {city}, posición: {position}")
 
-        # Firmar el documento (Combinada: Visual + PAdES, o solo Visual)
         signature_type = "visual"
 
         if use_pades_signature and loaded_cert:
-            # Firma combinada: Visual (ReportLab elaborado) + PAdES (criptográfica clickeable)
             try:
                 signed_pdf = await sign_pdf_combined(
                     pdf_content=pdf_content,
@@ -293,13 +426,11 @@ async def sign_pdf(
                     x=x,
                     y=y,
                     existing_signature_count=existing_signatures,
+                    defer_timestamp=defer_timestamp_bool,
                 )
                 signature_type = "pades"
                 logger.info(f"Firma combinada (Visual + PAdES) completada para: {name}")
             except PAdESTsaUnavailableError as e:
-                # Circuit breaker abierto: TSA caído de forma sostenida.
-                # Se devuelve 503 independientemente de FALLBACK_TO_VISUAL para
-                # que el Backend pueda distinguir "TSA caído" de "error interno".
                 logger.error(f"TSA no disponible (circuit breaker): {e}")
                 if not FALLBACK_TO_VISUAL:
                     raise HTTPException(
@@ -327,7 +458,6 @@ async def sign_pdf(
                     y,
                 )
         else:
-            # Firma visual (comportamiento original)
             signed_pdf = await asyncio.to_thread(
                 sign_pdf_document,
                 pdf_content,
@@ -336,17 +466,13 @@ async def sign_pdf(
                 y,
             )
 
-        # Generar nombre de archivo según la lógica solicitada
         if document_number:
-            # Si se incluye número, el nombre debe ser numero.pdf
             safe_filename = sanitize_filename(f"{document_number}.pdf")
         else:
-            # Si NO se incluye número, mantener el nombre original
             safe_filename = sanitize_filename(pdf_file.filename)
 
         logger.info(f"Firma completada exitosamente para: {name} (tipo: {signature_type})")
 
-        # Retornar el PDF firmado
         return Response(
             content=signed_pdf,
             media_type="application/pdf",
@@ -358,16 +484,13 @@ async def sign_pdf(
         )
 
     except (ValueError, SignatureError, LayoutError) as e:
-        # Errores de validación o procesamiento
         logger.warning(f"Error de validación en firma: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
     except HTTPException:
-        # Re-lanzar HTTPExceptions (validaciones de parámetros)
         raise
 
     except Exception as e:
-        # Errores internos del servidor
         logger.error(f"Error interno en firma: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
@@ -376,7 +499,6 @@ async def sign_pdf(
         )
 
     finally:
-        # Limpiar temp file si se creó desde bytes
         if loaded_cert and getattr(loaded_cert, '_temp_file', None):
             try:
                 import os as _os
@@ -386,15 +508,166 @@ async def sign_pdf(
                 pass
 
 
+@app.post("/timestamp-pdf")
+async def timestamp_pdf(
+    request: Request,
+    pdf_file: UploadFile = File(..., description="PDF firmado en B-B al que se agrega el DocTimeStamp"),
+    expected_sha256: Optional[str] = Form(None, description="M-1: SHA-256 hex (64 chars) del PDF esperado. Si se envía y no coincide → 409."),
+    api_key: str = Depends(validate_api_key),
+):
+    """
+    N-1b — Agrega un DocTimeStamp PAdES (B-T) a un PDF ya firmado en B-B.
+
+    Operación incremental: no invalida la firma criptográfica existente.
+    El caller (Backend/worker escri) es responsable de reintentar si el TSA
+    falla; un B-B sin sello sigue siendo un documento firmado válido (Ley 25.506).
+
+    Flujo de uso (firma diferida D13):
+        1. Backend llama /sign-pdf con defer_timestamp=true → PDF B-B (< 2s).
+        2. Backend sube el B-B a R2 (el documento ya está firmado y es válido).
+        3. Backend encola job dts en signing_sessions (worker escri).
+        4. Worker escri descarga el B-B, llama POST /timestamp-pdf → PDF B-T.
+        5. Worker sobreescribe el key en R2 con el B-T.
+
+    Args:
+        pdf_file: PDF con al menos una firma PAdES-B-B embebida.
+
+    Returns:
+        Response: PDF con DocTimeStamp como descarga (application/pdf).
+            Header X-Timestamp-Type: "document_timestamp"
+
+    Raises:
+        HTTPException 400: PDF inválido, vacío, o sin firmas previas.
+        HTTPException 401: API key inválida o faltante.
+        HTTPException 409: PDF_HASH_MISMATCH — el hash del PDF recibido no coincide
+            con expected_sha256 (el PDF fue alterado en tránsito o es incorrecto).
+        HTTPException 503:
+            - TSA_UNAVAILABLE: circuit breaker abierto (reintentar en ~60s).
+            - TSA_ERROR: TSA respondió con error tras los reintentos (reintentar).
+        HTTPException 500: Error interno inesperado.
+    """
+    try:
+        pdf_bytes = await pdf_file.read()
+    except Exception as e:
+        logger.error(f"timestamp_pdf: error al leer PDF: {e}")
+        raise HTTPException(status_code=400, detail="No se pudo leer el archivo PDF")
+
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="EMPTY_FILE: el PDF está vacío")
+
+    await validate_internal_hmac(request, body=pdf_bytes)
+
+    if len(pdf_bytes) > MAX_SIGNABLE_PDF_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"FILE_TOO_LARGE: el PDF supera {MAX_SIGNABLE_PDF_SIZE_MB} MB"
+        )
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(
+            status_code=400,
+            detail="INVALID_PDF_FORMAT: el archivo no es un PDF válido"
+        )
+
+    existing_sig_count = count_pades_signatures(pdf_bytes)
+    if existing_sig_count == 0:
+        logger.warning(
+            f"timestamp_pdf: PDF sin firmas recibido ({len(pdf_bytes)} bytes) — rechazado"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "UNSIGNED_PDF: el PDF no contiene firmas; "
+                "/timestamp-pdf solo sella PDFs firmados en B-B"
+            ),
+        )
+    logger.info(f"timestamp_pdf: PDF con {existing_sig_count} firma(s) — procediendo")
+
+    if expected_sha256:
+        calculated = hashlib.sha256(pdf_bytes).hexdigest()
+        if calculated.lower() != expected_sha256.lower():
+            logger.warning(
+                f"timestamp_pdf: PDF_HASH_MISMATCH — "
+                f"esperado={expected_sha256[:8]}... calculado={calculated[:8]}..."
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="PDF_HASH_MISMATCH: el PDF recibido no coincide con el hash esperado",
+            )
+        logger.info(f"timestamp_pdf: integridad SHA-256 OK ({calculated[:8]}...)")
+    elif REQUIRE_EXPECTED_SHA256:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "MISSING_EXPECTED_SHA256",
+                "detail": "expected_sha256 es obligatorio (REQUIRE_EXPECTED_SHA256=true)"
+            }
+        )
+    else:
+        logger.warning("notary.sha256_check_skipped endpoint=/timestamp-pdf")
+
+    existing_ts_count = count_pades_timestamps(pdf_bytes)
+    if existing_ts_count > 0:
+        logger.info(
+            f"timestamp_pdf: PDF ya tiene {existing_ts_count} DocTimeStamp(s) — "
+            "idempotente, se devuelve sin cambios"
+        )
+        safe_filename = sanitize_filename(pdf_file.filename or "documento_timestamped.pdf")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={safe_filename}",
+                "Content-Type": "application/pdf",
+                "X-Timestamp-Type": "already_timestamped",
+            },
+        )
+
+    try:
+        result = await async_add_document_timestamp(pdf_bytes)
+    except PAdESTsaUnavailableError as e:
+        logger.warning(f"timestamp_pdf: TSA no disponible (circuit breaker): {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"TSA_UNAVAILABLE: {str(e)}"
+        )
+    except PAdESTimestampError as e:
+        logger.warning(f"timestamp_pdf: error de TSA tras reintentos: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"TSA_ERROR: {str(e)}"
+        )
+    except PAdESSigningError as e:
+        logger.error(f"timestamp_pdf: error de firma: {e}")
+        raise HTTPException(status_code=500, detail=f"TIMESTAMP_ERROR: {str(e)}")
+    except Exception as e:
+        logger.error(f"timestamp_pdf: error inesperado: {e}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno al agregar el DocTimeStamp"
+        )
+
+    safe_filename = sanitize_filename(pdf_file.filename or "documento_timestamped.pdf")
+    return Response(
+        content=result,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={safe_filename}",
+            "Content-Type": "application/pdf",
+            "X-Timestamp-Type": "document_timestamp",
+        },
+    )
+
 
 @app.post("/stamp-number")
 async def stamp_number(
+    request: Request,
     pdf_file: UploadFile = File(..., description="PDF a estampar"),
     document_number: Optional[str] = Form(None, description="Número de documento (opcional — si se omite, solo calcula posición sin estampar)"),
     city: Optional[str] = Form(None, description="Ciudad para el sello (requerido si document_number presente)"),
     stamp_position: Optional[str] = Form(None, description="'first' (default) o 'last'"),
     existing_count: Optional[int] = Form(None, description="Número de firmas ya completadas (override de auto-detección)"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Depends(validate_api_key),
 ):
     """
     Estampa número/fecha en el PDF y devuelve el PDF estampado + posición para AutoFirma.
@@ -418,11 +691,11 @@ async def stamp_number(
     try:
         pdf_content = validate_pdf_format(pdf_file)
 
+        await validate_internal_hmac(request, body=pdf_content)
+
         if stamp_position:
             validate_stamp_position(stamp_position)
 
-        # Solo estampar si hay número Y ciudad; si no, solo calcular posición.
-        # stamp_document es CPU/IO bound → se corre en thread para no bloquear asyncio.
         if document_number and city:
             position = stamp_position or "first"
             stamped_pdf = await asyncio.to_thread(
@@ -475,8 +748,9 @@ async def get_certificate_status(
 
 @app.post("/sign-pdf/verify")
 async def verify_pdf_signature(
+    request: Request,
     pdf_file: UploadFile = File(..., description="PDF to verify"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Depends(validate_api_key),
 ):
     """
     Verifica las firmas PAdES de un PDF.
@@ -488,22 +762,20 @@ async def verify_pdf_signature(
         pdf_bytes = await pdf_file.read()
         if not pdf_bytes:
             raise HTTPException(status_code=400, detail="EMPTY_FILE")
+        await validate_internal_hmac(request, body=pdf_bytes)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"verify_pdf_signature read error: {e}")
         raise HTTPException(status_code=400, detail="No se pudo procesar el PDF. Verificá que el archivo sea válido.")
 
-    # Validar tamaño: límite 50MB para verify
-    MAX_VERIFY_SIZE_MB = 50
-    if len(pdf_bytes) > MAX_VERIFY_SIZE_MB * 1024 * 1024:
+    if len(pdf_bytes) > MAX_SIGNABLE_PDF_SIZE:
         raise HTTPException(
             status_code=400,
-            detail=f"PDF file too large. Maximum size for verify: {MAX_VERIFY_SIZE_MB}MB",
+            detail=f"PDF file too large. Maximum size for verify: {MAX_SIGNABLE_PDF_SIZE_MB}MB",
             headers={"error_code": "FILE_TOO_LARGE"}
         )
 
-    # Validar que sea un PDF válido
     if not pdf_bytes.startswith(b'%PDF'):
         raise HTTPException(
             status_code=400,
@@ -589,25 +861,16 @@ async def list_certificates(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    """
-    Manejador global de excepciones para capturar errores no controlados
-    
-    Args:
-        request: Objeto de solicitud HTTP
-        exc: Excepción capturada
-        
-    Returns:
-        HTTPException: Respuesta de error estandarizada
-    """
     logger.error(f"Excepción no controlada: {str(exc)}")
     logger.error(f"Traceback: {traceback.format_exc()}")
-    
+
+    report_error(request, exc, kind="UNHANDLED")
+
     return HTTPException(
         status_code=500,
         detail="Error interno del servidor"
     )
 
-# Punto de entrada para ejecución directa del servidor
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

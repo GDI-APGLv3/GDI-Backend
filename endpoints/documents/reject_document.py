@@ -1,4 +1,3 @@
-"""Endpoint para rechazar documentos."""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request

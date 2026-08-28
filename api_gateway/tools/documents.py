@@ -1,8 +1,4 @@
-"""
-Tools MCP para documentos (lectura y operaciones).
-Reutiliza servicios existentes para búsqueda, detalle y operaciones de documentos.
-"""
-import logging
+from shared.logging import get_logger
 from typing import Dict, Any, Optional, List
 from api_gateway.context import MCPContext
 from services.document_service import get_user_documents as _get_user_documents_impl
@@ -13,19 +9,16 @@ from services.documents.signing import start_document_signing_process
 from services.documents.signing.unified_signing import super_sign_document
 from services.documents.lifecycle.rejection import reject_document as reject_doc_service
 from services.documents.lifecycle.deletion import delete_document as delete_doc_service
-from shared.exceptions import ValidationError, NotFoundError, DocumentNotFoundError, DocumentStateError, AuthorizationError, GDIBaseException
+from shared.exceptions import ValidationError, DocumentNotFoundError, DocumentStateError, AuthorizationError, GDIBaseException, SpecialLaneBusyError, SignerTurnPendingError
 from services.documents.permissions import can_user_view_document
-from database import fetch_one, fetch_all, execute
+from services.documents.retrieval.pending_signatures import _is_my_turn_condition
+from database import fetch_one, fetch_all
 from api_gateway.tools._sanitize import strip_storage_urls
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def _resolve_sender_sector_id(user_id: str, *, schema_name: str):
-    """Resuelve el sector_id del usuario para crear/editar documentos.
-    Priority 1: sector principal del usuario (users.sector_id)
-    Priority 2: primer sector con permiso can_edit (user_sector_permissions)
-    """
     return await fetch_one(
         """
         SELECT sector_id FROM (
@@ -48,27 +41,20 @@ async def _resolve_sender_sector_id(user_id: str, *, schema_name: str):
     )
 
 
-async def _get_linked_case(document_id: str, schema_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca el expediente vinculado a un documento (oficial o borrador).
+async def _get_linked_case(document_id: str, user_id: str, schema_name: str) -> Optional[Dict[str, Any]]:
+    from services.cases.permissions import can_user_view_case
 
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema de la municipalidad
-
-    Returns:
-        Dict con case_id, case_number, reference si está vinculado, None si no
-    """
-    # Primero buscar en documentos oficiales (por ID del documento oficial)
     query_official = """
         SELECT
             c.id as case_id,
             c.case_number,
             c.reference as case_reference,
             cod.linking_date,
+            ct.is_reserved,
             'official' as link_type
         FROM case_official_documents cod
         JOIN cases c ON c.id = cod.case_id
+        JOIN case_templates ct ON ct.id = c.case_template_id
         WHERE cod.official_document_id = $1 AND cod.is_active = true
         LIMIT 1
     """
@@ -76,6 +62,10 @@ async def _get_linked_case(document_id: str, schema_name: str) -> Optional[Dict[
     result = await fetch_one(query_official, document_id, schema_name=schema_name)
 
     if result:
+        if result["is_reserved"] and not await can_user_view_case(
+            str(result["case_id"]), user_id, schema_name=schema_name
+        ):
+            return None
         return {
             "case_id": str(result["case_id"]),
             "case_number": result["case_number"],
@@ -84,16 +74,17 @@ async def _get_linked_case(document_id: str, schema_name: str) -> Optional[Dict[
             "link_type": "official"
         }
 
-    # Si no está como oficial, buscar como propuesto (borrador)
     query_proposed = """
         SELECT
             c.id as case_id,
             c.case_number,
             c.reference as case_reference,
             cpd.proposing_date,
+            ct.is_reserved,
             'proposed' as link_type
         FROM case_proposed_documents cpd
         JOIN cases c ON c.id = cpd.case_id
+        JOIN case_templates ct ON ct.id = c.case_template_id
         WHERE cpd.document_draft_id = $1 AND cpd.is_active = true
         LIMIT 1
     """
@@ -101,6 +92,10 @@ async def _get_linked_case(document_id: str, schema_name: str) -> Optional[Dict[
     result = await fetch_one(query_proposed, document_id, schema_name=schema_name)
 
     if result:
+        if result["is_reserved"] and not await can_user_view_case(
+            str(result["case_id"]), user_id, schema_name=schema_name
+        ):
+            return None
         return {
             "case_id": str(result["case_id"]),
             "case_number": result["case_number"],
@@ -121,40 +116,19 @@ async def search_documents(
     status: Optional[str] = None,
     document_type: Optional[str] = None,
     case_id: Optional[str] = None,
-    min_signers: Optional[int] = None
+    min_signers: Optional[int] = None,
+    sector_filter: Optional[str] = None,
+    text_search: Optional[str] = None,
+    date_filter: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Buscar documentos con filtros.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: ID de usuario (REQUERIDO para permisos)
-        page: Número de página (default 1)
-        page_size: Tamaño de página (default 20, max 100)
-        search: Texto de búsqueda (número de documento)
-        status: Filtro de estado visual ("En edición", "Firmar ahora", "En proceso de firma", "Firmado")
-        document_type: Filtro por tipo (acronym del tipo)
-        case_id: UUID del expediente para filtrar documentos vinculados (opcional)
-        min_signers: Cantidad mínima de firmantes (opcional, ej: 2 para docs con 2+ firmas)
-
-    Returns:
-        Dict con documents (lista), pagination (total, page, page_size, total_pages)
-
-    Raises:
-        ValueError: Si page_size > 100 o user_id no proporcionado
-    """
     logger.info(f"[MCP] search_documents - schema={ctx.schema_name}, page={page}, user_id={user_id}, case_id={case_id}")
 
-    # Validaciones
     if page_size > 100:
         raise ValueError("page_size máximo es 100")
 
     if not user_id:
         raise ValueError("user_id es requerido para search_documents (necesario para permisos)")
 
-    # Implementación unificada: misma función que usa el endpoint REST.
-    # Adaptador de respuesta: la REST devuelve shape plano {total, page, ...},
-    # el cliente MCP espera {documents, pagination:{...}, filters_applied:{...}}.
     try:
         raw = await _get_user_documents_impl(
             user_id=user_id,
@@ -163,17 +137,20 @@ async def search_documents(
             document_type=document_type,
             case_id=case_id,
             min_signers=min_signers,
+            sector_filter=sector_filter,
+            search=text_search,
+            date_filter=date_filter,
             page=page,
             page_size=page_size,
             schema_name=ctx.schema_name
         )
 
-        total = raw["total"]
-        total_pages = raw["total_pages"]
-        logger.info(f"[MCP] search_documents - encontrados {total} documentos")
+        has_next = raw["has_next"]
+        logger.info(
+            f"[MCP] search_documents - pagina {raw['page']} "
+            f"(docs={len(raw['documents'])}, has_next={has_next})"
+        )
 
-        # Serializar datetimes a ISO 8601 con "T" para que el cliente MCP
-        # reciba strings y no objetos datetime que el framework convierte con str().
         _DATETIME_FIELDS = ("last_modified_at",)
         serialized_docs = []
         for doc in raw["documents"]:
@@ -187,12 +164,12 @@ async def search_documents(
         return {
             "documents": serialized_docs,
             "pagination": {
-                "total": total,
+                "total": raw.get("total"),
                 "page": raw["page"],
                 "page_size": raw["page_size"],
-                "total_pages": total_pages,
-                "has_next": raw["page"] < total_pages,
-                "has_previous": raw["page"] > 1,
+                "total_pages": raw.get("total_pages"),
+                "has_next": raw["has_next"],
+                "has_previous": raw["has_previous"],
             },
             "filters_applied": {
                 "status": status,
@@ -200,16 +177,17 @@ async def search_documents(
                 "doc_number": search,
                 "case_id": case_id,
                 "min_signers": min_signers,
+                "sector_filter": sector_filter,
+                "text_search": text_search,
+                "date_filter": date_filter,
             },
         }
 
-    except GDIBaseException:
-        # Re-lanzar sin envolver: el dispatcher de http_server.py captura
-        # GDIBaseException y devuelve un error estructurado al cliente MCP.
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] search_documents - error: {e}")
-        raise RuntimeError(f"Error buscando documentos: {str(e)}")
+        raise RuntimeError("Error buscando documentos")
 
 
 async def get_document(
@@ -217,33 +195,11 @@ async def get_document(
     document_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Obtener detalle completo de un documento en cualquier estado.
-    Incluye el expediente vinculado si existe.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento
-        user_id: UUID del usuario (requerido para verificacion de permisos)
-
-    Returns:
-        Dict con detalles del documento según su estado:
-        - state_category: 'editing' o 'signing'
-        - document_id, status, details, timestamp
-        - linked_case: expediente vinculado (si existe)
-
-    Raises:
-        ValueError: Si user_id no proporcionado o sin permisos
-        DocumentNotFoundError: Si el documento no existe
-        ValidationError: Si el documento no puede ser accedido
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_document - document_id={document_id}, schema={ctx.schema_name}, user_id={user_id}")
 
     if not user_id:
         raise ValueError("user_id es requerido")
 
-    # Verificar existencia antes de permisos para retornar 404 en vez de 403
     exists = await fetch_one(
         """
         SELECT 1 FROM document_draft WHERE id = $1 AND is_deleted = false
@@ -261,15 +217,13 @@ async def get_document(
         raise ValueError("Usuario no tiene permisos para ver este documento")
 
     try:
-        # Usar servicio unificado que funciona con cualquier estado
         result = await get_unified_document_details(
             document_id=document_id,
             user_id=user_id,
             schema_name=ctx.schema_name
         )
 
-        # Buscar expediente vinculado
-        linked_case = await _get_linked_case(document_id, ctx.schema_name)
+        linked_case = await _get_linked_case(document_id, user_id, ctx.schema_name)
         if linked_case:
             result["linked_case"] = linked_case
             logger.info(f"[MCP] get_document - expediente vinculado: {linked_case['case_number']}")
@@ -280,52 +234,24 @@ async def get_document(
         logger.info(f"[MCP] get_document - documento encontrado, estado: {result.get('status')}")
         return strip_storage_urls(result)
 
-    except DocumentNotFoundError as e:
-        logger.error(f"[MCP] get_document - documento no encontrado: {e}")
-        raise
-    except DocumentStateError as e:
-        logger.error(f"[MCP] get_document - estado no soportado: {e}")
-        raise
-    except ValidationError as e:
-        logger.error(f"[MCP] get_document - error de validación: {e}")
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] get_document - error: {e}")
-        raise RuntimeError(f"Error obteniendo documento: {str(e)}")
+        raise RuntimeError("Error obteniendo documento")
 
 
 async def get_pending_signatures(
     ctx: MCPContext,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Obtener documentos pendientes de firma donde es el turno del usuario.
-    Solo muestra documentos donde el usuario es el PRÓXIMO firmante.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-
-    Returns:
-        Dict con:
-        - pending_signatures: lista de documentos pendientes
-        - total: cantidad de documentos pendientes
-
-    Raises:
-        ValueError: Si user_id no proporcionado
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_pending_signatures - user_id={user_id}, schema={ctx.schema_name}")
 
     if not user_id:
         raise ValueError("user_id es requerido")
 
     try:
-        # Query para obtener documentos donde el usuario es el próximo firmante
-        # Un usuario es "próximo" si:
-        # 1. Su status es 'pending'
-        # 2. Todos los firmantes con signing_order menor ya firmaron
-        query = """
+        query = f"""
             WITH pending_docs AS (
                 SELECT
                     ds.id as signer_id,
@@ -356,22 +282,10 @@ async def get_pending_signatures(
                     WHEN pd.is_numerator = true THEN 'numerator'
                     ELSE 'signer'
                 END as signer_role,
-                -- Verificar si es el turno del usuario
-                NOT EXISTS (
-                    SELECT 1 FROM document_signers ds2
-                    WHERE ds2.document_id = pd.document_id
-                      AND ds2.signing_order < pd.signing_order
-                      AND ds2.status = 'pending'
-                      AND ds2.is_numerator = pd.is_numerator
-                ) as is_my_turn
+                -- ¿Es el turno del usuario? (definición única, GDI-187)
+                {_is_my_turn_condition('pd')} as is_my_turn
             FROM pending_docs pd
-            WHERE NOT EXISTS (
-                SELECT 1 FROM document_signers ds2
-                WHERE ds2.document_id = pd.document_id
-                  AND ds2.signing_order < pd.signing_order
-                  AND ds2.status = 'pending'
-                  AND ds2.is_numerator = pd.is_numerator
-            )
+            WHERE {_is_my_turn_condition('pd')}
             ORDER BY pd.sent_to_sign_at DESC
         """
 
@@ -403,9 +317,11 @@ async def get_pending_signatures(
             "total": len(pending_signatures)
         }
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_pending_signatures - error: {e}")
-        raise RuntimeError(f"Error obteniendo firmas pendientes: {str(e)}")
+        raise RuntimeError("Error obteniendo firmas pendientes")
 
 
 async def get_document_content(
@@ -413,23 +329,6 @@ async def get_document_content(
     document_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Obtener contenido HTML de un documento oficial.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento oficial
-        user_id: UUID del usuario (requerido para verificacion de permisos)
-
-    Returns:
-        Dict con document_id, official_number, reference, content (html),
-        document_type, signed_at
-
-    Raises:
-        ValueError: Si user_id no proporcionado o sin permisos
-        DocumentNotFoundError: Si el documento no existe
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] get_document_content - document_id={document_id}, schema={ctx.schema_name}, user_id={user_id}")
 
     if not user_id:
@@ -446,13 +345,11 @@ async def get_document_content(
         logger.info(f"[MCP] get_document_content - contenido obtenido ({len(result['content']['html'])} chars)")
         return result
 
-    except DocumentNotFoundError as e:
-        logger.error(f"[MCP] get_document_content - documento no encontrado: {e}")
+    except (ValueError, GDIBaseException):
         raise
-
     except Exception as e:
         logger.error(f"[MCP] get_document_content - error: {e}")
-        raise RuntimeError(f"Error obteniendo contenido: {str(e)}")
+        raise RuntimeError("Error obteniendo contenido")
 
 
 async def create_document(
@@ -463,29 +360,6 @@ async def create_document(
     case_id: Optional[str] = None,
     recipients: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """
-    Crear un nuevo documento en estado borrador (draft).
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_type_acronym: Acrónimo del tipo de documento (INF, DICT, etc.)
-        reference: Descripción/referencia del documento
-        user_id: UUID del usuario creador
-        case_id: UUID del expediente a vincular (opcional)
-        recipients: Destinatarios para NOTA (opcional, dict con sectors/users)
-
-    Returns:
-        Dict con:
-        - success: bool
-        - document_id: UUID del documento creado
-        - status: "draft"
-        - message: mensaje de confirmación
-
-    Raises:
-        ValueError: Si faltan parámetros requeridos
-        ValidationError: Si el tipo de documento no es válido
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] create_document - type={document_type_acronym}, user={user_id}, schema={ctx.schema_name}")
 
     if not document_type_acronym:
@@ -496,7 +370,6 @@ async def create_document(
         raise ValueError("user_id es requerido")
 
     try:
-        # Resolver sender_sector_id del usuario
         sender_sector_id = None
         if recipients:
             user_sector = await _resolve_sender_sector_id(user_id, schema_name=ctx.schema_name)
@@ -522,31 +395,36 @@ async def create_document(
             "message": result.get("message", "Documento creado exitosamente")
         }
 
-        # Si se proporciona case_id, vincular el documento al expediente
         if case_id:
             try:
-                link_query = """
-                    INSERT INTO case_proposed_documents (case_id, document_draft_id, proposing_date, is_active)
-                    VALUES ($1, $2, NOW(), true)
-                """
-                await execute(
-                    link_query,
-                    case_id, result.get("document_id"),
-                    schema_name=ctx.schema_name
+                from services.cases.documents import propose_document_to_case
+                await propose_document_to_case(
+                    case_id=case_id,
+                    document_draft_id=result.get("document_id"),
+                    proposing_user_id=user_id,
+                    schema_name=ctx.schema_name,
                 )
                 response["linked_to_case"] = case_id
-                logger.info(f"[MCP] create_document - documento vinculado a expediente {case_id}")
+                response["link_status"] = "linked"
+                logger.info(f"[MCP] create_document - documento propuesto a expediente {case_id}")
+            except ValidationError as ve:
+                logger.warning(f"[MCP] create_document - vinculacion RECHAZADA por REGLA 1: {ve}")
+                response["linked_to_case"] = None
+                response["link_status"] = "rejected"
+                response["link_error"] = str(ve)
             except Exception as link_error:
-                logger.warning(f"[MCP] create_document - error vinculando a expediente: {link_error}")
+                logger.warning(f"[MCP] create_document - error proponiendo a expediente: {link_error}")
+                response["linked_to_case"] = None
+                response["link_status"] = "error"
                 response["link_error"] = str(link_error)
 
         return response
 
-    except ValidationError:
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] create_document - error: {e}")
-        raise RuntimeError(f"Error creando documento: {str(e)}")
+        raise RuntimeError("Error creando documento")
 
 
 async def save_document(
@@ -559,32 +437,6 @@ async def save_document(
     recipients: Optional[Dict[str, Any]] = None,
     proposed_case_ids: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """
-    Guardar cambios en un documento borrador.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento
-        user_id: UUID del usuario (para validación)
-        content: Contenido HTML del documento (opcional)
-        reference: Nueva referencia/descripción (opcional)
-        signers: Lista de firmantes [{user_id, email, is_numerator}] (opcional)
-        recipients: Destinatarios para NOTA (opcional, dict con sectors/users)
-        proposed_case_ids: IDs de expedientes a vincular (opcional)
-
-    Returns:
-        Dict con:
-        - success: bool
-        - document_id: UUID del documento
-        - message: mensaje de confirmación
-        - last_modified_at: fecha de última modificación
-
-    Raises:
-        ValueError: Si document_id está vacío o no hay cambios
-        DocumentNotFoundError: Si el documento no existe
-        DocumentStateError: Si el documento no está en estado editable
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] save_document - document_id={document_id}, user={user_id}, schema={ctx.schema_name}")
 
     if not document_id:
@@ -592,11 +444,9 @@ async def save_document(
     if not user_id:
         raise ValueError("user_id es requerido")
 
-    # Verificar que hay al menos un cambio
     if all(x is None for x in [content, reference, signers, recipients, proposed_case_ids]):
         raise ValueError("Debe proporcionar al menos un campo a actualizar (content, reference, signers, recipients o proposed_case_ids)")
 
-    # Resolver sender_sector_id si hay recipients
     sender_sector_id = None
     if recipients is not None:
         user_sector = await _resolve_sender_sector_id(user_id, schema_name=ctx.schema_name)
@@ -628,10 +478,10 @@ async def save_document(
     except (DocumentNotFoundError, DocumentStateError, ValidationError):
         raise
     except GDIBaseException:
-        raise  # AuthorizationError, BusinessLogicError, etc.
+        raise
     except Exception as e:
         logger.error(f"[MCP] save_document - error inesperado: {e}")
-        raise  # re-raise sin wrappear, mantiene tipo original
+        raise
 
 
 async def start_signing(
@@ -639,27 +489,6 @@ async def start_signing(
     document_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Iniciar proceso de firma de un documento.
-    Cambia el estado de 'draft' a 'sent_to_sign'.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento
-        user_id: UUID del usuario que inicia la firma (debe ser el creador)
-
-    Returns:
-        Dict con:
-        - success: bool
-        - message: mensaje de confirmación
-
-    Raises:
-        ValueError: Si faltan parámetros
-        ValidationError: Si el documento no tiene firmantes/numerador
-        AuthorizationError: Si el usuario no es el creador
-        DocumentStateError: Si el documento no está en estado 'draft'
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] start_signing - document_id={document_id}, user={user_id}, schema={ctx.schema_name}")
 
     if not document_id:
@@ -681,11 +510,11 @@ async def start_signing(
             "message": result.get("message", "Proceso de firma iniciado exitosamente")
         }
 
-    except (ValidationError, AuthorizationError, DocumentStateError):
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] start_signing - error: {e}")
-        raise RuntimeError(f"Error iniciando proceso de firma: {str(e)}")
+        raise RuntimeError("Error iniciando proceso de firma")
 
 
 async def sign_document(
@@ -693,10 +522,6 @@ async def sign_document(
     document_id: str,
     user_id: str,
 ) -> Dict[str, Any]:
-    """
-    Firma un documento como el usuario actual.
-    Delega a super_sign_document (mismo flujo que el Frontend y los tests).
-    """
     logger.info(f"[REST API] sign_document - document_id={document_id}, user={user_id}, schema={ctx.schema_name}")
 
     if not document_id:
@@ -711,7 +536,8 @@ async def sign_document(
             schema_name=ctx.schema_name,
         )
         return result
-    except (ValidationError, AuthorizationError, DocumentStateError):
+    except (ValidationError, AuthorizationError, DocumentStateError,
+            SpecialLaneBusyError, SignerTurnPendingError):
         raise
     except Exception as e:
         logger.error(f"[REST API] sign_document - error: {e}")
@@ -724,26 +550,6 @@ async def reject_document(
     user_id: str,
     reason: str
 ) -> Dict[str, Any]:
-    """
-    Rechazar un documento proporcionando una razon.
-    El documento vuelve a estado editable para correcciones.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento a rechazar
-        user_id: UUID del usuario que rechaza
-        reason: Motivo del rechazo
-
-    Returns:
-        Dict con resultado del rechazo
-
-    Raises:
-        ValueError: Si faltan parametros requeridos
-        DocumentNotFoundError: Si el documento no existe
-        DocumentStateError: Si el documento no esta en estado rechazable
-        AuthorizationError: Si el usuario no tiene permisos para rechazar
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] reject_document - document_id={document_id}, user={user_id}, schema={ctx.schema_name}")
 
     if not document_id:
@@ -765,11 +571,11 @@ async def reject_document(
 
         return result
 
-    except (DocumentNotFoundError, DocumentStateError, AuthorizationError, ValidationError):
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] reject_document - error: {e}")
-        raise RuntimeError(f"Error rechazando documento: {str(e)}")
+        raise RuntimeError("Error rechazando documento")
 
 
 async def delete_document(
@@ -777,25 +583,6 @@ async def delete_document(
     document_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Eliminar un documento borrador.
-    Solo se pueden eliminar documentos en estado draft.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento a eliminar
-        user_id: UUID del usuario que elimina
-
-    Returns:
-        Dict con resultado de la eliminacion
-
-    Raises:
-        ValueError: Si faltan parametros requeridos
-        DocumentNotFoundError: Si el documento no existe
-        DocumentStateError: Si el documento no esta en estado eliminable
-        AuthorizationError: Si el usuario no tiene permisos para eliminar
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] delete_document - document_id={document_id}, user={user_id}, schema={ctx.schema_name}")
 
     if not document_id:
@@ -814,11 +601,11 @@ async def delete_document(
 
         return result
 
-    except (DocumentNotFoundError, DocumentStateError, AuthorizationError, ValidationError):
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] delete_document - error: {e}")
-        raise RuntimeError(f"Error eliminando documento: {str(e)}")
+        raise RuntimeError("Error eliminando documento")
 
 
 async def search_document_by_number(
@@ -826,21 +613,6 @@ async def search_document_by_number(
     doc_number: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Buscar documento oficial por numero exacto (ej: INF-2026-00000060-TXST-TESO).
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        doc_number: Numero oficial del documento (ej: "INF-2026-00000060-TXST-TESO")
-        user_id: UUID del usuario (no se usa para filtrar, busqueda global)
-
-    Returns:
-        Dict con found (bool), document (info o None), search_term
-
-    Raises:
-        ValueError: Si doc_number esta vacio
-        RuntimeError: Si hay error de BD
-    """
     logger.info(f"[MCP] search_document_by_number - doc_number={doc_number}, schema={ctx.schema_name}")
 
     if not doc_number:
@@ -855,7 +627,6 @@ async def search_document_by_number(
             schema_name=ctx.schema_name
         )
 
-        # Guard post-busqueda: verificar permisos sobre el documento encontrado
         if result.get("found") and result.get("document"):
             doc_id = result["document"].get("id") or result["document"].get("document_id")
             if doc_id and not await can_user_view_document(doc_id, user_id, schema_name=ctx.schema_name):
@@ -867,12 +638,11 @@ async def search_document_by_number(
 
         return result
 
-    except ValidationError as e:
-        logger.error(f"[MCP] search_document_by_number - error de validacion: {e}")
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] search_document_by_number - error: {e}")
-        raise RuntimeError(f"Error buscando documento por numero: {str(e)}")
+        raise RuntimeError("Error buscando documento por numero")
 
 
 async def get_signature_details(
@@ -880,22 +650,6 @@ async def get_signature_details(
     document_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Obtener detalles de firma de un documento (firmantes, estado de cada uno).
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        document_id: UUID del documento
-        user_id: UUID del usuario solicitante
-
-    Returns:
-        Dict con document (info), current_signer, signature_progress, can_sign
-
-    Raises:
-        ValueError: Si faltan parametros requeridos
-        DocumentNotFoundError: Si el documento no existe
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] get_signature_details - document_id={document_id}, user_id={user_id}, schema={ctx.schema_name}")
 
     if not document_id:
@@ -916,9 +670,8 @@ async def get_signature_details(
 
         return strip_storage_urls(result)
 
-    except DocumentNotFoundError as e:
-        logger.error(f"[MCP] get_signature_details - documento no encontrado: {e}")
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] get_signature_details - error: {e}")
-        raise RuntimeError(f"Error obteniendo detalles de firma: {str(e)}")
+        raise RuntimeError("Error obteniendo detalles de firma")

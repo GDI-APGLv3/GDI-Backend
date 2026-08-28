@@ -1,15 +1,10 @@
-"""
-Tools MCP para memos (lectura).
-Reutiliza servicios existentes de memos.
-A diferencia de notes.py, no necesita resolver sector_ids (usa user_id directo).
-"""
-import logging
+from shared.logging import get_logger
 from typing import Dict, Any, Optional
 from api_gateway.context import MCPContext
 from services.memos.retrieval import get_received_memos, get_sent_memos, get_archived_memos
-from shared.exceptions import AuthorizationError, NotFoundError
+from shared.exceptions import AuthorizationError, NotFoundError, GDIBaseException
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def get_memos(
@@ -19,19 +14,6 @@ async def get_memos(
     page_size: int = 20,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Obtener memos recibidos del usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Numero de pagina (default 1)
-        page_size: Tamano de pagina (default 20)
-        search: Termino de busqueda (opcional)
-
-    Returns:
-        Dict con memos y pagination
-    """
     logger.info(f"[MCP] get_memos - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     if not user_id:
@@ -53,9 +35,11 @@ async def get_memos(
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_memos - error: {e}")
-        raise RuntimeError(f"Error obteniendo memos: {str(e)}")
+        raise RuntimeError("Error obteniendo memos")
 
 
 async def get_sent_memos_tool(
@@ -65,19 +49,6 @@ async def get_sent_memos_tool(
     page_size: int = 20,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Obtener memos enviados por el usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Numero de pagina (default 1)
-        page_size: Tamano de pagina (default 20)
-        search: Termino de busqueda (opcional)
-
-    Returns:
-        Dict con memos y pagination
-    """
     logger.info(f"[MCP] get_sent_memos - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     if not user_id:
@@ -99,9 +70,11 @@ async def get_sent_memos_tool(
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_sent_memos - error: {e}")
-        raise RuntimeError(f"Error obteniendo memos enviados: {str(e)}")
+        raise RuntimeError("Error obteniendo memos enviados")
 
 
 async def get_archived_memos_tool(
@@ -111,19 +84,6 @@ async def get_archived_memos_tool(
     page_size: int = 20,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Obtener memos archivados.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Numero de pagina (default 1)
-        page_size: Tamano de pagina (default 20)
-        search: Termino de busqueda (opcional)
-
-    Returns:
-        Dict con memos y pagination
-    """
     logger.info(f"[MCP] get_archived_memos - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     if not user_id:
@@ -145,9 +105,11 @@ async def get_archived_memos_tool(
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_archived_memos - error: {e}")
-        raise RuntimeError(f"Error obteniendo memos archivados: {str(e)}")
+        raise RuntimeError("Error obteniendo memos archivados")
 
 
 async def get_memo_detail(
@@ -155,22 +117,6 @@ async def get_memo_detail(
     memo_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Obtener detalle de un memo especifico.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        memo_id: UUID del documento (memo oficial)
-        user_id: UUID del usuario solicitante
-
-    Returns:
-        Dict con detalle completo del memo
-
-    Raises:
-        ValueError: Si faltan parametros requeridos
-        AuthorizationError: Si el usuario no tiene acceso al memo
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] get_memo_detail - memo_id={memo_id}, user_id={user_id}, schema={ctx.schema_name}")
 
     if not memo_id:
@@ -191,8 +137,8 @@ async def get_memo_detail(
 
         return result
 
-    except (AuthorizationError, NotFoundError, ValueError):
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] get_memo_detail - error: {e}")
-        raise RuntimeError(f"Error obteniendo detalle de memo: {str(e)}")
+        raise RuntimeError("Error obteniendo detalle de memo")

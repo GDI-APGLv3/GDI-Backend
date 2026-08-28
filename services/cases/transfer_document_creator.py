@@ -1,17 +1,3 @@
-"""
-Servicio para creación automática de documentos PV (Pase) de transferencia/asignación.
-
-Responsabilidades:
-- Crear documento PV cuando se transfiere o asigna un expediente
-- Generar número oficial único (usando función centralizada)
-- Llamar a Legal Orchestrator /create-transfer-document
-- Insertar en official_documents
-- Vincular documento al expediente
-
-USO:
-- Se llama desde /transfer cuando create_official_doc=true
-- Se llama desde /assign cuando create_official_doc=true
-"""
 
 from typing import Dict, Any
 from datetime import datetime
@@ -39,31 +25,10 @@ async def create_transfer_document(
     schema_name: str,
     connection=None
 ) -> Dict[str, Any]:
-    """
-    Crea documento PV (Pase) para transferencia o asignación de expediente.
-
-    Args:
-        case_id: UUID del expediente
-        case_number: Número del expediente (ej: EXP-2025-000045)
-        movement_type: "Transferencia" o "Asignación"
-        movement_reason: Motivo de la transferencia/asignación
-        requesting_sector_id: UUID del sector que solicita/transfiere
-        receiving_sector_id: UUID del sector destino
-        user_id: UUID del usuario que hace la operación (será el numerador)
-        connection: Conexión de transacción externa (opcional)
-
-    Returns:
-        Dict con document_id y official_number del pase
-
-    Raises:
-        ValidationError: Si faltan datos o validaciones fallan
-        ExternalServiceError: Si falla Legal Orchestrator
-    """
     logger.info(f"Iniciando creación de pase {movement_type}")
     logger.info(f"Case: {case_number}")
     logger.info(f"Motivo: {movement_reason[:50]}...")
 
-    # Obtener datos completos de BD para usar en HTML y payload
     transfer_data = await _fetch_transfer_data(
         case_id=case_id,
         case_number=case_number,
@@ -74,7 +39,6 @@ async def create_transfer_document(
         schema_name=schema_name
     )
 
-    # Builder de HTML: closure que captura transfer_data
     def html_builder():
         return _build_transfer_html(
             case_number=case_number,
@@ -84,7 +48,6 @@ async def create_transfer_document(
             receiving_area=transfer_data['receiving_area']
         )
 
-    # Builder de payload: closure que captura transfer_data y movement_type
     def payload_builder(document_id, document_type_name, official_number, user_id):
         return _build_transfer_payload(
             case_number=case_number,
@@ -95,7 +58,6 @@ async def create_transfer_document(
             transfer_data=transfer_data
         )
 
-    # Llamar a la función base genérica
     result = await create_and_sign_case_document(
         document_type_acronym="PV",
         reference=f"{movement_type} {case_number}",
@@ -113,10 +75,6 @@ async def create_transfer_document(
     return result
 
 
-# ============================================================================
-# FUNCIONES AUXILIARES
-# ============================================================================
-
 async def _fetch_transfer_data(
     case_id: str,
     case_number: str,
@@ -127,25 +85,11 @@ async def _fetch_transfer_data(
     *,
     schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Recupera todos los datos necesarios para el documento de transferencia.
-
-    Hace queries con JOINs para obtener información completa de:
-    - Sector solicitante (requesting)
-    - Sector receptor (receiving)
-    - Usuario firmante
-    - Departamentos y municipios
-
-    Returns:
-        Dict con todos los campos necesarios
-    """
     logger.info("Obteniendo datos de BD...")
 
-    # Obtener datos del firmante usando función compartida (async)
     signer_data = await get_signer_data(user_id, schema_name=schema_name)
 
     async with get_conn(schema_name=schema_name) as conn:
-        # Query para sector solicitante (requesting)
         requesting_query = """
             SELECT
                 s.acronym as sector_acronym,
@@ -160,7 +104,6 @@ async def _fetch_transfer_data(
         if not requesting_result:
             raise ValidationError(f"Sector solicitante {requesting_sector_id} no encontrado")
 
-        # Query para sector receptor (receiving)
         receiving_query = """
             SELECT
                 s.acronym as sector_acronym,
@@ -175,35 +118,27 @@ async def _fetch_transfer_data(
         if not receiving_result:
             raise ValidationError(f"Sector receptor {receiving_sector_id} no encontrado")
 
-        # Construir áreas en formato: "SECTOR - Nombre Departamento"
         requesting_area = f"{requesting_result['sector_acronym']} - {requesting_result['department_name']}"
         receiving_area = f"{receiving_result['sector_acronym']} - {receiving_result['department_name']}"
 
-        # Obtener logo del municipio desde settings
         settings_result = await conn.fetchrow("SELECT logo_url FROM settings LIMIT 1")
         logo_url = settings_result['logo_url'] if settings_result and settings_result['logo_url'] else DEFAULT_LOGO_URL
 
-        # Obtener city desde settings del tenant
         city = await get_city_from_settings(conn=conn, schema_name=schema_name)
 
     transfer_data = {
-        # Áreas
         "requesting_area": requesting_area,
         "receiving_area": receiving_area,
 
-        # Firmante
         "signer_full_name": signer_data['full_name'],
         "signer_seal": signer_data['seal'],
         "signer_department": signer_data['department_name'],
         "signer_municipality": signer_data['municipality_name'],
 
-        # Logo del municipio
         "municipality_logo_url": logo_url,
 
-        # City del tenant
         "city_name": city,
 
-        # Extra para logs
         "requesting_dept_acronym": requesting_result['department_acronym'],
         "receiving_dept_acronym": receiving_result['department_acronym']
     }
@@ -223,19 +158,6 @@ def _build_transfer_html(
     requesting_area: str,
     receiving_area: str
 ) -> str:
-    """
-    Construye el HTML del documento de transferencia/asignación.
-
-    Args:
-        case_number: Número del expediente
-        movement_type: "Transferencia" o "Asignación"
-        movement_reason: Motivo de la operación
-        requesting_area: Área solicitante
-        receiving_area: Área receptora
-
-    Returns:
-        String con HTML formateado
-    """
     html = f"""
     <div style="font-family: Arial, sans-serif; padding: 20px;">
         <h1 style="text-align: center; color: #333;">PASE ADMINISTRATIVO - {movement_type.upper()}</h1>
@@ -272,21 +194,6 @@ def _build_transfer_payload(
     movement_reason: str,
     transfer_data: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """
-    Construye el payload para Legal Orchestrator /create-transfer-document.
-
-    Args:
-        case_number: Número del expediente
-        document_type_name: Nombre del tipo de documento
-        official_number: Número oficial generado
-        movement_type: "Transferencia" o "Asignación"
-        movement_reason: Motivo de la operación
-        transfer_data: Dict con datos obtenidos de BD
-
-    Returns:
-        Dict con payload completo para Legal Orchestrator
-    """
-    # Obtener city desde settings del tenant (pasada en transfer_data)
     city = transfer_data.get('city_name', 'LATAM')
 
     payload = {
@@ -295,7 +202,7 @@ def _build_transfer_payload(
         "document_type_acronym": "PV",
         "document_type_name": document_type_name,
         "movement_reason": movement_reason,
-        "movement_type": movement_type,  # "Transferencia" o "Asignación"
+        "movement_type": movement_type,
         "municipality_logo_url": transfer_data.get('municipality_logo_url', DEFAULT_LOGO_URL),
         "receiving_area": transfer_data['receiving_area'],
         "requesting_area": transfer_data['requesting_area'],

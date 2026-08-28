@@ -11,10 +11,13 @@ Puedes conectar tu asistente IA (Claude, ChatGPT, Gemini) para consultar tus exp
 
 | Campo | Valor |
 |-------|-------|
-| URL MCP | `https://mcp.gdilatam.com/mcp` |
-| OpenAPI | `https://mcp.gdilatam.com/.well-known/openapi.json` |
-| Auth Server | `https://<your-tenant>.auth0.com` |
+| URL MCP | `https://gateway.your-domain.com/mcp` |
+| OpenAPI | `https://gateway.your-domain.com/.well-known/openapi.json` |
+| Auth Server | `https://auth.your-domain.com` (custom domain; HML/DEMO usan `auth-cliente.your-domain.com`) |
 | Protocolo | OAuth 2.0 |
+
+> El cliente NO necesita configurar el Auth Server ni el audience a mano: los descubre solo
+> por RFC 9728 (`/.well-known/oauth-protected-resource`). Esa es la fuente de verdad.
 
 ---
 
@@ -22,7 +25,7 @@ Puedes conectar tu asistente IA (Claude, ChatGPT, Gemini) para consultar tus exp
 
 **Paso 1: Agregar servidor**
 ```bash
-claude mcp add --transport http gdi https://mcp.gdilatam.com/mcp
+claude mcp add --transport http gdi https://gateway.your-domain.com/mcp
 ```
 
 **Paso 2: Autenticarte**
@@ -44,7 +47,7 @@ Selecciona "gdi" → "Authenticate" → Se abre navegador → Login con tu cuent
   "mcpServers": {
     "gdi": {
       "type": "http",
-      "url": "https://mcp.gdilatam.com/mcp"
+      "url": "https://gateway.your-domain.com/mcp"
     }
   }
 }
@@ -62,7 +65,7 @@ Selecciona "gdi" → "Authenticate" → Se abre navegador → Login con tu cuent
 
 **Paso 2:** En "Configure" → "Create new action" → "Import from URL":
 ```
-https://mcp.gdilatam.com/.well-known/openapi.json
+https://gateway.your-domain.com/.well-known/openapi.json
 ```
 
 **Paso 3:** En "Authentication" selecciona **OAuth** (se configura automáticamente via DCR)
@@ -73,8 +76,8 @@ https://mcp.gdilatam.com/.well-known/openapi.json
 
 ## 4. Otros LLMs con MCP
 
-URL: `https://mcp.gdilatam.com/mcp`
-Discovery: `https://mcp.gdilatam.com/.well-known/oauth-protected-resource`
+URL: `https://gateway.your-domain.com/mcp`
+Discovery: `https://gateway.your-domain.com/.well-known/oauth-protected-resource`
 
 Protocolo: OAuth 2.0 (RFC 9728)
 

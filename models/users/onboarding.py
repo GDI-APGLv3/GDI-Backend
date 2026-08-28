@@ -1,48 +1,9 @@
-"""
-Modelos Pydantic para sistema de onboarding de usuarios.
-Maneja tanto usuarios nuevos como activación de usuarios invitados.
-"""
 
 from typing import Optional, Literal
-from pydantic import BaseModel, Field, EmailStr
-
-
-class OnboardingRequest(BaseModel):
-    """
-    Request para onboarding de usuario desde Auth0.
-    
-    Utilizado tanto para usuarios nuevos como para activación 
-    de usuarios previamente invitados por email.
-    """
-    auth_id: str = Field(
-        ...,
-        description="ID de Auth0 del usuario autenticado",
-        example="auth0|123456789abcdef"
-    )
-    
-    email: EmailStr = Field(
-        ...,
-        description="Email del usuario verificado por Auth0",
-        example="juan.perez@empresa.com"
-    )
-    
-    full_name: str = Field(
-        ...,
-        min_length=2,
-        max_length=100,
-        description="Nombre completo del usuario desde Auth0",
-        example="Juan Pérez López"
-    )
-    
-    profile_picture_url: Optional[str] = Field(
-        None,
-        description="URL de foto de perfil desde Auth0 (opcional)",
-        example="https://s.gravatar.com/avatar/123.jpg"
-    )
+from pydantic import BaseModel, Field
 
 
 class UserSummary(BaseModel):
-    """Resumen de información del usuario para response."""
     
     user_id: str = Field(
         ...,
@@ -85,14 +46,6 @@ class UserSummary(BaseModel):
 
 
 class OnboardingResponse(BaseModel):
-    """
-    Response simplificado del proceso de onboarding.
-    
-    SEGÚN ESPECIFICACIONES DEL USUARIO:
-    - NO incluye campo 'message' 
-    - NO incluye campo 'assignments' o 'assigned_randomly'
-    - Solo status, user info y metadato is_first_time
-    """
     
     status: Literal["created", "activated", "existing_active"] = Field(
         ...,
@@ -110,28 +63,3 @@ class OnboardingResponse(BaseModel):
     )
 
 
-class OnboardingError(BaseModel):
-    """
-    Response de error en onboarding.
-    """
-    
-    error_type: str = Field(
-        ...,
-        description="Tipo de error ocurrido",
-        example="user_already_exists"
-    )
-    
-    message: str = Field(
-        ...,
-        description="Mensaje descriptivo del error"
-    )
-    
-    email: str = Field(
-        ...,
-        description="Email que causó el conflicto"
-    )
-    
-    existing_auth_id: Optional[str] = Field(
-        None,
-        description="Auth ID existente en caso de conflicto"
-    )

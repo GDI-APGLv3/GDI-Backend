@@ -1,8 +1,3 @@
-"""
-Endpoints para preparar acciones sobre expedientes (asignaciones y transferencias)
-GET /cases/{case_id}/prepare-assignment - Obtener sectores donde el usuario puede asignar
-GET /cases/{case_id}/prepare-transfer - Obtener sectores donde el usuario puede transferir
-"""
 
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, Field
@@ -10,52 +5,37 @@ from typing import List, Literal
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
 from database import fetch_all
-from shared.exceptions import exception_to_http_exception, NotFoundError, AuthorizationError
+from shared.exceptions import exception_to_http_exception, NotFoundError
 from shared.utils import get_authenticated_user
 from shared.dependencies import get_tenant_schema
 from config.constants import (
     PREPARE_ASSIGNMENT_SUCCESS,
-    PREPARE_ASSIGNMENT_ERROR,
     PREPARE_ASSIGNMENT_NO_PERMISSION,
     PREPARE_ASSIGNMENT_NO_SECTORS,
     PREPARE_TRANSFER_SUCCESS,
-    PREPARE_TRANSFER_ERROR,
-    PREPARE_TRANSFER_NO_PERMISSION,
     PREPARE_TRANSFER_NO_SECTORS,
     PREPARE_TRANSFER_NOT_ADMIN
 )
 from shared.logging import get_logger
 logger = get_logger(__name__)
 
-# Inicializar router
 router = APIRouter(tags=["expedientes"])
 
 
-# ============================================================================
-# SHARED MODELS
-# ============================================================================
-
 class SectorInfo(BaseModel):
-    """Información de un sector"""
     sector_id: str = Field(..., example="sec-123")
     acronym: str = Field(..., example="SMG#SEC")
     department: str = Field(..., example="Secretaría General")
 
 
 class UserSectorInCase(BaseModel):
-    """Sector del usuario con rol en el expediente"""
     sector_id: str = Field(..., example="sec-123")
     acronym: str = Field(..., example="SMG#SEC")
     department: str = Field(..., example="Secretaría General")
     role: Literal["ADMIN", "ASIGNADO"] = Field(..., example="ADMIN")
 
 
-# ============================================================================
-# PREPARE ASSIGNMENT MODELS
-# ============================================================================
-
 class PrepareAssignmentData(BaseModel):
-    """Datos para preparar asignación"""
     user_sectors_in_case: List[UserSectorInCase] = Field(default_factory=list)
     available_sectors: List[SectorInfo] = Field(default_factory=list)
     total: int = Field(..., example=2)
@@ -63,26 +43,19 @@ class PrepareAssignmentData(BaseModel):
 
 
 class PrepareAssignmentResponse(BaseModel):
-    """Respuesta de preparar asignación"""
     success: bool = Field(True, example=True)
     data: PrepareAssignmentData = Field(default=None)
     status: str = Field(default=None, example="NOT_ALLOWED")
     message: str = Field(..., example="Tienes acceso a 2 sector(es) en este expediente")
 
 
-# ============================================================================
-# PREPARE TRANSFER MODELS
-# ============================================================================
-
 class PrepareTransferData(BaseModel):
-    """Datos para preparar transferencia"""
     admin_sector: SectorInfo
     available_sectors: List[SectorInfo] = Field(default_factory=list)
     total_available_sectors: int = Field(..., example=10)
 
 
 class PrepareTransferResponse(BaseModel):
-    """Respuesta de preparar transferencia"""
     success: bool = Field(True, example=True)
     data: PrepareTransferData = Field(default=None)
     status: str = Field(default=None, example="NOT_ALLOWED")
@@ -114,7 +87,6 @@ async def prepare_assignment(
 
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # 1. Obtener sectores del usuario donde puede EDITAR (principal + permissions con can_edit=true)
         user_sectors_query = """
             -- Sector principal (siempre puede editar)
             SELECT s.id as sector_id
@@ -134,10 +106,7 @@ async def prepare_assignment(
         user_sectors_result = await fetch_all(user_sectors_query, db_user_id, db_user_id, schema_name=schema_name)
         user_sector_ids = [str(row['sector_id']) for row in user_sectors_result if row['sector_id']]
 
-        # Continuar para obtener available_sectors aunque user_sector_ids esté vacío
-        # El frontend necesita ver las opciones disponibles
 
-        # 2. Obtener admin_sector del expediente (último movimiento cerrado creation/transfer)
         admin_sector_query = """
             SELECT
                 s.id as sector_id,
@@ -160,7 +129,6 @@ async def prepare_assignment(
             admin_sector_id = str(admin_sector_result[0]['sector_id'])
             admin_sector_data = admin_sector_result[0]
 
-        # 3. Obtener assigned_sectors del expediente (movimientos activos)
         assigned_sectors_query = """
             SELECT DISTINCT
                 s.id as sector_id,
@@ -182,10 +150,8 @@ async def prepare_assignment(
             assigned_sector_ids.append(sector_id)
             assigned_sectors_data[sector_id] = row
 
-        # 4. Cruzar sectores: encontrar sectores del usuario que participan en el expediente
         user_sectors_in_case = []
 
-        # 4a. Verificar si el usuario tiene acceso al admin_sector
         if admin_sector_id and admin_sector_id in user_sector_ids:
             user_sectors_in_case.append({
                 "sector_id": admin_sector_id,
@@ -194,7 +160,6 @@ async def prepare_assignment(
                 "role": "ADMIN"
             })
 
-        # 4b. Verificar sectores asignados (excluyendo el admin_sector si ya se agregó)
         for sector_id in assigned_sector_ids:
             if sector_id in user_sector_ids and sector_id != admin_sector_id:
                 user_sectors_in_case.append({
@@ -204,7 +169,6 @@ async def prepare_assignment(
                     "role": "ASIGNADO"
                 })
 
-        # 5. Verificar si el usuario tiene algún sector en el expediente
         if not user_sectors_in_case:
             logger.warning(f"User {db_user_id} has no permission on case {case_id}")
             return PrepareAssignmentResponse(
@@ -213,12 +177,8 @@ async def prepare_assignment(
                 message=PREPARE_ASSIGNMENT_NO_PERMISSION
             )
 
-        # 6. Ordenar: ADMIN primero, luego ASIGNADOS
         user_sectors_in_case.sort(key=lambda x: (x['role'] != 'ADMIN', x['acronym']))
 
-        # 7. Obtener todos los sectores activos del mismo municipio
-        # En multi-tenant, el schema actual YA filtra por municipio
-        # No necesitamos filtro adicional por municipality_id
         available_sectors_query = """
             SELECT DISTINCT
                 s.id as sector_id,
@@ -243,7 +203,6 @@ async def prepare_assignment(
                 for row in available_sectors_result
             ]
 
-        # Verificar si hay sectores disponibles
         if len(available_sectors) == 0:
             logger.warning(f"No available sectors in municipality for case {case_id}")
             return PrepareAssignmentResponse(
@@ -292,7 +251,6 @@ async def prepare_transfer(
 
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # 1. Obtener sectores del usuario donde puede EDITAR (principal + permissions con can_edit=true)
         user_sectors_query = """
             -- Sector principal (siempre puede editar)
             SELECT s.id as sector_id
@@ -312,10 +270,7 @@ async def prepare_transfer(
         user_sectors_result = await fetch_all(user_sectors_query, db_user_id, db_user_id, schema_name=schema_name)
         user_sector_ids = [str(row['sector_id']) for row in user_sectors_result if row['sector_id']]
 
-        # Continuar para obtener available_sectors aunque user_sector_ids esté vacío
-        # El frontend necesita ver las opciones disponibles
 
-        # 2. Obtener admin_sector del expediente (último movimiento cerrado creation/transfer)
         admin_sector_query = """
             SELECT
                 s.id as sector_id,
@@ -339,7 +294,6 @@ async def prepare_transfer(
         admin_sector_id = str(admin_sector_result[0]['sector_id'])
         admin_sector_data = admin_sector_result[0]
 
-        # 3. Verificar si el usuario tiene acceso al admin_sector (SOLO ADMIN puede transferir)
         if admin_sector_id not in user_sector_ids:
             logger.warning(f"User {db_user_id} is not admin of case {case_id}")
             return PrepareTransferResponse(
@@ -348,16 +302,12 @@ async def prepare_transfer(
                 message=PREPARE_TRANSFER_NOT_ADMIN
             )
 
-        # 4. Construir admin_sector para retornar
         admin_sector = {
             "sector_id": admin_sector_id,
             "acronym": admin_sector_data['sector_acronym'],
             "department": admin_sector_data['department_name']
         }
 
-        # 5. Obtener todos los sectores activos del mismo municipio
-        # En multi-tenant, el schema actual YA filtra por municipio
-        # No necesitamos filtro adicional por municipality_id
         available_sectors_query = """
             SELECT DISTINCT
                 s.id as sector_id,
@@ -382,7 +332,6 @@ async def prepare_transfer(
                 for row in available_sectors_result
             ]
 
-        # Verificar si hay sectores disponibles
         if len(available_sectors) == 0:
             logger.warning(f"No available sectors in municipality for case {case_id}")
             return PrepareTransferResponse(

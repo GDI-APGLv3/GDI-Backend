@@ -9,3 +9,11 @@ tests/
 .vscode/
 .idea/
 nul
+
+# Certificados de firma — NUNCA viajan en la imagen (GDI-240).
+# El municipio monta los suyos por volumen en CERTS_DIR.
+# El .gitignore ya los excluye de git; esto los excluye del contexto de build.
+certs/*.p12
+certs/*.pfx
+certs/*.pem
+certs/passwords.json

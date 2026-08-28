@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener CCOO enviadas (notas + memos unificadas).
-Combina notas enviadas desde los sectores del usuario y memos enviados por el usuario.
-"""
 
 from fastapi import APIRouter, Depends, Query
 from shared.logging import get_logger

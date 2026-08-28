@@ -1,13 +1,13 @@
 [lint]
 select = [
-    "ASYNC",   # detecta blocking calls en funciones async y patrones peligrosos async
-    "E",       # errores de estilo basicos (pycodestyle)
-    "F",       # errores logicos (pyflakes): variables no usadas, imports mal, etc.
+    "ASYNC",
+    "E",
+    "F",
 ]
 ignore = [
-    "E501",    # lineas largas (no es critico)
-    "E402",    # imports no al tope del archivo (hay casos validos en este proyecto)
+    "E501",
+    "E402",
 ]
 
 [lint.per-file-ignores]
-"tests/*" = ["ASYNC"]   # los tests manejan sus propios event loops
+"tests/*" = ["ASYNC"]

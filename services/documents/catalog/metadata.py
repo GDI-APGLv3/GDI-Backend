@@ -1,25 +1,9 @@
-"""
-Servicios para metadatos de documentos: estados, tipos e informacion general.
-Maneja la logica para obtener estados de visualizacion y tipos de documento.
-MIGRADO: Fase 6 asyncpg
-"""
 
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 from database import fetch_one
-from shared.exceptions import ValidationError
 
 
 async def get_document_basic_info(document_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Obtiene informacion basica de un documento.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con informacion basica o None si no existe
-    """
     query = """
         SELECT
             d.id,

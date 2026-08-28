@@ -1,7 +1,3 @@
-"""
-Endpoint para archivar/desarchivar un memo.
-A diferencia de NOTAS, no requiere sector_id (archiva por user_id).
-"""
 
 from uuid import UUID
 from fastapi import APIRouter, Depends, Path

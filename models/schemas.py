@@ -1,14 +1,9 @@
-"""
-Definiciones de modelos de Pydantic para validación y documentación de la API.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
-# Esquemas para Documentos
 class UserDocument(BaseModel):
-    """Modelo para representar un documento del usuario"""
     document_id: str = Field(..., description="UUID del documento")
     reference: str = Field(..., description="Asunto o referencia del documento")
     status: str = Field(..., description="Estado del documento (draft, sent_to_sign, signed, etc.)")
@@ -27,7 +22,6 @@ class UserDocument(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "examples": [
-                # Ejemplo 1: Documento en edición para el creador
                 {
                     "document_id": "550e8400-e29b-41d4-a716-446655440000",
                     "reference": "Solicitud de presupuesto para obras",
@@ -44,7 +38,6 @@ class UserDocument(BaseModel):
                     "usuario_ya_firmo": False,
                     "todos_firmantes_comunes_firmaron": False
                 },
-                # Ejemplo 2: Documento pendiente de firma para un firmante
                 {
                     "document_id": "550e8400-e29b-41d4-a716-446655440111",
                     "reference": "Aprobación de presupuesto municipal",
@@ -66,13 +59,11 @@ class UserDocument(BaseModel):
     )
 
 class DocumentDisplayState(BaseModel):
-    """Modelo para representar un estado visual de documento"""
     display_state_code: str = Field(..., description="Código único del estado visual")
     display_state_name: str = Field(..., description="Nombre para mostrar del estado visual")
     description: Optional[str] = Field(None, description="Descripción del estado visual")
 
 class DocumentStatesResponse(BaseModel):
-    """Respuesta para la lista de estados de documentos"""
     states: List[DocumentDisplayState] = Field(..., description="Lista de estados visuales disponibles")
     
     model_config = ConfigDict(
@@ -105,7 +96,6 @@ class DocumentStatesResponse(BaseModel):
     )
 
 class UserDocumentsResponse(BaseModel):
-    """Respuesta para la lista de documentos del usuario"""
     total: int = Field(..., description="Total de documentos encontrados")
     page: int = Field(..., description="Número de página actual")
     page_size: int = Field(..., description="Número de documentos por página")
@@ -158,12 +148,6 @@ class UserDocumentsResponse(BaseModel):
     )
 
 class DocumentType(BaseModel):
-    """
-    Modelo para representar un tipo de documento en el sistema.
-    
-    Cada tipo de documento tiene un nombre completo (name) y un código abreviado (acronym)
-    que se utiliza para identificarlo de forma rápida en la interfaz y en los documentos oficiales.
-    """
     id: int = Field(
         ..., 
         description="ID numérico del tipo de documento",
@@ -189,29 +173,6 @@ class DocumentType(BaseModel):
     }
     
 class DocumentTypesResponse(BaseModel):
-    """
-    Respuesta para el endpoint /document-types.
-    
-    Contiene una lista de todos los tipos de documentos configurados en el sistema.
-    Estos tipos de documentos son utilizados para categorizar los documentos
-    al momento de su creación y para filtrar las búsquedas.
-    
-    Ejemplo de respuesta:
-    ```json
-    {
-      "document_types": [
-        {
-          "name": "Informe Final",
-          "acronym": "IF"
-        },
-        {
-          "name": "Memorándum",
-          "acronym": "ME"
-        }
-      ]
-    }
-    ```
-    """
     document_types: List[DocumentType] = Field(
         ..., 
         description="Lista de tipos de documentos disponibles en el sistema con nombre y acrónimo",
@@ -253,7 +214,6 @@ class DocumentTypesResponse(BaseModel):
     )
 
 class CreateDocumentRequest(BaseModel):
-    """Modelo para solicitud de creación de documento"""
     document_type_acronym: str = Field(..., description="Acrónimo del tipo de documento (IF, ME, OF, etc.)")
     reference: str = Field(..., min_length=1, max_length=250, description="Asunto o referencia del documento (máximo 250 caracteres)")
     
@@ -267,7 +227,6 @@ class CreateDocumentRequest(BaseModel):
     )
 
 class CreateDocumentResponse(BaseModel):
-    """Respuesta a la creación de un documento"""
     document_id: str = Field(..., description="UUID del documento creado")
     status: str = Field(..., description="Estado del documento creado (draft)")
     message: str = Field(..., description="Mensaje descriptivo del resultado de la operación")
@@ -282,9 +241,7 @@ class CreateDocumentResponse(BaseModel):
         }
     )
 
-# Esquemas para Usuarios
 class User(BaseModel):
-    """Modelo para representar un usuario completo"""
     user_id: str = Field(..., description="UUID del usuario")
     auth_id: Optional[str] = Field(None, description="ID de Auth0 del usuario")
     full_name: str = Field(..., description="Nombre completo del usuario")
@@ -328,58 +285,7 @@ class User(BaseModel):
         }
     )
 
-class CreateUserRequest(BaseModel):
-    """Modelo para solicitud de creación de usuario"""
-    auth_id: str = Field(..., description="ID de Auth0 del usuario")
-    full_name: str = Field(..., min_length=1, max_length=255, description="Nombre completo del usuario")
-    email: str = Field(..., description="Email del usuario")
-    country_id: Optional[str] = Field(None, description="Identificador nacional del usuario (CountryID en BD). En Argentina es el CUIT; en otros países es el equivalente.")
-    profile_picture_url: Optional[str] = Field(None, description="URL de la foto de perfil")
-    sector_id: Optional[str] = Field(None, description="UUID del sector")
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "auth_id": "auth0|64a1b2c3d4e5f67890abcdef",
-                "full_name": "Juan Pérez González",
-                "email": "juan.perez@municipalidad.cl",
-                "country_id": "20-12345678-9",
-                "profile_picture_url": "https://s.gravatar.com/avatar/123abc.jpg",
-                "sector_id": "770e8400-e29b-41d4-a716-446655440222"
-            }
-        }
-    )
-
-class CreateUserResponse(BaseModel):
-    """Respuesta a la creación de un usuario"""
-    user_id: str = Field(..., description="UUID del usuario creado")
-    message: str = Field(..., description="Mensaje descriptivo del resultado")
-    user: User = Field(..., description="Datos del usuario creado")
-    
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "user_id": "550e8400-e29b-41d4-a716-446655440000",
-                "message": "Usuario creado exitosamente",
-                "user": {
-                    "user_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "auth_id": "auth0|64a1b2c3d4e5f67890abcdef",
-                    "full_name": "Juan Pérez González",
-                    "email": "juan.perez@municipalidad.cl",
-                    "country_id": "20-12345678-9",
-                    "profile_picture_id": "660e8400-e29b-41d4-a716-446655440111",
-                    "sector_id": "770e8400-e29b-41d4-a716-446655440222",
-                    "last_access": "2025-09-26T10:30:00",
-                    "created_at": "2025-09-26T10:30:00",
-                    "default_seal_id": None,
-                    "estado": 1
-                }
-            }
-        }
-    )
-
 class UpdateUserRequest(BaseModel):
-    """Modelo para actualización de perfil de usuario"""
     full_name: Optional[str] = Field(None, min_length=1, max_length=255, description="Nombre completo del usuario")
     country_id: Optional[str] = Field(None, description="Identificador nacional del usuario (CountryID en BD). En Argentina es el CUIT; en otros países es el equivalente.")
     profile_picture_url: Optional[str] = Field(None, description="URL de la foto de perfil")
@@ -396,7 +302,6 @@ class UpdateUserRequest(BaseModel):
     )
 
 class SectorPermission(BaseModel):
-    """Modelo para representar permisos de un sector"""
     sector_id: str = Field(..., description="UUID del sector")
     sector_acronym: str = Field(..., description="Acrónimo del sector (ej: SECOBRA, MESA)")
     department_id: str = Field(..., description="UUID del departamento")
@@ -423,7 +328,6 @@ class SectorPermission(BaseModel):
 
 
 class AuthenticatedUser(BaseModel):
-    """Modelo para usuario autenticado (incluye claims del JWT)"""
     user_id: str = Field(..., description="UUID del usuario")
     auth_id: str = Field(..., description="ID de Auth0 del usuario")
     full_name: str = Field(..., description="Nombre completo del usuario")
@@ -464,9 +368,7 @@ class AuthenticatedUser(BaseModel):
     )
 
 
-# Esquemas para Autocompletado de Documentos
 class AutocompleteDocumentItem(BaseModel):
-    """Modelo para un item de autocompletado de documento"""
     document_id: str = Field(..., description="UUID del documento")
     official_number: str = Field(..., description="Número oficial del documento")
     reference: str = Field(..., description="Referencia o asunto del documento")
@@ -483,7 +385,6 @@ class AutocompleteDocumentItem(BaseModel):
 
 
 class AutocompleteDocumentsResponse(BaseModel):
-    """Modelo de respuesta para autocompletado de documentos"""
     documents: List[AutocompleteDocumentItem] = Field(..., description="Lista de documentos encontrados")
     total: int = Field(..., description="Número total de documentos devueltos en esta página")
     query: str = Field(..., description="Texto de búsqueda proporcionado")

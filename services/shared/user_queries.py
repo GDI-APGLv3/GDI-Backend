@@ -1,22 +1,6 @@
-"""
-Queries SQL compartidas para permisos de usuario.
-Usadas por case_service y dashboard_service.
-"""
 
 
 def get_user_sectors_query() -> str:
-    """
-    Query para obtener todos los sectores donde el usuario puede VER (can_view=true).
-
-    - Sector principal: siempre incluido (users.sector_id)
-    - Sectores adicionales: solo si can_view=true en user_sector_permissions
-      (can_edit sin can_view explícito NO otorga visibilidad en listados)
-
-    IMPORTANTE: Requiere 2 parámetros ($1, $2) por el UNION.
-
-    Returns:
-        str: Query SQL que retorna sector_id
-    """
     return """
         -- Sector principal (siempre incluido si el sector está activo)
         SELECT u.sector_id as sector_id

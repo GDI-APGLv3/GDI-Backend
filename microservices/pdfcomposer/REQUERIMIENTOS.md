@@ -134,7 +134,7 @@ API_KEY=your-api-key-here
 
 ---
 
-**Repositorio**: https://github.com/GDI-APGLv3/GDI-Backend  
+**Repositorio**: https://github.com/GDI-AGPLv3/GDI-Backend  
 **Versión Actual**: 2.1.0  
 **Estado**: Producción Ready
 - El PDF incluye el logo, tipo de documento, referencia y texto proporcionados.

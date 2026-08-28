@@ -1,16 +1,3 @@
-"""
-Construcción de header de destinatarios para documentos NOTA.
-
-Al oficializar una NOTA, el contenido HTML debe incluir los destinatarios al inicio:
-
-PARA: DEPT#SECTOR, DEPT#SECTOR
-CC: DEPT#SECTOR
-----------------------------------------------
-[Contenido de la nota...]
-
-El header se inyecta SOLO al momento de firmar (oficializar), cuando los recipients son finales.
-BCC (CCO) NO se incluye en el header porque es oculto.
-"""
 
 from typing import Dict, Any, Optional
 from database import fetch_all
@@ -38,16 +25,6 @@ _HEADER_QUERY = """
 
 
 async def build_nota_header_html(document_id: str, *, schema_name: str) -> str:
-    """
-    Construye el header HTML con destinatarios para documentos NOTA.
-
-    Retorna HTML con formato:
-    <p style="margin: 2px 0; font-size: 13px;"><strong>PARA:</strong> DEPT#SECTOR</p>
-    <p style="margin: 2px 0; font-size: 13px;"><strong>CC:</strong> DEPT#SECTOR</p>
-    <hr style="border: 1px dashed #999; margin: 8px 0 15px 0;">
-
-    Nota: BCC/CCO NO se incluye (es oculto para recipients).
-    """
     rows = await fetch_all(_HEADER_QUERY, document_id, schema_name=schema_name)
 
     if not rows:
@@ -81,16 +58,6 @@ async def build_nota_header_html(document_id: str, *, schema_name: str) -> str:
 
 
 def inject_header_into_content(header: str, content: Optional[Dict | str]) -> Dict[str, Any]:
-    """
-    Inyecta el header al inicio del contenido HTML.
-
-    Args:
-        header: HTML del header de destinatarios.
-        content: Contenido original (dict con 'html' o string JSON).
-
-    Returns:
-        Dict con {'html': header + contenido_original}
-    """
     import json
 
     if not header:
@@ -119,12 +86,6 @@ def inject_header_into_content(header: str, content: Optional[Dict | str]) -> Di
 
 
 def remove_existing_header(content: dict | str) -> str:
-    """
-    Remueve header de destinatarios existente del contenido.
-
-    Detecta y remueve el patron PARA/CC/<hr dashed>.
-    Util para re-envio despues de rechazo.
-    """
     import re
 
     if isinstance(content, dict):

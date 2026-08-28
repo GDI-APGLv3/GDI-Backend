@@ -1,1 +1,0 @@
-# Endpoints para el sistema de expedientes

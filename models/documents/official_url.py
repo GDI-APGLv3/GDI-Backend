@@ -1,14 +1,9 @@
-"""
-Modelos Pydantic para obtención de URLs de documentos oficiales.
-Define los esquemas de response para URLs temporales de Cloudflare R2.
-"""
 
 from pydantic import BaseModel, Field
 from typing import Optional
 
 
 class OfficialDocumentUrlData(BaseModel):
-    """Datos de la URL del documento oficial."""
     pdf_url: str = Field(..., description="URL temporal de descarga del PDF (presigned R2, expira segun CF_R2_SIGN_EXPIRATION)")
     document_id: str = Field(..., description="UUID del documento")
     official_number: str = Field(..., description="Número oficial del documento")
@@ -16,7 +11,6 @@ class OfficialDocumentUrlData(BaseModel):
 
 
 class OfficialDocumentUrlResponse(BaseModel):
-    """Response para solicitud de URL de documento oficial."""
     success: bool = Field(True, description="Indica si la operación fue exitosa")
     data: OfficialDocumentUrlData = Field(..., description="Datos de la URL del documento")
     message: str = Field(..., description="Mensaje descriptivo de la operación")

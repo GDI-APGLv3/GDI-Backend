@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener memos recibidos por el usuario.
-A diferencia de NOTAS, no usa sector_ids sino user_id directo.
-"""
 
 from fastapi import APIRouter, Depends, Query
 from shared.logging import get_logger

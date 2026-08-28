@@ -1,9 +1,3 @@
-"""
-Endpoint para crear documentos importados (PDFs subidos).
-
-Permite a usuarios subir un PDF existente que será procesado
-por PDFComposer para agregar hoja de firmas.
-"""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
@@ -74,17 +68,13 @@ async def create_imported_document_endpoint(
             f"tipo '{document_type_acronym}' en schema '{schema_name}'"
         )
 
-        # Validar content-type
         if not pdf_file.content_type or pdf_file.content_type != 'application/pdf':
             raise HTTPException(
                 status_code=400,
                 detail=f"El archivo debe ser un PDF. Content-Type recibido: {pdf_file.content_type}"
             )
 
-        # Validar tamaño antes de procesar (10MB)
-        # FastAPI no lee el archivo completo hasta que se llama a .read()
-        # pero podemos hacer una validación preliminar del tamaño reportado
-        MAX_SIZE = 10 * 1024 * 1024  # 10MB
+        MAX_SIZE = 10 * 1024 * 1024
 
         result = await create_imported_document(
             user_id=current_user.user_id,

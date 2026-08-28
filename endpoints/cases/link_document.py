@@ -1,7 +1,3 @@
-"""
-Endpoint para vincular documentos oficiales a expedientes
-POST /cases/{case_id}/documents/link - Vincular documento oficial
-"""
 
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, Field
@@ -16,25 +12,14 @@ from config.constants import LINK_DOCUMENT_SUCCESS
 from shared.logging import get_logger
 logger = get_logger(__name__)
 
-# Inicializar router
 router = APIRouter(tags=["expedientes"])
 
 
-# ============================================================================
-# REQUEST MODELS
-# ============================================================================
-
 class LinkDocumentRequest(BaseModel):
-    """Modelo para solicitud de vinculación de documento"""
     official_document_id: str = Field(..., description="UUID del documento oficial a vincular", example="550e8400-e29b-41d4-a716-446655440000")
 
 
-# ============================================================================
-# RESPONSE MODELS
-# ============================================================================
-
 class LinkDocumentData(BaseModel):
-    """Datos del documento vinculado"""
     link_id: str = Field(..., example="link-123")
     case_id: str = Field(..., example="case-456")
     case_number: str = Field(..., example="EXP-2024-001-SMG")
@@ -47,15 +32,10 @@ class LinkDocumentData(BaseModel):
 
 
 class LinkDocumentResponse(BaseModel):
-    """Modelo para respuesta de vinculación de documento"""
     success: bool = Field(True, example=True)
     data: LinkDocumentData
     message: str = Field(..., example="Documento vinculado exitosamente al expediente")
 
-
-# ============================================================================
-# ENDPOINTS
-# ============================================================================
 
 @router.post("/{case_id}/documents/link", response_model=LinkDocumentResponse)
 async def link_document_to_case(
@@ -85,10 +65,8 @@ async def link_document_to_case(
     try:
         logger.info(f"Link document request: case={case_id}, doc={body.official_document_id}")
 
-        # Validar usuario autenticado y obtener sus datos
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # Obtener sector del usuario para la vinculación
         from database import fetch_all
         user_query = "SELECT sector_id, full_name FROM users WHERE id = $1"
         user_result = await fetch_all(user_query, db_user_id, schema_name=schema_name)
@@ -104,7 +82,6 @@ async def link_document_to_case(
 
         logger.info(f"User {db_user_id} ({user_full_name}) linking document to case {case_id}")
 
-        # Vincular documento usando el servicio
         try:
             link_result = await CaseService.link_official_document(
                 case_id=case_id,
@@ -118,7 +95,6 @@ async def link_document_to_case(
             logger.error(f"Service error: {type(service_error).__name__}: {str(service_error)}")
             raise
 
-        # Formatear order_number a 3 dígitos y linking_date a string
         formatted_order = f"{link_result['order_number']:03d}"
         linking_date_str = link_result['linking_date'].isoformat() if hasattr(link_result['linking_date'], 'isoformat') else str(link_result['linking_date'])
 

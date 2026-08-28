@@ -1,8 +1,8 @@
-# GDI - Guia Agente IA (v3.1)
+# GDI - Guia Agente IA (v3.2)
 
 Sistema de Gestion Documental para gobiernos LATAM. Expedientes, documentos oficiales, firma digital multi-firmante.
 
-Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
+**Documentacion oficial (publica): https://gdi-agplv3.github.io/GDI-Docs/** — ante CUALQUIER duda sobre un concepto, flujo, campo o error, consultala y verifica ahi. Es la fuente de verdad.
 
 ## Capacidades
 
@@ -19,9 +19,11 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 - **NOTA / MEMO**: Son tipos de documento. NOTA = comunicacion entre sectores. MEMO = comunicacion entre personas. Se crean con create_document.
 - **Legajo (RLM)**: Registro Legajo Multiproposito. Ficha estructurada por familia de registro.
 - **Sector**: Area del municipio (Legal, Hacienda, etc.)
+- **Visibilidad del documento**: cada documento es **interno** (default), **reservado** (acceso restringido) o **publico** (GDI-098). En search_documents/get_document aparece como `document_type_visibility`, `is_reserved`, `is_public`. No expongas contenido reservado a quien no corresponde.
+- **Campos controlados (FFCC / formularios)**: algunos tipos tienen `has_fields=true` (p.ej. formularios). La carga de esos campos por MCP **no esta soportada aun**; usa tipos sin campos o deriva a la app web.
 - **Multi-tenant**: Cada municipalidad es independiente. Si el usuario tiene varias, usar `tenant_id`
 
-## Tools (39) - Referencia rapida
+## Tools (42) - Referencia rapida
 
 ### Expedientes
 | Tool | Accion |
@@ -34,6 +36,9 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 | get_case_by_number | Buscar por numero exacto (EE-2026-...) |
 | prepare_assignment | Ver sectores disponibles antes de asignar |
 | assign_case | Asignar a sector (no transfiere propiedad) |
+| get_case_responsibles | Ver responsables (admin/adicionales) del expediente |
+| add_case_responsible | Agregar responsable ADMIN/ADDITIONAL. El `sector_id` debe ser el sector del responsable **con acceso a ese expediente** (obtenelo de prepare_assignment.user_sectors_in_case o get_user_info); un sector sin acceso da "Error de validacion" |
+| remove_case_responsible | Quitar responsable, soft delete (valida ver+editar) |
 
 ### Documentos
 | Tool | Accion |
@@ -44,8 +49,8 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 | get_pending_signatures | Docs esperando MI firma |
 | get_signature_details | Estado de cada firmante |
 | search_document_by_number | Buscar por numero oficial |
-| create_document | Crear borrador de cualquier tipo (INF, DICT, NOTA, MEMO...). Para NOTA/MEMO pasar recipients={to,cc,bcc} |
-| save_document | Guardar contenido + firmantes |
+| create_document | Crear borrador. El `document_type_acronym` debe existir: **verificalo SIEMPRE con get_document_types** (ojo: Informe = `IF`, Dictamen = `DICTA`). Para NOTA/MEMO pasar recipients={to,cc,bcc} |
+| save_document | Guardar contenido + firmantes. `signers=[{user_id, email, is_numerator}]`. Para firmarte a VOS mismo: `user_id`/`email` de get_user_info. Para otros firmantes: search_users |
 | start_signing | Enviar a firma (irreversible) |
 | reject_document | Rechazar con motivo |
 
@@ -90,6 +95,7 @@ Docs completos: https://gdi-apglv3.github.io/GDI-Docs/
 | get_document_types | Tipos habilitados (IF, DICTA, NOTA, MEMO...) |
 | get_document_states | Estados posibles |
 | get_case_templates | Templates de expedientes |
+| get_sectors | Sectores y departamentos |
 | get_user_info | Mi sector, roles, permisos |
 | list_my_tenants | Mis municipalidades |
 | search_users | Buscar por nombre/email (min 4 chars) |
@@ -111,7 +117,7 @@ Esta es la decision mas importante. Ante cualquier consulta de busqueda:
 - Cuando conoce el numero, nombre de empresa, persona o referencia exacta
 
 **"Buscar un documento por numero"** → `search_document_by_number`
-- Conoce el numero oficial: IF-2026-..., DICT-2026-..., etc.
+- Conoce el numero oficial: IF-2026-..., DICTA-2026-..., etc.
 
 **Regla de oro**: Si el usuario dice "busca", "encontra", "hay algo sobre", "documentos que hablen de" → `semantic_search`. Si dice "mis expedientes", "ver expedientes", "expedientes del sector" → `search_cases`.
 
@@ -125,9 +131,12 @@ Esta es la decision mas importante. Ante cualquier consulta de busqueda:
 
 **Investigar expediente especifico**: `search_cases(search="panaderia")` -> `get_case_history(case_id)` -> narrar con ai_summary
 
-**Crear y firmar documento**: `create_document(type, ref)` -> `save_document(id, content, signers)` -> `start_signing(id)`
+**Crear y enviar a firma**: `get_document_types()` (confirmar el acronimo real) -> `create_document(document_type_acronym, reference[, case_id])` (pasar `case_id` para vincularlo a un expediente) -> `save_document(id, content, signers=[{user_id, email, is_numerator:true}])` -> `start_signing(id)`.
+   - **De donde salen los signers**: para firmarte a VOS mismo, `user_id` y `email` los da `get_user_info`. Para otros firmantes, `search_users`.
+   - `start_signing` exige al menos un firmante y un numerador (`is_numerator:true`), y solo el **creador** del documento puede iniciarla.
 
 **Crear NOTA** (entre sectores): `get_document_types()` -> confirmar acronimo "NOTA" -> `create_document(document_type_acronym="NOTA", reference, recipients={to:[sector_uuid], cc:[], bcc:[]})` -> `save_document` -> `start_signing`
+   - Los **UUID de sectores** destino salen de `get_sectors()` (lista completa de sectores con su departamento), de `prepare_assignment(case_id).available_sectors` (usando cualquier expediente accesible) o de `get_user_info` (tus propios sectores).
 
 **Crear MEMO** (entre personas): `search_users()` para UUIDs -> `create_document(document_type_acronym="MEMO", reference, recipients={to:[user_uuid], cc:[], bcc:[]})` -> `save_document` -> `start_signing`
 
@@ -142,6 +151,7 @@ Esta es la decision mas importante. Ante cualquier consulta de busqueda:
 - Busqueda semantica solo sobre documentos oficiales (firmados)
 - get_document_content solo funciona con docs firmados (oficiales)
 - Si recibes "multi_tenant_selection_required", usar list_my_tenants
+- Ante un concepto, campo o error que no conozcas, consulta la documentacion oficial (link al inicio) antes de responder. No inventes comportamiento.
 
 ## Errores frecuentes
 
@@ -152,3 +162,4 @@ Esta es la decision mas importante. Ante cualquier consulta de busqueda:
 | Case/Document not found | Verificar UUID |
 | Access denied | Usuario sin permisos para ese recurso |
 | Not your turn to sign | Verificar con get_pending_signatures |
+| Error de validacion (add_case_responsible) | `sector_id` sin acceso al expediente — tomarlo de prepare_assignment.user_sectors_in_case o get_user_info |

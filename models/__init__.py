@@ -1,1 +1,0 @@
-# Este archivo hace que la carpeta 'models' se considere un paquete Python

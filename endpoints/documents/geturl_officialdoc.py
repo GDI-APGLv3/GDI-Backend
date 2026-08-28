@@ -1,12 +1,14 @@
-"""Endpoint para obtener URL de descarga de documentos oficiales."""
+import re
 from shared.logging import get_logger
-from fastapi import APIRouter, Path, Depends, Request
+from fastapi import APIRouter, Path, Depends, Request, Response
 from uuid import UUID
 from shared.exceptions import (
     AuthorizationError, DocumentNotFoundError, ValidationError, DocumentStateError,
     exception_to_http_exception
 )
-from services.documents.retrieval.official_url import get_official_document_url
+from services.documents.retrieval.official_url import (
+    get_official_document_url, get_official_document_bytes
+)
 from models.documents.official_url import OfficialDocumentUrlResponse
 from models.tags import Tags
 from auth import get_current_user
@@ -57,7 +59,6 @@ async def get_url_official_doc(
     try:
         from services.documents.permissions import can_user_view_document
         if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
-            from shared.exceptions import AuthorizationError
             raise AuthorizationError("No tiene permisos para ver este documento")
         result = await get_official_document_url(document_id, schema_name=schema_name)
 
@@ -86,6 +87,79 @@ async def get_url_official_doc(
                 "document_id": document_id,
                 "user_id": request.state.tenant_user_id,
                 "error": str(e)
+            },
+            exc_info=True
+        )
+        raise exception_to_http_exception(e)
+
+
+@router.get(
+    "/documents/{document_id}/stream_officialdoc",
+    summary="Servir PDF oficial firmado via proxy autenticado",
+    description="""Devuelve el PDF oficial firmado como binario (application/pdf inline),
+    descargado desde Cloudflare R2 del lado del servidor.
+
+    A diferencia de `geturl_officialdoc` (que entrega una URL firmada de R2 que el
+    browser abre directo), este endpoint sirve el contenido a traves del backend.
+    Asi la URL de Cloudflare nunca queda expuesta al cliente: pensado para abrir el
+    PDF en una pestana nueva en mobile sin filtrar el link presignado.
+
+    **Requisitos:**
+    - Documento en estado 'signed' (firmado y numerado)
+    - Usuario autenticado con permiso de ver el documento
+    """,
+    responses={
+        200: {"content": {"application/pdf": {}}, "description": "PDF servido inline"},
+        403: {"description": "Sin permisos para ver el documento"},
+        404: {"description": "Documento no encontrado"},
+    },
+)
+async def stream_official_doc(
+    request: Request,
+    document_id: UUID = Path(..., description="UUID del documento"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    schema_name: str = Depends(get_tenant_schema)
+) -> Response:
+    """Sirve el PDF oficial firmado via proxy, validando permisos."""
+    document_id = str(document_id)
+    logger.info(
+        "Sirviendo PDF oficial via proxy",
+        extra={
+            "operation": "stream_official_doc",
+            "document_id": document_id,
+            "user_id": request.state.tenant_user_id,
+        }
+    )
+
+    try:
+        from services.documents.permissions import can_user_view_document
+        if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
+            raise AuthorizationError("No tiene permisos para ver este documento")
+
+        result = await get_official_document_bytes(document_id, schema_name=schema_name)
+        pdf_bytes = result["pdf_bytes"]
+        official_number = result["official_number"]
+        filename = official_number if official_number.lower().endswith(".pdf") else f"{official_number}.pdf"
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
+
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Content-Length": str(len(pdf_bytes)),
+                "Cache-Control": "private, no-store",
+            },
+        )
+
+    except (DocumentNotFoundError, ValidationError, DocumentStateError, AuthorizationError) as e:
+        logger.error(
+            "Error sirviendo PDF oficial via proxy",
+            extra={
+                "operation": "stream_official_doc_error",
+                "document_id": document_id,
+                "user_id": request.state.tenant_user_id,
+                "error": str(e),
             },
             exc_info=True
         )

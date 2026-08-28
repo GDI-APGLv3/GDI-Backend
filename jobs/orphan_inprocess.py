@@ -1,34 +1,16 @@
-"""
-Cron job: reclaim_expired_pending_sessions
-
-Recupera PDFs huerfanos en tosign/inprocess/ cuya sesion de firma
-ya expiro en digital_signature_sessions. Se ejecuta cada 5 minutos
-via APScheduler (AsyncIOScheduler) arrancado en main.py startup.
-
-Por cada sesion expirada:
-  1. Mueve PDF de inprocess/ → tosign/ (release_signing_lock_R2_fail)
-  2. Marca sesion como expired en BD (UPDATE)
-  3. Inserta evento en public.firma_audit_log (soft-fail)
-"""
-import logging
+from shared.logging import get_logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 ORPHAN_INTERVAL_SECONDS = 300
 
 
 async def _reclaim_async() -> None:
-    """
-    Consulta digital_signature_sessions y recupera huerfanos.
-    """
     from database import fetch_one, fetch_all, execute
     from services.documents.signing.r2_lock import reclaim_orphan_inprocess
     from services.documents.signing.audit_logger import log_signature_event
 
-    # Check explícito de existencia de tabla antes del query principal.
-    # digital_signature_sessions solo existe desde Fase 2 — en Fase 1 la tabla
-    # no existe todavía y el cron no debe tirar UndefinedTable cada 5 minutos.
     exists = await fetch_one(
         "SELECT 1 FROM information_schema.tables "
         "WHERE table_schema = 'public' AND table_name = 'digital_signature_sessions'",
@@ -62,7 +44,6 @@ async def _reclaim_async() -> None:
         doc_id = str(row["document_id"])
         user_id = str(row["user_id"])
 
-        # Paso 1: liberar lock R2 (mueve PDF inprocess/ → tosign/) — soft-fail
         try:
             await reclaim_orphan_inprocess(
                 schema_name=schema_name,
@@ -75,15 +56,16 @@ async def _reclaim_async() -> None:
                 extra={"session_id": session_id, "doc_id": doc_id},
             )
 
-        # Paso 2: marcar sesion como expired en BD — soft-fail
+        marcada = None
         try:
-            await execute(
+            marcada = await fetch_one(
                 """
                 UPDATE public.digital_signature_sessions
                    SET status = 'expired',
                        updated_at = NOW()
                  WHERE session_id = $1
                    AND status = 'pending'
+                RETURNING session_id
                 """,
                 row["session_id"],
                 schema_name="public",
@@ -94,7 +76,14 @@ async def _reclaim_async() -> None:
                 extra={"session_id": session_id},
             )
 
-        # Paso 3: audit log — soft-fail (log_signature_event ya maneja sus propios errores)
+        if marcada is None:
+            log.info(
+                "orphan_reclaim.ya_cerrada_por_otro session=%s — sin fila de "
+                "auditoria: la escribe quien la cerró",
+                session_id[:8],
+            )
+            continue
+
         try:
             await log_signature_event(
                 schema_name=schema_name,
@@ -120,15 +109,20 @@ async def _reclaim_async() -> None:
 
 
 async def reclaim_expired_pending_sessions() -> None:
-    """Wrapper async: ejecuta la lógica de recuperación de huerfanos."""
+    from shared.advisory_lock import global_job_lock, LOCK_ID_ORPHAN_INPROCESS
+
     try:
-        await _reclaim_async()
+        async with global_job_lock(
+            LOCK_ID_ORPHAN_INPROCESS, "orphan_reclaim"
+        ) as got_lock:
+            if not got_lock:
+                return
+            await _reclaim_async()
     except Exception:
         log.exception("orphan_reclaim.error")
 
 
 def schedule_orphan_reclaim(scheduler: AsyncIOScheduler) -> None:
-    """Registra el job en el scheduler. Llamar antes de scheduler.start()."""
     scheduler.add_job(
         reclaim_expired_pending_sessions,
         "interval",

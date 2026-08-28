@@ -1,7 +1,3 @@
-"""
-Servicio de historial para el módulo RLM.
-Registra todos los cambios en record_history.
-"""
 
 from typing import Any, Optional
 from shared.logging import get_logger
@@ -26,19 +22,6 @@ async def record_action(
     *,
     schema_name: str
 ) -> None:
-    """
-    Registra una acción en el historial de un legajo.
-
-    Args:
-        record_id: UUID del legajo
-        action: Tipo de acción (created, state_changed, field_updated, field_verified, etc.)
-        user_id: UUID del usuario
-        sector_id: UUID del sector del usuario
-        field_name: Nombre del campo afectado (opcional)
-        before_value: Valor anterior (serializable a JSON)
-        after_value: Valor posterior (serializable a JSON)
-        schema_name: Schema del tenant
-    """
     try:
         await execute(
             insert_history_query(),
@@ -55,7 +38,6 @@ async def record_action(
         logger.debug(f"History recorded: {action} on record {record_id[:8]} by user {user_id[:8]}")
 
     except Exception as e:
-        # No propagar errores de historial para no bloquear operaciones principales
         logger.error(f"Error recording history: {e}")
 
 
@@ -67,27 +49,9 @@ async def get_history(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
-    """
-    Obtiene el historial de cambios de un legajo.
-
-    Args:
-        record_id: UUID del legajo
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-        page: Página actual
-        page_size: Items por página
-
-    Returns:
-        Dict con historial paginado
-
-    Raises:
-        NotFoundError: Si el legajo no existe
-        AuthorizationError: Si no tiene permiso can_view
-    """
     from services.rlm.permissions import verify_record_view_permission
     await verify_record_view_permission(record_id, user_id, schema_name=schema_name)
 
-    # Count
     count_result = await fetch_one(
         get_record_history_count_query(),
         record_id,
@@ -95,7 +59,6 @@ async def get_history(
     )
     total = count_result["total"] if count_result else 0
 
-    # List
     offset = (page - 1) * page_size
     results = await fetch_all(
         get_record_history_query(),

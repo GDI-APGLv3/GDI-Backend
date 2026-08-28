@@ -1,24 +1,22 @@
-"""
-Provider FirmadorGDI — firma digital con token físico PKCS#11.
-
-Reemplaza AutoFirmaProvider. Protocolo @firma 1.9 idéntico, solo difieren:
-- URI scheme: gdifirma:// (en vez de afirma://)
-- keystore: PKCS11 (en vez de WINDOWS)
-- provider_name: "firmador_gdi"
-"""
 import base64
+import hashlib
 import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
+from fastapi.concurrency import run_in_threadpool
+
 from services.cache import redis_client
 from database import execute
+from shared.logging import get_logger
+
+log = get_logger(__name__)
 
 _DEFAULT_STORAGE_URL = "https://<your-backend-app>.fly.dev/digital-signature/storage"
 STORAGE_BASE_URL = os.getenv("AUTOFIRMA_STORAGE_URL", _DEFAULT_STORAGE_URL)
-TTL_SECONDS = 240
+from config.constants import DIGITAL_SIGNATURE_SESSION_TTL_SECONDS as TTL_SECONDS
 
 
 class FirmadorGDIProvider:
@@ -40,12 +38,12 @@ class FirmadorGDIProvider:
         sig_lly: float = 30.0,
         sig_urx: float = 250.0,
         sig_ury: float = 110.0,
+        reservation_id: str | None = None,
+        batch_id: str | None = None,
     ) -> dict:
-        # 1. IDs alfanuméricos (requisito protocolo @firma)
-        file_id = "DATA" + secrets.token_hex(6).upper()
-        session_id = "SES" + secrets.token_hex(6).upper()
+        file_id = "DATA" + secrets.token_hex(16).upper()
+        session_id = "SES" + secrets.token_hex(16).upper()
 
-        # 2. Datos del firmante para el sello visual (mismos que firma electrónica)
         from services.shared.signer_data import get_signer_data
         try:
             signer = await get_signer_data(user_id, schema_name=schema_name)
@@ -57,9 +55,6 @@ class FirmadorGDIProvider:
             department = ""
             municipality = ""
 
-        # Firma digital: el nombre lo pone el CN del certificado del token (titular real),
-        # NO el full_name del sistema. FirmadorGDI reemplaza $$SUBJECTCN$$ por el CN del cert.
-        # seal/department/municipality sí salen del sistema.
         layer2_lines = ["$$SUBJECTCN$$"]
         if seal:
             layer2_lines.append(seal)
@@ -69,7 +64,6 @@ class FirmadorGDIProvider:
             layer2_lines.append(municipality)
         layer2_text = "\\n".join(layer2_lines)
 
-        # 3. Properties string (coordenadas calculadas por Notary)
         properties_str = (
             "signaturePage=last\n"
             f"signaturePositionOnPageLowerLeftX={int(sig_llx)}\n"
@@ -82,17 +76,13 @@ class FirmadorGDIProvider:
             "layer2Font=HELVETICA\n"
             "layer2FontSize=0"
         )
-        # BASE64 ANTES de URL-encode (crítico: si se URL-encode primero, firma queda invisible)
         properties_b64 = base64.b64encode(properties_str.encode("utf-8")).decode("ascii")
 
-        # 4. PDF en base64
         pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
 
-        # 5. URL-encode del storage_url para el XML
         storage_url_encoded = quote(STORAGE_BASE_URL, safe="")
         properties_b64_encoded = quote(properties_b64, safe="")
 
-        # 6. XML envoltorio (sin espacios entre elementos — protocolo @firma es sensible)
         xml = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             "<op>"
@@ -106,28 +96,36 @@ class FirmadorGDIProvider:
             "</op>"
         )
 
-        # 7. Guardar XML en Redis con TTL
         if redis_client:
-            redis_client.setex(
-                f"firma:storage:{schema_name}:{file_id}",
-                TTL_SECONDS,
-                xml,
-            )
-            redis_client.setex(
-                f"firma:storage:meta:{schema_name}:{session_id}",
-                TTL_SECONDS,
-                json.dumps({"file_id": file_id, "schema_name": schema_name}),
-            )
+            def _store_session_redis():
+                pipe = redis_client.pipeline()
+                pipe.setex(
+                    f"firma:storage:{schema_name}:{file_id}",
+                    TTL_SECONDS,
+                    xml,
+                )
+                pipe.setex(
+                    f"firma:storage:meta:{schema_name}:{session_id}",
+                    TTL_SECONDS,
+                    json.dumps({
+                        "file_id": file_id,
+                        "schema_name": schema_name,
+                        "unsigned_sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+                        "unsigned_len": len(pdf_bytes),
+                    }),
+                )
+                pipe.execute()
 
-        # 8. INSERT en digital_signature_sessions
+            await run_in_threadpool(_store_session_redis)
+
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=TTL_SECONDS)
         await execute(
             """
             INSERT INTO public.digital_signature_sessions (
                 session_id, file_id, schema_name, user_id, document_id,
                 is_numerator, number, provider_name, status, expires_at,
-                user_cuit, ip_address, user_agent
-            ) VALUES ($1, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, 'pending', $9, $10, $11::inet, $12)
+                user_cuit, ip_address, user_agent, reservation_id, batch_id
+            ) VALUES ($1, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, 'pending', $9, $10, $11::inet, $12, $13, $14::uuid)
             """,
             session_id,
             file_id,
@@ -141,10 +139,11 @@ class FirmadorGDIProvider:
             user_cuit,
             ip_address,
             user_agent,
+            reservation_id,
+            batch_id,
             schema_name="public",
         )
 
-        # 9. URI gdifirma:// (mismo protocolo @firma, distinto scheme y keystore)
         uri = (
             f"gdifirma://sign?ver=1_0"
             f"&fileid={file_id}"
@@ -163,7 +162,6 @@ class FirmadorGDIProvider:
         }
 
     def poll_signing(self, *, session_id: str, schema_name: str):
-        """Idéntico a AutoFirmaProvider — misma estructura de datos en Redis."""
         from . import (
             PollSigningPending, PollSigningSigned,
             PollSigningCancelled, PollSigningFailed,
@@ -209,15 +207,59 @@ class FirmadorGDIProvider:
                 error_message="blob invalido: no se encontro %PDF-",
             )
 
+        self._verificar_binding(session_id, schema_name, signed_pdf_bytes)
+
         return PollSigningSigned(
             signed_pdf_bytes=signed_pdf_bytes,
             cert_der=cert_der,
         )
 
+    @staticmethod
+    def _verificar_binding(session_id: str, schema_name: str, signed_pdf_bytes: bytes):
+        from shared.exceptions import ValidationError
+
+        try:
+            meta_raw = redis_client.get(f"firma:storage:meta:{schema_name}:{session_id}") if redis_client else None
+            if not meta_raw:
+                return
+            meta = json.loads(meta_raw if isinstance(meta_raw, str) else meta_raw.decode("utf-8"))
+            esperado = meta.get("unsigned_sha256")
+            largo = meta.get("unsigned_len")
+            if not esperado or not largo:
+                log.warning(
+                    "firma_binding SIN_REFERENCIA session=%s schema=%s — la meta "
+                    "de la sesión no tiene unsigned_sha256, no se puede verificar",
+                    session_id[:12], schema_name,
+                )
+                return
+
+            prefijo = signed_pdf_bytes[:largo]
+            real = hashlib.sha256(prefijo).hexdigest()
+            if real == esperado:
+                log.info("firma_binding OK session=%s", session_id[:12])
+                return
+
+            log.error(
+                "firma_binding MISMATCH session=%s schema=%s — el PDF firmado NO "
+                "coincide con el que se mandó a firmar (esperado=%s… recibido=%s…, "
+                "largo_original=%d, largo_firmado=%d). Puede ser un firmador que "
+                "reescribe el PDF en vez de firmar incremental, o una sustitución "
+                "del documento en el escritorio del firmante.",
+                session_id[:12], schema_name, esperado[:12], real[:12],
+                largo, len(signed_pdf_bytes),
+            )
+            raise ValidationError(
+                "El documento firmado no coincide con el que se envió a firmar. "
+                "Por seguridad no se completa la firma."
+            )
+        except ValidationError:
+            raise
+        except Exception as e:
+            log.warning("firma_binding no se pudo verificar session=%s: %s", session_id[:12], e)
+
     def cancel_signing(
         self, *, session_id: str, schema_name: str, file_id: str | None = None
     ) -> None:
-        """Elimina claves Redis asociadas a la sesión."""
         if not redis_client:
             return
         keys_to_delete = [

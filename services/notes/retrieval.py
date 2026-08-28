@@ -1,7 +1,3 @@
-"""
-Servicios para recuperar NOTAS.
-Consultas de bandeja de entrada (received) y enviados (sent).
-"""
 
 from typing import Dict, Any
 from shared.logging import get_logger
@@ -20,10 +16,6 @@ from .queries import (
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Helpers internos: construyen SQL completo con $N correctos segun offset
-# ---------------------------------------------------------------------------
 
 def _received_paginated_sql(date_where: str, limit_n: int, offset_n: int) -> str:
     return f"""
@@ -217,10 +209,6 @@ def _sent_search_count_sql(date_where: str) -> str:
     """
 
 
-# ---------------------------------------------------------------------------
-# Funciones públicas
-# ---------------------------------------------------------------------------
-
 async def get_sent_notes(
     sector_id: str,
     *,
@@ -228,7 +216,6 @@ async def get_sent_notes(
     page: int = 1,
     page_size: int = 20,
 ) -> Dict[str, Any]:
-    """Obtiene las notas enviadas por un sector (solo oficializadas)."""
     offset = (page - 1) * page_size
 
     total_row = await fetch_one(get_sent_notes_count_query(), sector_id, schema_name=schema_name)
@@ -265,13 +252,11 @@ async def get_received_notes(
     page_size: int = 20,
     unread_only: bool = False,
 ) -> Dict[str, Any]:
-    """Obtiene las notas recibidas por un sector (solo oficializadas)."""
     offset = (page - 1) * page_size
 
     total_row = await fetch_one(get_received_notes_count_query(), sector_id, schema_name=schema_name)
     total = total_row["total"] if total_row else 0
 
-    # sector_id pasa 3 veces: para $1, $2 (subconsultas read_status) y $3 (JOIN)
     notes_raw = await fetch_all(
         get_received_notes_query(),
         sector_id, sector_id, sector_id, page_size, offset,
@@ -316,7 +301,6 @@ async def get_received_notes_multi_sector(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> Dict[str, Any]:
-    """Obtiene las notas recibidas en CUALQUIERA de los sectores dados."""
     if not sector_ids:
         return {"notes": [], "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 1}}
 
@@ -325,7 +309,6 @@ async def get_received_notes_multi_sector(
     if search:
         search_pattern = f"%{escape_like(search)}%"
         search_term = search.strip().lower()
-        # $1=sector_ids, $2-$5=search params → date start at $6
         date_where, date_params = build_date_filter(date_filter, date_from, date_to, start=6)
         limit_n = 6 + len(date_params)
         offset_n = limit_n + 1
@@ -333,7 +316,6 @@ async def get_received_notes_multi_sector(
         total_row = await fetch_one(_received_search_count_sql(date_where), *base, schema_name=schema_name)
         notes_raw = await fetch_all(_received_search_paginated_sql(date_where, limit_n, offset_n), *base, page_size, offset, schema_name=schema_name)
     else:
-        # $1=sector_ids → date start at $2
         date_where, date_params = build_date_filter(date_filter, date_from, date_to, start=2)
         limit_n = 2 + len(date_params)
         offset_n = limit_n + 1
@@ -383,7 +365,6 @@ async def get_sent_notes_multi_sector(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> Dict[str, Any]:
-    """Obtiene las notas enviadas desde CUALQUIERA de los sectores dados."""
     if not sector_ids:
         return {"notes": [], "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 1}}
 
@@ -438,7 +419,6 @@ async def get_archived_notes_multi_sector(
     page_size: int = 20,
     search: str | None = None,
 ) -> Dict[str, Any]:
-    """Obtiene las notas ARCHIVADAS en CUALQUIERA de los sectores dados."""
     if not sector_ids:
         return {"notes": [], "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 1}}
 

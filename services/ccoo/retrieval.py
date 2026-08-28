@@ -1,7 +1,3 @@
-"""
-Servicios para recuperar CCOO (Comunicaciones Oficiales).
-Unifica notas y memos en consultas UNION ALL con paginacion server-side.
-"""
 
 from typing import Dict, Any
 from shared.logging import get_logger
@@ -26,7 +22,6 @@ logger = get_logger(__name__)
 
 
 def _format_received_item(row: dict) -> dict:
-    """Formatea un row de received/archived CCOO al formato de respuesta."""
     read_status = row['read_status'] or {}
     sender = row['sender'] or {}
 
@@ -52,7 +47,6 @@ def _format_received_item(row: dict) -> dict:
 
 
 def _format_sent_item(row: dict) -> dict:
-    """Formatea un row de sent CCOO al formato de respuesta."""
     return {
         'document_id': str(row['id']),
         'official_number': row['official_number'],
@@ -68,7 +62,6 @@ def _format_sent_item(row: dict) -> dict:
 
 
 def _calc_total_pages(total: int, page_size: int) -> int:
-    """Calcula total de paginas."""
     return (total + page_size - 1) // page_size if total > 0 else 1
 
 
@@ -84,23 +77,6 @@ async def get_received_ccoo(
     date_from: str | None = None,
     date_to: str | None = None
 ) -> Dict[str, Any]:
-    """
-    Obtiene las CCOO recibidas (notas + memos unificadas) con paginacion server-side.
-
-    Args:
-        sector_ids: Lista de UUIDs de sectores con can_view=true (para notas)
-        user_id: UUID del usuario (para memos)
-        schema_name: Schema del tenant
-        page: Numero de pagina (1-indexed)
-        page_size: Elementos por pagina
-        search: Termino de busqueda
-        date_filter: Filtro de fecha predefinido
-        date_from: Fecha desde (YYYY-MM-DD)
-        date_to: Fecha hasta (YYYY-MM-DD)
-
-    Returns:
-        Dict con {items: [...], pagination: {...}}
-    """
     if not sector_ids:
         sector_ids = []
 
@@ -111,7 +87,6 @@ async def get_received_ccoo(
             search_pattern = f"%{escape_like(search)}%"
             search_term = search.strip().lower()
 
-            # Count: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term) -> date params desde $5
             count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
             count_row = await conn.fetchrow(
                 get_received_ccoo_search_count_query(date_where=count_where),
@@ -119,14 +94,12 @@ async def get_received_ccoo(
             )
             total = count_row['total']
 
-            # Data: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset) -> date params desde $7
             data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=7)
             rows = await conn.fetch(
                 get_received_ccoo_search_query(date_where=data_where),
                 sector_ids, user_id, search_pattern, search_term, page_size, offset, *data_date_params
             )
         else:
-            # Count: ($1=sector_ids, $2=user_id) -> date params desde $3
             count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=3)
             count_row = await conn.fetchrow(
                 get_received_ccoo_count_query(date_where=count_where),
@@ -134,7 +107,6 @@ async def get_received_ccoo(
             )
             total = count_row['total']
 
-            # Data: ($1=sector_ids, $2=user_id, $3=limit, $4=offset) -> date params desde $5
             data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
             rows = await conn.fetch(
                 get_received_ccoo_query(date_where=data_where),
@@ -171,23 +143,6 @@ async def get_sent_ccoo(
     date_from: str | None = None,
     date_to: str | None = None
 ) -> Dict[str, Any]:
-    """
-    Obtiene las CCOO enviadas (notas + memos unificadas) con paginacion server-side.
-
-    Args:
-        sector_ids: Lista de UUIDs de sectores con can_view=true (para notas)
-        user_id: UUID del usuario (para memos)
-        schema_name: Schema del tenant
-        page: Numero de pagina (1-indexed)
-        page_size: Elementos por pagina
-        search: Termino de busqueda
-        date_filter: Filtro de fecha predefinido
-        date_from: Fecha desde (YYYY-MM-DD)
-        date_to: Fecha hasta (YYYY-MM-DD)
-
-    Returns:
-        Dict con {items: [...], pagination: {...}}
-    """
     if not sector_ids:
         sector_ids = []
 
@@ -198,7 +153,6 @@ async def get_sent_ccoo(
             search_pattern = f"%{escape_like(search)}%"
             search_term = search.strip().lower()
 
-            # Count: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term) -> date params desde $5
             count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
             count_row = await conn.fetchrow(
                 get_sent_ccoo_search_count_query(date_where=count_where),
@@ -206,14 +160,12 @@ async def get_sent_ccoo(
             )
             total = count_row['total']
 
-            # Data: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset) -> date params desde $7
             data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=7)
             rows = await conn.fetch(
                 get_sent_ccoo_search_query(date_where=data_where),
                 sector_ids, user_id, search_pattern, search_term, page_size, offset, *data_date_params
             )
         else:
-            # Count: ($1=sector_ids, $2=user_id) -> date params desde $3
             count_where, count_date_params = build_date_filter(date_filter, date_from, date_to, start=3)
             count_row = await conn.fetchrow(
                 get_sent_ccoo_count_query(date_where=count_where),
@@ -221,7 +173,6 @@ async def get_sent_ccoo(
             )
             total = count_row['total']
 
-            # Data: ($1=sector_ids, $2=user_id, $3=limit, $4=offset) -> date params desde $5
             data_where, data_date_params = build_date_filter(date_filter, date_from, date_to, start=5)
             rows = await conn.fetch(
                 get_sent_ccoo_query(date_where=data_where),
@@ -255,20 +206,6 @@ async def get_archived_ccoo(
     page_size: int = 20,
     search: str | None = None
 ) -> Dict[str, Any]:
-    """
-    Obtiene las CCOO archivadas (notas + memos unificadas) con paginacion server-side.
-
-    Args:
-        sector_ids: Lista de UUIDs de sectores con can_view=true (para notas)
-        user_id: UUID del usuario (para memos)
-        schema_name: Schema del tenant
-        page: Numero de pagina (1-indexed)
-        page_size: Elementos por pagina
-        search: Termino de busqueda
-
-    Returns:
-        Dict con {items: [...], pagination: {...}}
-    """
     if not sector_ids:
         sector_ids = []
 
@@ -279,27 +216,23 @@ async def get_archived_ccoo(
             search_pattern = f"%{escape_like(search)}%"
             search_term = search.strip().lower()
 
-            # Count: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term)
             count_row = await conn.fetchrow(
                 get_archived_ccoo_search_count_query(),
                 sector_ids, user_id, search_pattern, search_term
             )
             total = count_row['total']
 
-            # Data: ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
             rows = await conn.fetch(
                 get_archived_ccoo_search_query(),
                 sector_ids, user_id, search_pattern, search_term, page_size, offset
             )
         else:
-            # Count: ($1=sector_ids, $2=user_id)
             count_row = await conn.fetchrow(
                 get_archived_ccoo_count_query(),
                 sector_ids, user_id
             )
             total = count_row['total']
 
-            # Data: ($1=sector_ids, $2=user_id, $3=limit, $4=offset)
             rows = await conn.fetch(
                 get_archived_ccoo_query(),
                 sector_ids, user_id, page_size, offset

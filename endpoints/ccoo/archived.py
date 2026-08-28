@@ -1,6 +1,3 @@
-"""
-Endpoint para obtener CCOO archivadas (notas + memos unificadas).
-"""
 
 from fastapi import APIRouter, Depends, Query
 from shared.logging import get_logger

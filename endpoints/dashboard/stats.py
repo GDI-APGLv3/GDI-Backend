@@ -1,4 +1,3 @@
-"""Endpoint para obtener estadísticas del Dashboard."""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, Request
@@ -31,14 +30,12 @@ async def get_stats(
     Otros KPIs (documentos pendientes, etc.) se agregarán en futuras versiones.
     """
     try:
-        # Validar usuario autenticado
         tenant_user_id = getattr(request.state, 'tenant_user_id', None)
         if not tenant_user_id:
             raise ValidationError(USER_UNAUTHENTICATED_ERROR)
 
         logger.info(f"Getting stats - User: {tenant_user_id[:8]}")
 
-        # Obtener usuario validado
         db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
         result = await DashboardService.get_stats(

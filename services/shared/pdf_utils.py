@@ -1,7 +1,3 @@
-"""
-Utilidades para manipulación de PDFs.
-Maneja operaciones comunes de PDFs como agregar páginas para firma.
-"""
 
 import io
 import os
@@ -14,18 +10,6 @@ SIGN_PAGE_PATH = os.path.join(os.path.dirname(__file__), "assets", "SignPage.pdf
 
 
 def add_blank_page_to_pdf(pdf_bytes: bytes) -> bytes:
-    """
-    Agrega una página de firma (SignPage.pdf) al final de un PDF.
-
-    La página contiene el marcador "end-text" que Notary necesita
-    para ubicar dónde colocar la firma.
-
-    Args:
-        pdf_bytes: Contenido binario del PDF original
-
-    Returns:
-        bytes: PDF con página de firma agregada al final
-    """
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         num_pages = len(reader.pages)

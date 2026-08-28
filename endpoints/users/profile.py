@@ -1,14 +1,10 @@
-"""
-Endpoint para obtener y actualizar el perfil del usuario autenticado.
-"""
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, Depends, Request
 from models import schemas
 from services.users import profile as profile_service
 from auth import get_current_user
 from models.tags import Tags
 from typing import Dict, Any
-from config.constants import PROFILE_USER_NOT_FOUND_ERROR, PROFILE_GET_ERROR
-from shared.exceptions import UserNotFoundError, ExternalServiceError, exception_to_http_exception, GDIBaseException
+from shared.exceptions import ExternalServiceError, exception_to_http_exception, GDIBaseException
 from shared.dependencies import get_tenant_schema
 from shared.logging import get_logger
 router = APIRouter(tags=[Tags.USERS])
@@ -16,22 +12,11 @@ logger = get_logger(__name__)
 
 
 def _format_user_response(user_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convierte timestamps y UUIDs a string para la respuesta HTTP.
-    
-    Args:
-        user_data: Diccionario con datos del usuario desde BD
-        
-    Returns:
-        Diccionario con campos formateados para JSON
-    """
-    # Convertir timestamps a string ISO format
     if user_data.get("last_access"):
         user_data["last_access"] = user_data["last_access"].isoformat()
     if user_data.get("created_at"):
         user_data["created_at"] = user_data["created_at"].isoformat()
 
-    # Convertir UUIDs a string
     user_data["user_id"] = str(user_data["user_id"])
     if user_data.get("sector_id"):
         user_data["sector_id"] = str(user_data["sector_id"])
@@ -99,13 +84,11 @@ async def get_user_profile(request: Request, current_user: schemas.Authenticated
     try:
         logger.info(f"Obteniendo perfil para user_id {request.state.tenant_user_id} en schema {schema_name}")
 
-        # Obtener datos completos del usuario desde la base de datos
         user_data = await profile_service.get_user_profile(
             request.state.tenant_user_id,
             schema_name=schema_name
         )
 
-        # Formatear respuesta (timestamps y UUIDs)
         formatted_user = _format_user_response(user_data)
 
         logger.info(f"Perfil obtenido exitosamente para {request.state.tenant_user_id}")
@@ -190,7 +173,6 @@ async def update_user_profile(
     try:
         logger.info(f"Actualizando perfil para user_id {request.state.tenant_user_id} en schema {schema_name}")
 
-        # Llamar al servicio para actualizar el perfil
         updated_user = await profile_service.update_user_profile(
             user_id=request.state.tenant_user_id,
             full_name=body.full_name,
@@ -200,7 +182,6 @@ async def update_user_profile(
             schema_name=schema_name
         )
 
-        # Formatear respuesta (timestamps y UUIDs)
         formatted_user = _format_user_response(updated_user)
 
         logger.info(f"Perfil actualizado exitosamente para {request.state.tenant_user_id}")

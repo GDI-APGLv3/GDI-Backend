@@ -1,18 +1,9 @@
-"""Queries para operaciones de expedientes/casos."""
 
 from shared.logging import get_logger
 
 logger = get_logger(__name__)
 
 def get_department_and_municipality_query() -> str:
-    """Query para obtener información de departamento y municipio.
-
-    En arquitectura multi-tenant:
-    - departments está en el schema del tenant
-    - municipalities está en public y se identifica por schema_name
-
-    Parámetros esperados: (department_id, schema_name)
-    """
     return """
         SELECT d.acronym as dept_acronym, d.name as dept_name,
                m.acronym as municipality_acronym, m.name as municipality_name
@@ -21,11 +12,9 @@ def get_department_and_municipality_query() -> str:
     """
 
 def get_advisory_lock_query() -> str:
-    """Query para adquirir lock transaccional para numeración."""
-    return "SELECT pg_advisory_xact_lock(999999)"
+    return "SELECT pg_advisory_xact_lock(999999, hashtext($1))"
 
 def get_next_case_sequence_query() -> str:
-    """Query para obtener siguiente número secuencial de caso."""
     return """
         SELECT COALESCE(MAX(
             CAST(SUBSTRING(case_number FROM '\\d{4}-(\\d+)-') AS INTEGER)
@@ -34,40 +23,8 @@ def get_next_case_sequence_query() -> str:
         WHERE EXTRACT(YEAR FROM created_at) = $1
     """
 
-def insert_new_case_query() -> str:
-    """Query para insertar nuevo caso."""
-    return """
-        INSERT INTO cases (
-            case_template_id, case_number, reference, created_by_user_id,
-            filing_department_id, creator_sector_id, owner_sector_id, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, case_number, created_at
-    """
 
-def check_case_movement_exists_query() -> str:
-    """Query para verificar si existe un movimiento de caso específico."""
-    return """
-        SELECT 1 FROM case_movements cm
-        WHERE cm.case_id = $1 AND cm.movement_type = $2
-        AND cm.origin_sector_id = $3 AND cm.destination_sector_id = $4
-        LIMIT 1
-    """
-
-def get_max_case_movement_date_query() -> str:
-    """Query para obtener fecha máxima de movimiento de caso."""
-    return """
-        SELECT MAX(cm2.closed_at)
-        FROM case_movements cm2
-        WHERE cm2.case_id = $1 AND cm2.closed_at IS NOT NULL
-    """
-
-
-# =============================================================================
-# FUNCIONES DE CONSULTA INDIVIDUAL
-# =============================================================================
-
-async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
-    """Obtener detalles completos de un expediente."""
+async def get_case_detail(case_id: str, user_id: str, *, schema_name: str, conn=None):
     from services.case_queries import (
         get_case_basic_info_query,
         get_user_sectors_for_case_query,
@@ -80,25 +37,39 @@ async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
     try:
         logger.info(f"Fetching case detail - Case: {case_id[:8]}, User: {user_id[:8]}")
 
-        # SIEMPRE verificar permisos (skip_permission_check eliminado)
         from services.case_service import CaseService
-        if not await CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name):
+        if not await CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name, conn=conn):
             logger.warning(f"User {user_id[:8]} denied access to case {case_id[:8]}")
             return None
 
-        # Obtener información básica del expediente
-        case_result = await fetch_all(get_case_basic_info_query(), case_id, schema_name=schema_name)
+        basic_info_query = get_case_basic_info_query()
+        user_sectors_query = get_user_sectors_for_case_query()
+        admin_sector_query = get_admin_sector_for_case_query()
+        assigned_sectors_query = get_assigned_sectors_for_case_query()
+        favorite_query = (
+            "SELECT EXISTS (SELECT 1 FROM case_favorites WHERE case_id = $1 AND user_id = $2) AS is_favorite"
+        )
+
+        if conn is not None:
+            case_result = await conn.fetch(basic_info_query, case_id)
+        else:
+            case_result = await fetch_all(basic_info_query, case_id, schema_name=schema_name)
         if not case_result:
             logger.warning(f"Case not found: {case_id[:8]}")
             return None
 
         case_data = case_result[0]
 
-        sectors_result = await fetch_all(get_user_sectors_for_case_query(), user_id, schema_name=schema_name)
+        if conn is not None:
+            sectors_result = await conn.fetch(user_sectors_query, user_id)
+        else:
+            sectors_result = await fetch_all(user_sectors_query, user_id, schema_name=schema_name)
         user_sector_ids = [row['sector_id'] for row in sectors_result if row['sector_id']]
 
-        # Obtener sector administrador del caso
-        admin_sector_result = await fetch_all(get_admin_sector_for_case_query(), case_id, schema_name=schema_name)
+        if conn is not None:
+            admin_sector_result = await conn.fetch(admin_sector_query, case_id)
+        else:
+            admin_sector_result = await fetch_all(admin_sector_query, case_id, schema_name=schema_name)
         admin_sector = None
         admin_sector_id = None
         if admin_sector_result:
@@ -110,8 +81,10 @@ async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
             }
             admin_sector_id = admin_data['sector_id']
 
-        # Obtener sectores asignados (movimientos activos)
-        assigned_sectors_result = await fetch_all(get_assigned_sectors_for_case_query(), case_id, schema_name=schema_name)
+        if conn is not None:
+            assigned_sectors_result = await conn.fetch(assigned_sectors_query, case_id)
+        else:
+            assigned_sectors_result = await fetch_all(assigned_sectors_query, case_id, schema_name=schema_name)
         assigned_sectors = []
         assigned_sector_ids = []
         for row in assigned_sectors_result:
@@ -122,7 +95,6 @@ async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
             })
             assigned_sector_ids.append(row['sector_id'])
 
-        # Calcular nivel de acceso
         from services.case_service import CaseService
         access_reason = CaseService._calculate_access_reason(
             user_sector_ids,
@@ -130,19 +102,28 @@ async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
             assigned_sector_ids
         )
 
+        if conn is not None:
+            favorite_result = await conn.fetchrow(favorite_query, case_id, user_id)
+        else:
+            favorite_result = await fetch_one(favorite_query, case_id, user_id, schema_name=schema_name)
+        is_favorite = bool(favorite_result['is_favorite']) if favorite_result else False
+
         logger.info(f"Case detail retrieved - Access: {access_reason}")
 
         return {
             "id": case_data['id'],
             "case_number": case_data['case_number'],
             "reference": case_data['reference'],
+            "ai_summary": case_data.get('ai_summary'),
             "template": {
                 "name": case_data['type_name'],
-                "acronym": case_data['template_acronym']
+                "acronym": case_data['template_acronym'],
+                "is_reserved": bool(case_data['template_is_reserved']),
             },
             "access_reason": access_reason,
             "admin_sector": admin_sector,
-            "assigned_sectors": assigned_sectors
+            "assigned_sectors": assigned_sectors,
+            "is_favorite": is_favorite
         }
 
     except Exception as e:
@@ -151,7 +132,6 @@ async def get_case_detail(case_id: str, user_id: str, *, schema_name: str):
 
 
 async def get_available_templates(user_id: str, *, schema_name: str):
-    """Obtener plantillas de expedientes disponibles."""
     from services.case_queries import get_available_templates_query
     from database import fetch_all
     from shared.exceptions import BusinessLogicError
@@ -178,14 +158,9 @@ async def get_available_templates(user_id: str, *, schema_name: str):
 
 
 async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_name: str):
-    """
-    Buscar un expediente por número exacto.
-    Devuelve exactamente los mismos datos que get_cases_by_user pero para un expediente específico.
-    """
     from database import fetch_all
 
     try:
-        # Obtener sectores del usuario
         user_sectors_query = """
             SELECT DISTINCT
                 COALESCE(s.id, s2.id) as sector_id
@@ -203,10 +178,8 @@ async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_nam
         if not user_sector_ids:
             return None
 
-        # Construir placeholders para sectores del usuario
         sector_placeholders = ",".join([f"${i+2}" for i in range(len(user_sector_ids))])
 
-        # Consulta para buscar el expediente por número exacto
         case_query = f"""
             SELECT
                 c.id,
@@ -338,8 +311,6 @@ async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_nam
                 )
         """
 
-        # Parámetros: 2 copias para SELECT (is_admin_by_transfer, is_admin_by_creation)
-        # + 3 copias para WHERE (assigned, transfer, creation) + case_number
         params = list(user_sector_ids) * 5 + [case_number]
 
         results = await fetch_all(case_query, *params, schema_name=schema_name)
@@ -349,13 +320,11 @@ async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_nam
 
         row = results[0]
 
-        # Determinar access_reason con prioridad: ADMINSECTOR > ASSIGNEDSECTOR
-        access_reason = "ASSIGNEDSECTOR"  # Default
+        access_reason = "ASSIGNEDSECTOR"
 
         if row['is_admin_by_transfer'] or row['is_admin_by_creation']:
             access_reason = "ADMINSECTOR"
 
-        # Construir admin_sector
         admin_sector = None
         if row['admin_sector_acronym'] and row['admin_sector_department']:
             admin_sector = {
@@ -364,7 +333,6 @@ async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_nam
                 "sector_color": row.get('admin_sector_color'),
             }
 
-        # Obtener sectores asignados activos (DISTINCT)
         assigned_sectors_query = """
             SELECT DISTINCT
                 d.acronym || '#' || s.acronym as sector_acronym,
@@ -414,13 +382,9 @@ async def get_case_by_exact_number(case_number: str, user_id: str, *, schema_nam
 
 
 async def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: str = None, schema_name: str):
-    """
-    Buscar un expediente por número exacto sin restricciones (o con filtro de sector).
-    """
     from database import fetch_all
 
     try:
-        # Query caso + flag global en 1 sola query con LEFT JOIN users
         case_query = """
             SELECT
                 c.id,
@@ -429,51 +393,43 @@ async def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: st
                 c.created_at as last_modified_at,
                 ct.type_name,
                 ct.acronym as case_type,
-                u.can_global_search_cases
+                COALESCE(ct.is_reserved, false) as is_reserved
             FROM cases c
             JOIN case_templates ct ON c.case_template_id = ct.id
-            LEFT JOIN users u ON u.id = $1
-            WHERE c.case_number = $2
+            WHERE c.case_number = $1
             LIMIT 1
         """
 
-        results = await fetch_all(case_query, user_id, case_number, schema_name=schema_name)
+        results = await fetch_all(case_query, case_number, schema_name=schema_name)
 
         if not results:
             return None
 
         row = results[0]
         case_id = row['id']
-        has_global = row.get('can_global_search_cases', False) if user_id else True
 
-        # Si user_id proporcionado y sin flag global, verificar sectores
-        if user_id and not has_global:
-            from services.cases.permissions import get_user_viewable_sector_ids
-            user_sector_ids = await get_user_viewable_sector_ids(user_id, schema_name=schema_name)
-
-            if user_sector_ids:
-                sector_check_query = """
-                    SELECT EXISTS(
-                        SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = $1
-                          AND cm.is_active = true
-                          AND (
-                            cm.admin_sector_id = ANY($2::uuid[])
-                            OR cm.assigned_sector_id = ANY($2::uuid[])
-                          )
-                    ) as has_access
-                """
-                access_result = await fetch_all(
-                    sector_check_query,
-                    case_id, user_sector_ids,
-                    schema_name=schema_name
-                )
-                if not access_result or not access_result[0].get('has_access', False):
+        if user_id:
+            from services.cases.permissions import can_user_view_case
+            if not await can_user_view_case(case_id, user_id, schema_name=schema_name):
+                if not row['is_reserved']:
                     return None
-            else:
-                return None
+                return {
+                    "case": {
+                        "id": case_id,
+                        "case_number": row['case_number'],
+                        "reference": None,
+                        "last_modified_at": None,
+                        "case_type": {"name": None, "acronym": None},
+                        "access_reason": "RESERVED_NUMBER_MATCH",
+                        "admin_sector": None,
+                        "assigned_sectors": [],
+                        "is_reserved": True,
+                        "restricted": True,
+                    },
+                    "found": True,
+                    "total": 1,
+                }
 
-        # Obtener admin sector desde el último movimiento de administración
         admin_sector_query = """
             SELECT
                 d.acronym as department_acronym,
@@ -499,7 +455,6 @@ async def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: st
                 "sector_color": admin_data.get('sector_color'),
             }
 
-        # Obtener sectores asignados activos
         assigned_sectors_query = """
             SELECT DISTINCT
                 d.acronym || '#' || s.acronym as sector_acronym,
@@ -535,7 +490,8 @@ async def get_case_by_exact_number_unrestricted(case_number: str, *, user_id: st
             },
             "access_reason": "PUBLIC_SEARCH",
             "admin_sector": admin_sector,
-            "assigned_sectors": assigned_sectors
+            "assigned_sectors": assigned_sectors,
+            "is_reserved": bool(row['is_reserved']),
         }
 
         return {

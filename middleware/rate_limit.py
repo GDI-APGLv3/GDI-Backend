@@ -8,16 +8,12 @@ from starlette.responses import JSONResponse
 
 logger = logging.getLogger("rate_limit")
 
-RATE_LIMIT = 60
-# Multiplicador para auth por API Key / service: validate_rest_api_key ya hace
-# rate-limit per-key (rate_limit_per_minute de BD), así que el límite por IP acá
-# se relaja 10x para no estrangular integraciones legítimas (FASE 1 S8-001).
+RATE_LIMIT = int(os.environ.get("RATE_LIMIT_PER_MIN", "60"))
+RATE_LIMIT_PER_USER = int(os.environ.get("RATE_LIMIT_PER_USER_PER_MIN", "180"))
 API_KEY_RATE_MULTIPLIER = 10
 WINDOW_SECONDS = 60
 EXCLUDED_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
-CLEANUP_INTERVAL = 300  # 5 min
-# Tiempo mínimo entre intentos de reconexión a Redis tras un error (segundos).
-# Evita martillar Redis en un loop si está caído.
+CLEANUP_INTERVAL = 300
 _REDIS_RETRY_INTERVAL = 30
 
 
@@ -36,7 +32,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._mode = "in-memory"
         self._requests: dict[str, list[float]] = defaultdict(list)
         self._last_cleanup = time.time()
-        self._last_redis_error_at: float = 0.0  # timestamp del ultimo fallo Redis
+        self._last_redis_error_at: float = 0.0
         self._try_redis()
 
     def _try_redis(self):
@@ -46,7 +42,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return
         try:
             import redis
-            self._redis = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=3)
+            self._redis = redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_keepalive=True,
+                health_check_interval=30,
+            )
             self._redis.ping()
             self._mode = "redis"
             self._last_redis_error_at = 0.0
@@ -56,10 +58,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             logger.warning(f"[RateLimit] Redis no disponible ({e}), usando in-memory")
 
     def _maybe_reconnect_redis(self) -> None:
-        """Intenta reconectar a Redis si pasó suficiente tiempo desde el último error."""
         if time.time() - self._last_redis_error_at >= _REDIS_RETRY_INTERVAL:
             logger.info("[RateLimit] Intentando reconectar a Redis...")
-            self._try_redis()
+            import threading
+            threading.Thread(target=self._try_redis, daemon=True).start()
 
     async def dispatch(self, request, call_next):
         if request.method == "OPTIONS" or request.url.path in EXCLUDED_PATHS:
@@ -67,42 +69,43 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         client_ip = _get_client_ip(request)
 
-        # Límite efectivo: 10x si el request entró por API Key.
-        # validate_rest_api_key ya aplica rate-limit per-key (rate_limit_per_minute de BD),
-        # así que el límite por IP acá se relaja para no estrangular integraciones.
-        # auth_source lo setea TenantMiddleware, que ejecuta ANTES que este middleware
-        # (HostFilter → Tenant → RateLimit → CORS).
-        # "service" incluido por si se agrega en Fase 2; hoy no es una ruta activa en main.py.
+        auth_source = getattr(request.state, "auth_source", None)
+        tenant_user_id = getattr(request.state, "tenant_user_id", None)
+
         limit = RATE_LIMIT
-        if getattr(request.state, "auth_source", None) in ("api_key", "service"):
+        identity = client_ip
+        if auth_source in ("api_key", "service"):
             limit = RATE_LIMIT * API_KEY_RATE_MULTIPLIER
+        elif auth_source == "jwt" and tenant_user_id:
+            limit = RATE_LIMIT_PER_USER
+            identity = f"user:{tenant_user_id}"
 
         if self._mode == "redis" and self._redis:
-            return await self._dispatch_redis(request, call_next, client_ip, limit)
-        return await self._dispatch_memory(request, call_next, client_ip, limit)
+            return await self._dispatch_redis(request, call_next, identity, limit)
+        return await self._dispatch_memory(request, call_next, identity, limit)
 
-    async def _dispatch_redis(self, request, call_next, client_ip: str, limit: int = RATE_LIMIT):
+    def _incr_window(self, key: str):
+        pipe = self._redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, WINDOW_SECONDS + 1)
+        return pipe.execute()
+
+    async def _dispatch_redis(self, request, call_next, identity: str, limit: int):
         now = int(time.time())
         window_key = now // WINDOW_SECONDS
-        key = f"ratelimit:{client_ip}:{window_key}"
+        key = f"ratelimit:{identity}:{window_key}"
         reset_at = (window_key + 1) * WINDOW_SECONDS
 
         try:
-            pipe = self._redis.pipeline()
-            pipe.incr(key)
-            pipe.expire(key, WINDOW_SECONDS + 1)
-            count, _ = pipe.execute()
+            count, _ = await asyncio.to_thread(self._incr_window, key)
         except Exception as e:
-            # Fail-closed: NO bypassear el rate-limit cuando Redis falla.
-            # Degradar a in-memory para mantener la protección activa.
             logger.warning(f"[RateLimit] Redis error ({e}), degradando a in-memory (fail-closed)")
             self._redis = None
             self._mode = "in-memory"
             self._last_redis_error_at = time.time()
-            # Programar reconexión diferida sin bloquear la request actual.
             loop = asyncio.get_event_loop()
             loop.call_later(_REDIS_RETRY_INTERVAL, self._maybe_reconnect_redis)
-            return await self._dispatch_memory(request, call_next, client_ip)
+            return await self._dispatch_memory(request, call_next, identity, limit)
 
         if count > limit:
             retry_after = reset_at - now
@@ -123,14 +126,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         response.headers["X-RateLimit-Reset"] = str(reset_at)
         return response
 
-    async def _dispatch_memory(self, request, call_next, client_ip: str, limit: int = RATE_LIMIT):
+    async def _dispatch_memory(self, request, call_next, identity: str, limit: int):
         now = time.time()
         window_start = now - WINDOW_SECONDS
 
-        # Filter old + always append current request FIRST (fixes first-request bug)
-        timestamps = [t for t in self._requests[client_ip] if t > window_start]
+        timestamps = [t for t in self._requests[identity] if t > window_start]
         timestamps.append(now)
-        self._requests[client_ip] = timestamps
+        self._requests[identity] = timestamps
 
         if len(timestamps) > limit:
             reset_at = int(timestamps[0] + WINDOW_SECONDS)
@@ -146,7 +148,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-        # Periodic cleanup
         if now - self._last_cleanup > CLEANUP_INTERVAL:
             self._last_cleanup = now
             stale = [ip for ip, ts in self._requests.items() if not ts or ts[-1] <= window_start]

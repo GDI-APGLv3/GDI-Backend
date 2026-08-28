@@ -1,25 +1,16 @@
-"""
-Validador de documentos - REFACTORIZADO
-Centraliza reglas de negocio y validaciones.
-
-UBICACION: services/documents/core/validator.py
-MIGRADO: Fase 6 asyncpg
-"""
 from typing import Optional, List, Dict
 from uuid import UUID
 from shared.exceptions import ValidationError, DocumentStateError, DocumentNotFoundError
-from config.constants import EDITABLE_DOCUMENT_STATES
+from config.constants import EDITABLE_DOCUMENT_STATES, SYSTEM_TEST_USER_UUID
 from .repository import DocumentRepository
 
 
 class DocumentValidator:
-    """Validador de reglas de negocio para documentos."""
 
     EDITABLE_STATES = EDITABLE_DOCUMENT_STATES
 
     @classmethod
     def validate_document_id(cls, document_id: str) -> None:
-        """Valida formato de UUID."""
         try:
             UUID(document_id)
         except ValueError:
@@ -27,7 +18,6 @@ class DocumentValidator:
 
     @classmethod
     async def validate_can_be_edited(cls, document_id: str, *, schema_name: str) -> None:
-        """Valida que documento existe y puede ser editado."""
         cls.validate_document_id(document_id)
 
         status = await DocumentRepository.get_status(document_id, schema_name=schema_name)
@@ -42,8 +32,13 @@ class DocumentValidator:
             )
 
     @classmethod
-    def validate_update_data(cls, reference: Optional[str], content: Optional[str], signers: Optional[List[Dict]]) -> None:
-        """Valida datos de actualizacion."""
+    def validate_update_data(
+        cls,
+        reference: Optional[str],
+        content: Optional[str],
+        signers: Optional[List[Dict]],
+        internal: bool = False,
+    ) -> None:
         if reference is None and content is None and signers is None:
             raise ValidationError("Debe proporcionar al menos un campo para actualizar")
 
@@ -54,11 +49,10 @@ class DocumentValidator:
                 raise ValidationError("reference no puede exceder 250 caracteres")
 
         if signers is not None:
-            cls._validate_signers_list(signers)
+            cls._validate_signers_list(signers, internal=internal)
 
     @classmethod
-    def _validate_signers_list(cls, signers: List[Dict]) -> None:
-        """Valida lista de firmantes."""
+    def _validate_signers_list(cls, signers: List[Dict], internal: bool = False) -> None:
         if not isinstance(signers, list):
             raise ValidationError("signers debe ser una lista")
 
@@ -66,15 +60,14 @@ class DocumentValidator:
             return
 
         for i, signer in enumerate(signers):
-            cls._validate_single_signer(signer, i + 1)
+            cls._validate_single_signer(signer, i + 1, internal=internal)
 
         numerators = [s for s in signers if s.get("is_numerator")]
         if len(numerators) != 1:
             raise ValidationError("Debe haber exactamente un firmante marcado como numerador")
 
     @classmethod
-    def _validate_single_signer(cls, signer: Dict, position: int) -> None:
-        """Valida un firmante individual (user_id O email)."""
+    def _validate_single_signer(cls, signer: Dict, position: int, internal: bool = False) -> None:
         if not isinstance(signer, dict):
             raise ValidationError(f"Firmante {position}: debe ser un objeto")
 
@@ -97,6 +90,12 @@ class DocumentValidator:
                 UUID(user_id)
             except ValueError:
                 raise ValidationError(f"Firmante {position}: user_id debe ser un UUID valido")
+
+            if not internal and user_id.lower() == SYSTEM_TEST_USER_UUID.lower():
+                raise ValidationError(
+                    f"Firmante {position}: el usuario Sistema TEST no puede asignarse "
+                    "como firmante desde el endpoint público"
+                )
 
         if email and "@" not in email:
             raise ValidationError(f"Firmante {position}: email debe tener formato valido")

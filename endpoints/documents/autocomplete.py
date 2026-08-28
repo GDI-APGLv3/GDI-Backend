@@ -1,32 +1,3 @@
-"""
-Endpoint para autocompletado de documentos oficiales.
-
-Este módulo proporciona funcionalidad de autocompletado para búsqueda de documentos
-oficiales por número. Implementa:
-- Búsqueda incremental con mínimo 2 caracteres
-- Paginación para grandes conjuntos de resultados
-- Filtrado automático de documentos internos del sistema
-- Validación de entrada y manejo centralizado de errores
-- Logging completo de operaciones y errores
-
-Example:
-    GET /api/v1/documents/autocomplete?q=ANEXO-2025&limit=20&page=1
-
-    Response:
-    {
-        "documents": [
-            {
-                "document_id": "550e8400-e29b-41d4-a716-446655440000",
-                "official_number": "ANEXO-2025-000001-SMG-ADGEN",
-                "reference": "Solicitud de presupuesto"
-            }
-        ],
-        "total": 1,
-        "query": "ANEXO-2025",
-        "page": 1
-    }
-MIGRADO: Fase 6 asyncpg
-"""
 
 from fastapi import APIRouter, Query, status, Depends, Request
 from shared.logging import get_logger
@@ -39,18 +10,15 @@ from database import fetch_all
 from services.documents.core.queries import autocomplete_official_documents_query
 from shared.exceptions import (
     ValidationError,
-    DatabaseError,
     exception_to_http_exception,
     handle_database_error
 )
 from shared.dependencies import get_tenant_schema
 
-# Configurar logger específico para este módulo
 logger = get_logger("endpoints.documents.autocomplete")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
 
-# Constantes para validación
 QUERY_MIN_LENGTH = 2
 QUERY_MAX_LENGTH = 50
 LIMIT_MAX = 50
@@ -58,19 +26,6 @@ LIMIT_DEFAULT = 50
 
 
 def validate_query_string(q: str) -> None:
-    """
-    Valida que el string de búsqueda contenga solo caracteres permitidos.
-
-    Args:
-        q: String de búsqueda a validar
-
-    Raises:
-        ValidationError: Si el string contiene caracteres no permitidos
-
-    Note:
-        Permite: letras, números, guiones, espacios y caracteres especiales comunes en números de documento
-    """
-    # Patrón: alfanuméricos, guiones, espacios, punto, coma
     pattern = r'^[a-zA-Z0-9\s\-.,áéíóúÁÉÍÓÚñÑüÜ]+$'
 
     if not re.match(pattern, q):

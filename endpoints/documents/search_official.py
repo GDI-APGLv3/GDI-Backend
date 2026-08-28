@@ -1,22 +1,17 @@
-"""
-Endpoint para búsqueda de documentos oficiales por número exacto.
-Permite buscar documentos oficializados sin restricciones de usuario.
-Optimizado siguiendo principios de Clean Code.
-"""
 
 from shared.logging import get_logger
-from fastapi import APIRouter, HTTPException, Path, status, Request, Depends
+from fastapi import APIRouter, Path, Query, status, Request, Depends
 from typing import Dict, Any
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
 from models.documents.official_search import OfficialDocumentSearchResponse
 from models.tags import Tags
 from services.documents.retrieval.official_search import search_official_document_by_number
-from shared.exceptions import ValidationError, DatabaseError, exception_to_http_exception
+from services.documents.permissions import can_user_view_document
+from shared.exceptions import ValidationError, exception_to_http_exception
 from shared.dependencies import get_tenant_schema
 from shared.utils import get_authenticated_user, get_user_global_search_flags
 
-# === CONFIGURACIÓN ===
 logger = get_logger("search_official")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
@@ -38,10 +33,14 @@ async def search_official_document(
     doc_number: str = Path(
         ...,
         description="Número oficial exacto del documento a buscar (ej: ANEXO-2025-00000002-SMG-ADGEN)",
-        pattern=r'^[A-Z]{2,6}-\d{4}-\d{1,9}-[A-Z]{2,5}-[A-Z]{2,10}$'
+        pattern=r'^[A-Z0-9]{2,6}-\d{4}-\d{1,9}-[A-Z0-9]{2,8}-[A-Z0-9]{2,20}$'
     ),
     current_user: AuthenticatedUser = Depends(get_current_user),
-    schema_name: str = Depends(get_tenant_schema)
+    schema_name: str = Depends(get_tenant_schema),
+    exclude_reserved: bool = Query(
+        False,
+        description="GDI-069: si true, oculta el resultado si el documento es de tipo reservado. Lo usa el modal Vincular documento cuando el expediente destino NO es reservado."
+    )
 ) -> Dict[str, Any]:
     """
     Busca un documento oficial por su número de oficialización exacto.
@@ -152,30 +151,33 @@ async def search_official_document(
     logger.info(f"[SEARCH OFFICIAL] Búsqueda iniciada para: {doc_number}")
 
     try:
-        # Validar usuario y obtener flags de busqueda global
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
         flags = await get_user_global_search_flags(db_user_id, schema_name=schema_name)
 
-        # Llamar al servicio de búsqueda con flag de restriccion
         user_id_for_filter = None if flags["can_global_search_documents"] else db_user_id
-        result = await search_official_document_by_number(doc_number, user_id=user_id_for_filter, schema_name=schema_name)
-        
+        result = await search_official_document_by_number(
+            doc_number, user_id=user_id_for_filter, exclude_reserved=exclude_reserved, schema_name=schema_name
+        )
+
+        if result.get("found") and result.get("document"):
+            doc_id = result["document"].get("id")
+            if doc_id and not await can_user_view_document(doc_id, db_user_id, schema_name=schema_name):
+                logger.info(f"[SEARCH OFFICIAL] Usuario sin permisos reales sobre el documento, ocultando resultado")
+                result = {"found": False, "document": None, "search_term": doc_number}
+
         logger.info(f"[SEARCH OFFICIAL] Resultado: {'Encontrado' if result['found'] else 'No encontrado'}")
         
-        # Retornar respuesta usando el modelo Pydantic
         return OfficialDocumentSearchResponse(
             found=result["found"],
-            document=result["document"],  # Ya tiene la estructura correcta de UserDocumentInfo
+            document=result["document"],
             search_term=result["search_term"]
         )
         
     except ValidationError as e:
-        # Errores de validación (400 Bad Request)
         logger.info(f"[SEARCH OFFICIAL] Error de validación: {str(e)}")
         raise exception_to_http_exception(e)
     
     except Exception as e:
-        # Errores inesperados (500 Internal Server Error)
         logger.info(f"[SEARCH OFFICIAL] Error interno: {str(e)}")
         from shared.exceptions import DatabaseError
         raise exception_to_http_exception(

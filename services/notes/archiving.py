@@ -1,7 +1,3 @@
-"""
-Servicios de archivado para NOTAS.
-Permite a los recipients archivar/desarchivar notas recibidas.
-"""
 
 from typing import Dict, Any
 from shared.logging import get_logger
@@ -23,14 +19,6 @@ async def toggle_note_archive(
     *,
     schema_name: str,
 ) -> Dict[str, Any]:
-    """
-    Archiva o desarchiva una nota para un sector específico.
-    Solo recipients pueden archivar (el sender no puede).
-
-    Raises:
-        NotFoundError: Si el documento no existe o el sector no es recipient.
-        AuthorizationError: Si el sector es el sender.
-    """
     async with transaction(schema_name=schema_name) as conn:
         is_sender_row = await conn.fetchrow(check_user_is_sender_query(), document_id, sector_id)
         if is_sender_row and is_sender_row["is_sender"]:
@@ -71,12 +59,6 @@ async def get_archive_status(
     *,
     schema_name: str,
 ) -> Dict[str, Any]:
-    """
-    Obtiene el estado de archivado de una nota para un sector específico.
-
-    Raises:
-        NotFoundError: Si el sector no es recipient del documento.
-    """
     recipient = await fetch_one(
         get_note_recipient_info_query(), document_id, sector_id, schema_name=schema_name
     )

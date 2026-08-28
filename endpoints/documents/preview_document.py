@@ -1,7 +1,3 @@
-"""
-Endpoints para previsualización de documentos.
-Optimizado siguiendo principios de Clean Code.
-"""
 from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Response, Depends, Request
@@ -17,7 +13,6 @@ from shared.exceptions import (
 )
 from models.tags import Tags
 
-# === CONFIGURACIÓN ===
 logger = get_logger("preview_document")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
@@ -165,7 +160,6 @@ async def preview_document_download(
 
         result = await generate_document_preview(document_id, schema_name=schema_name)
 
-        # Para documentos importados: retornar URL firmada
         if result.get("is_imported"):
             if "pdf_url" not in result:
                 logger.error(f"Error obteniendo URL de PDF importado para documento {document_id[:8]}...")
@@ -180,7 +174,6 @@ async def preview_document_download(
                 "is_imported": True
             }
 
-        # Para documentos HTML: retornar PDF binario
         if "pdf_content" not in result:
             logger.error(f"Error en generación de PDF para documento {document_id[:8]}...")
             raise ValidationError("No se pudo generar el PDF de previsualización")
@@ -188,7 +181,6 @@ async def preview_document_download(
         pdf_content = result["pdf_content"]
         pdf_size_kb = len(pdf_content) / 1024
 
-        # Usar referencia del documento si está disponible para nombre de archivo más descriptivo
         document_data = result.get("document_data", {})
         filename = f"preview_{document_id}.pdf"
 

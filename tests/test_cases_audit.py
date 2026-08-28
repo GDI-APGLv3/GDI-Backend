@@ -1,23 +1,13 @@
-"""
-Tests de integracion para endpoints de expedientes: movements, permissions, case-history.
-Conecta a BD real (dev-test, schema 100_test).
-
-Nota: Los endpoints /audit-log y /users/{user_id} NO existen.
-Se testean endpoints reales: movements, permissions, case-history.
-"""
 import pytest
 
-# Expediente real en BD dev-test (schema 100_test)
 REAL_CASE_ID = "5130f93f-28c1-4ea3-8830-19e6822ea630"
 NONEXISTENT_CASE_ID = "00000000-0000-0000-0000-000000000000"
 
 
 class TestCaseMovementsPermissionsHistory:
-    """Tests para endpoints reales de expedientes."""
 
     @pytest.mark.asyncio
     async def test_get_case_movements_success(self, client, test_headers):
-        """GET /api/v1/cases/{case_id}/movements con case_id real debe dar 200."""
         response = await client.get(
             f"/api/v1/cases/{REAL_CASE_ID}/movements",
             headers=test_headers,
@@ -31,7 +21,6 @@ class TestCaseMovementsPermissionsHistory:
 
     @pytest.mark.asyncio
     async def test_get_case_permissions_success(self, client, test_headers):
-        """GET /api/v1/cases/{case_id}/permissions con case_id real debe dar 200."""
         response = await client.get(
             f"/api/v1/cases/{REAL_CASE_ID}/permissions",
             headers=test_headers,
@@ -45,7 +34,6 @@ class TestCaseMovementsPermissionsHistory:
 
     @pytest.mark.asyncio
     async def test_get_case_history_success(self, client, test_headers):
-        """GET /api/v1/cases/{case_id}/case-history con case_id real debe dar 200."""
         response = await client.get(
             f"/api/v1/cases/{REAL_CASE_ID}/case-history",
             headers=test_headers,
@@ -59,13 +47,11 @@ class TestCaseMovementsPermissionsHistory:
 
     @pytest.mark.asyncio
     async def test_get_case_nonexistent(self, client, test_headers):
-        """GET /api/v1/cases/{case_id} con ID inexistente debe dar 404."""
         response = await client.get(
             f"/api/v1/cases/{NONEXISTENT_CASE_ID}",
             headers=test_headers,
         )
 
-        # Puede ser 404 (not found) o 200 con success=False, depende de implementacion
         if response.status_code == 404:
             print(f"[PASS] Case inexistente da 404")
         else:

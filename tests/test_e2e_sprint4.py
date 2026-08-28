@@ -2,7 +2,6 @@ import asyncio, time, sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Apuntar al Notary DEV publico para tests locales (FALLBACK_TO_VISUAL=true en DEV)
 os.environ.setdefault("NOTARY_URL", "https://<your-notary-app>.fly.dev")
 from datetime import datetime
 
@@ -40,7 +39,7 @@ async def req(cl, m, u, h, j=None):
 async def run_all():
     from httpx import AsyncClient, ASGITransport
     from main import app
-    from database import init_pool, close_pool
+    from database import init_pool
     from shared.tenant_validation import clear_all_cache
     await init_pool()
     clear_all_cache()

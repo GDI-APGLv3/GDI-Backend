@@ -1,11 +1,7 @@
-"""
-Servicio dedicado para gestión del perfil de usuario.
-Centraliza la lógica de negocio relacionada con operaciones de perfil.
-"""
 
 from shared.logging import get_logger
 from typing import Dict, Any, Optional
-from database import fetch_one, fetch_all, get_conn, transaction
+from database import get_conn, transaction
 from services.users.queries import (
     get_user_by_id_query,
     get_updated_user_profile_query,
@@ -13,8 +9,6 @@ from services.users.queries import (
 )
 from config.constants import (
     PROFILE_NO_FIELDS_TO_UPDATE_ERROR,
-    PROFILE_UPDATE_FAILED_ERROR,
-    PROFILE_UPDATE_ERROR,
     PROFILE_SECTOR_NOT_FOUND_ERROR,
     PROFILE_SECTOR_INACTIVE_ERROR,
     PROFILE_INVALID_FULL_NAME_ERROR,
@@ -23,37 +17,20 @@ from config.constants import (
 from shared.exceptions import (
     UserNotFoundError,
     ValidationError,
-    DatabaseError,
-    handle_database_error
+    DatabaseError
 )
 
 logger = get_logger(__name__)
 
 
 async def get_user_profile(user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtiene el perfil completo de un usuario por su ID.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con los datos completos del usuario
-
-    Raises:
-        UserNotFoundError: Si el usuario no existe o está inactivo
-        DatabaseError: Si hay un error de base de datos
-    """
     logger.info(f"[PROFILE] Buscando user_id={user_id}, schema_name={schema_name}")
 
     try:
         async with get_conn(schema_name=schema_name) as conn:
-            # DEBUG: Verificar search_path actual
             current_path = await conn.fetchval("SHOW search_path")
             logger.info(f"[PROFILE] search_path actual: {current_path}")
 
-            # Ejecutar query principal
             query = get_user_by_id_query()
             logger.info(f"[PROFILE] Ejecutando query con user_id={user_id}")
             user_row = await conn.fetchrow(query, user_id)
@@ -66,7 +43,6 @@ async def get_user_profile(user_id: str, *, schema_name: str) -> Dict[str, Any]:
 
             logger.info(f"[PROFILE] Usuario encontrado: user_id={user_id}")
 
-            # Obtener sectores adicionales del usuario
             additional_sectors_rows = await conn.fetch(
                 """
                 SELECT
@@ -119,28 +95,8 @@ async def update_user_profile(
     *,
     schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Actualiza el perfil de un usuario.
-
-    Args:
-        user_id: UUID del usuario
-        full_name: Nuevo nombre completo (opcional)
-        country_id: Nuevo identificador nacional (columna CountryID en BD). En Argentina es el CUIT (opcional)
-        profile_picture_url: Nueva URL de foto de perfil (opcional)
-        sector_id: Nuevo sector UUID (opcional)
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con los datos actualizados del usuario
-
-    Raises:
-        ValidationError: Si no se proporcionan campos para actualizar o la validación falla
-        UserNotFoundError: Si el usuario no existe
-        DatabaseError: Si hay un error de base de datos
-    """
     logger.info(f"Actualizando perfil de usuario {user_id}")
 
-    # Validar full_name si se proporciona
     if full_name is not None:
         full_name = full_name.strip()
         if not full_name:
@@ -148,7 +104,6 @@ async def update_user_profile(
         if len(full_name) > 100:
             raise ValidationError(PROFILE_FULL_NAME_TOO_LONG_ERROR.format(max_length=100))
 
-    # Construir campos a actualizar dinámicamente
     update_fields = []
     update_values = []
 
@@ -157,7 +112,6 @@ async def update_user_profile(
         update_values.append(full_name)
 
     if country_id is not None:
-        # CountryID es el nombre de la columna en BD (multi-país: CUIT en Argentina)
         update_fields.append('"CountryID"')
         update_values.append(country_id)
 
@@ -173,12 +127,10 @@ async def update_user_profile(
         logger.warning(f"Intento de actualizar perfil {user_id} sin campos")
         raise ValidationError(PROFILE_NO_FIELDS_TO_UPDATE_ERROR)
 
-    # Agregar user_id para WHERE clause (último parámetro)
     update_values.append(user_id)
 
     try:
         async with transaction(schema_name=schema_name, user_id=user_id, auth_source="profile_update") as conn:
-            # Validar sector_id si se proporciona
             if sector_id is not None:
                 sector = await conn.fetchrow(validate_sector_exists_query(), sector_id)
 
@@ -190,7 +142,6 @@ async def update_user_profile(
                     logger.warning(f"Intento de asignar sector inactivo {sector_id}")
                     raise ValidationError(PROFILE_SECTOR_INACTIVE_ERROR.format(sector_id=sector_id))
 
-            # Construir SET con $1, $2, ... y WHERE $N
             set_parts = [f"{col} = ${i+1}" for i, col in enumerate(update_fields)]
             where_param_idx = len(update_fields) + 1
             update_sql = (
@@ -204,7 +155,6 @@ async def update_user_profile(
                 logger.warning(f"Usuario {user_id} no encontrado al intentar actualizar")
                 raise UserNotFoundError(user_id)
 
-            # Obtener datos completos actualizados
             updated_user = await conn.fetchrow(get_updated_user_profile_query(), user_id)
 
             if not updated_user:

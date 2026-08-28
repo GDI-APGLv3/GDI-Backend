@@ -1,7 +1,3 @@
-"""
-Router principal para todos los endpoints del módulo RLM.
-Registra y configura todas las rutas del sistema de legajos.
-"""
 
 from fastapi import APIRouter
 from .registries import router as registries_router
@@ -11,7 +7,6 @@ from .documents import router as documents_router
 from .cases import router as cases_router
 from .relations import router as relations_router
 
-# Router principal para RLM
 rlm_router = APIRouter(
     prefix="/api/v1",
     tags=["rlm"],
@@ -23,7 +18,6 @@ rlm_router = APIRouter(
     }
 )
 
-# Registrar todos los sub-routers
 rlm_router.include_router(registries_router)
 rlm_router.include_router(records_router)
 rlm_router.include_router(fields_router)

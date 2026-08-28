@@ -1,12 +1,3 @@
-"""
-Servicios para recuperar MEMOS.
-Consultas de bandeja de entrada (received), enviados (sent) y archivados.
-
-Diferencias clave con NOTAS:
-- NO hay variantes multi_sector (query directa por user_id)
-- read_status se obtiene de mr.opened_at inline (no tabla separada)
-- sender info muestra nombre de persona + sector snapshot
-"""
 
 from typing import Dict, Any
 from shared.logging import get_logger
@@ -36,7 +27,6 @@ def _build_date_filter(
     date_to: str | None = None,
     start: int = 1,
 ) -> tuple:
-    """Wrapper de compatibilidad. Usa build_date_filter de query_utils."""
     return build_date_filter(date_filter, date_from, date_to, start=start)
 
 
@@ -51,17 +41,11 @@ async def get_received_memos(
     date_from: str | None = None,
     date_to: str | None = None
 ) -> Dict[str, Any]:
-    """
-    Obtiene los memos recibidos por un usuario.
-    Solo incluye memos oficializados (existentes en official_documents).
-    """
     offset = (page - 1) * page_size
 
     if search:
         search_pattern = f"%{escape_like(search)}%"
         search_term = search.strip().lower()
-        # Params fijos: $1=user_id, $2-$5=search, luego date params, luego limit/offset
-        # Count: $1...$5 + date
         date_where, date_params = _build_date_filter(date_filter, date_from, date_to, start=6)
         count_params = (user_id, search_pattern, search_pattern, search_pattern, search_term, *date_params)
         row = await fetch_one(
@@ -71,11 +55,6 @@ async def get_received_memos(
         )
         total = row['total'] if row else 0
 
-        # Data: $1...$5 + date + $6=limit, $7=offset (date_where already at $6 if empty)
-        # Since queries have fixed $6/$7 for limit/offset (no date support in search),
-        # pass date_params before limit/offset is not supported in fixed queries.
-        # Use count query date_where in data query too, limit/offset append after date params.
-        # Rebuild for data query: date starts at $6, limit/offset at $6+len(date_params)
         limit_idx = 6 + len(date_params)
         offset_idx = limit_idx + 1
         data_query = get_received_memos_search_query(date_where=date_where).replace(
@@ -154,10 +133,6 @@ async def get_sent_memos(
     date_from: str | None = None,
     date_to: str | None = None
 ) -> Dict[str, Any]:
-    """
-    Obtiene los memos enviados por un usuario.
-    Solo incluye memos oficializados.
-    """
     offset = (page - 1) * page_size
 
     if search:
@@ -239,10 +214,6 @@ async def get_archived_memos(
     page_size: int = 20,
     search: str | None = None
 ) -> Dict[str, Any]:
-    """
-    Obtiene los memos ARCHIVADOS de un usuario.
-    Solo incluye memos oficializados que fueron archivados por el receptor.
-    """
     offset = (page - 1) * page_size
 
     if search:

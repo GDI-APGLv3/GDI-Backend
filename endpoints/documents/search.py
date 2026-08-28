@@ -1,13 +1,3 @@
-"""
-Endpoint de búsqueda de documentos del usuario.
-
-URL canónica `GET /api/v1/documents/search`, equivalente al endpoint REST del
-Gateway (SET B) `documents.search_documents`. Reusa EXACTAMENTE el mismo handler
-y service que `GET /api/v1/documents/users/documents` (SET A), por lo que no
-duplica lógica de negocio ni de formateo de respuesta.
-
-Accesible por JWT y por API Key (auth pluggable, Fase 1 S8-001).
-"""
 from fastapi import APIRouter, Query, Depends, Request
 from typing import Optional
 
@@ -17,8 +7,6 @@ from models.users.user_documents import UserDocumentsResponse
 from models.tags import Tags
 from shared.dependencies import get_tenant_schema
 
-# Reusa el handler unificado de /users/documents para no duplicar la lógica de
-# formateo de la respuesta ni la validación de filtros.
 from endpoints.users.get_documents import get_user_documents as _get_user_documents_handler
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
@@ -45,7 +33,7 @@ async def search_documents(
     ),
     status: Optional[str] = Query(
         None,
-        description="Estado visual: En edición, En proceso de firma, Firmar ahora, Firmado",
+        description="Estado visual: En edición, En proceso de firma, Firmar ahora, A mi firma, Firmado",
     ),
     document_type: Optional[str] = Query(
         None, description="Acrónimo del tipo de documento (IF, ME, OF, etc.)"

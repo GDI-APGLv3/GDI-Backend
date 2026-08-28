@@ -1,20 +1,3 @@
-"""
-Construccion de header de destinatarios para documentos MEMO.
-
-Al oficializar un MEMO, el contenido HTML debe incluir los destinatarios al inicio:
-
-PARA: Nombre (Sector), Nombre (Sector)
-CC: Nombre (Sector)
-----------------------------------------------
-[Contenido del memo...]
-
-El header se inyecta SOLO al momento de firmar (oficializar), cuando los recipients son finales.
-BCC (CCO) NO se incluye en el header porque es oculto.
-
-Diferencias clave con NOTAS:
-- Formato "Nombre (Sector)" en vez de "DEPT#SECTOR"
-- JOIN con users + sectors en vez de sectors + departments
-"""
 
 from typing import Dict, Any, Optional
 from database import fetch_all
@@ -42,11 +25,6 @@ _HEADER_QUERY = """
 
 
 async def build_memo_header_html(document_id: str, *, schema_name: str) -> str:
-    """
-    Construye el header HTML con destinatarios para documentos MEMO.
-
-    Nota: BCC/CCO NO se incluye (es oculto para recipients).
-    """
     rows = await fetch_all(_HEADER_QUERY, document_id, schema_name=schema_name)
 
     if not rows:
@@ -83,9 +61,6 @@ async def build_memo_header_html(document_id: str, *, schema_name: str) -> str:
 
 
 def inject_header_into_content(header: str, content: Optional[Dict | str]) -> Dict[str, Any]:
-    """
-    Inyecta el header al inicio del contenido HTML.
-    """
     import json
 
     if not header:
@@ -114,10 +89,6 @@ def inject_header_into_content(header: str, content: Optional[Dict | str]) -> Di
 
 
 def remove_existing_header(content: dict | str) -> str:
-    """
-    Remueve header de destinatarios existente del contenido.
-    Util para re-envio despues de rechazo.
-    """
     import re
 
     if isinstance(content, dict):

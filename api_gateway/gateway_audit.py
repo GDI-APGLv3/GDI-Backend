@@ -1,14 +1,9 @@
-"""
-Structured audit logger para Gateway MCP.
-Output: JSON a stderr, filtrable con flyctl logs | grep '"audit":true'
-"""
 import json
 import sys
 from datetime import datetime, timezone
 
 
 def _emit(entry: dict):
-    """Write JSON audit entry to stderr."""
     entry["audit"] = True
     entry["ts"] = datetime.now(timezone.utc).isoformat()
     print(json.dumps(entry, default=str), file=sys.stderr, flush=True)

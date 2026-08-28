@@ -1,14 +1,9 @@
-"""
-Modelos relacionados con recipients de MEMOS.
-A diferencia de NOTAS (sector-based), MEMOS usa user_id y nombre de usuario.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 
 
 class MemoRecipientInfo(BaseModel):
-    """Informacion de un recipient de MEMO"""
     user_id: str = Field(..., description="UUID del usuario destinatario")
     name: str = Field(..., description="Nombre completo del usuario")
     sector_acronym: str = Field("", description="Acronimo del sector del usuario (snapshot)")
@@ -25,7 +20,6 @@ class MemoRecipientInfo(BaseModel):
 
 
 class MemoVisibleRecipientsResponse(BaseModel):
-    """Recipients visibles segun permisos del usuario"""
     to: List[MemoRecipientInfo] = Field(default_factory=list, description="Destinatarios principales")
     cc: List[MemoRecipientInfo] = Field(default_factory=list, description="Destinatarios en copia")
     bcc: Optional[List[MemoRecipientInfo]] = Field(

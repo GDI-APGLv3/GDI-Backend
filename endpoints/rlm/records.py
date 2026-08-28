@@ -1,4 +1,3 @@
-"""Endpoints CRUD para legajos (records) del módulo RLM."""
 
 from uuid import UUID
 
@@ -55,7 +54,6 @@ async def create_new_record(
 
         logger.info(f"Record created: {result['record_number']}")
 
-        # Encolar generación de resumen IA (async, non-blocking)
         enqueue_record_resume_fire_and_forget(result['id'], schema_name)
 
         return RecordResponse(

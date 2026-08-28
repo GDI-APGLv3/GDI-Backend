@@ -1,14 +1,7 @@
-"""
-Consultas SQL centralizadas para el módulo de usuarios.
-Placeholders asyncpg: $1, $2, $3 (NO %s).
-"""
+from config.constants import SYSTEM_TEST_USER_UUID
 
 
 def get_user_by_id_query() -> str:
-    """Query para obtener usuario por ID con información de sector, departamento y sello.
-
-    Parámetro asyncpg: $1 = user_id
-    """
     return """
         SELECT
             u.id as user_id,
@@ -38,10 +31,6 @@ def get_user_by_id_query() -> str:
 
 
 def get_updated_user_profile_query() -> str:
-    """Query para obtener datos completos del usuario después de actualizar perfil.
-
-    Parámetro asyncpg: $1 = user_id
-    """
     return """
         SELECT
             u.id as user_id,
@@ -70,10 +59,6 @@ def get_updated_user_profile_query() -> str:
 
 
 def validate_sector_exists_query() -> str:
-    """Query para verificar si un sector existe y está activo.
-
-    Parámetro asyncpg: $1 = sector_id
-    """
     return """
         SELECT id as sector_id, acronym, department_id, is_active
         FROM sectors
@@ -82,15 +67,7 @@ def validate_sector_exists_query() -> str:
 
 
 def search_users_by_name_query() -> str:
-    """Query para buscar usuarios por nombre con información completa (sello y departamento).
-
-    Parámetros posicionales asyncpg:
-      $1 = pattern_start     (ej: 'ma%')
-      $2 = pattern_word_start (ej: '% ma%')
-      $3 = search_term       (ej: 'ma')
-      $4 = limit             (int o None → COALESCE con 100)
-    """
-    return """
+    return f"""
         SELECT DISTINCT ON (u.id)
             u.id as user_id,
             u.full_name,
@@ -99,13 +76,15 @@ def search_users_by_name_query() -> str:
             u.estado as is_active,
             cs.name as seal_name,
             d.acronym as department_acronym,
-            s.acronym as sector_acronym
+            s.acronym as sector_acronym,
+            s.primary_color as sector_color
         FROM users u
         LEFT JOIN user_seals us ON u.id = us.user_id
         LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
         LEFT JOIN sectors s ON u.sector_id = s.id
         LEFT JOIN departments d ON s.department_id = d.id
         WHERE u.estado = 1
+          AND u.id != '{SYSTEM_TEST_USER_UUID}'::uuid
           AND (
             LOWER(u.full_name) LIKE $1
             OR LOWER(u.full_name) LIKE $2
@@ -116,18 +95,35 @@ def search_users_by_name_query() -> str:
     """
 
 
-def count_users_by_name_query() -> str:
-    """Query para contar usuarios que coinciden con un patrón de búsqueda.
-
-    Parámetros posicionales asyncpg:
-      $1 = pattern_start
-      $2 = pattern_word_start
-      $3 = search_term
+def get_users_by_ids_query() -> str:
+    return f"""
+        SELECT DISTINCT ON (u.id)
+            u.id as user_id,
+            u.full_name,
+            u.email,
+            u.profile_picture_url,
+            u.estado as is_active,
+            cs.name as seal_name,
+            d.acronym as department_acronym,
+            s.acronym as sector_acronym,
+            s.primary_color as sector_color
+        FROM users u
+        LEFT JOIN user_seals us ON u.id = us.user_id
+        LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
+        LEFT JOIN sectors s ON u.sector_id = s.id
+        LEFT JOIN departments d ON s.department_id = d.id
+        WHERE u.id = ANY($1::uuid[])
+          AND u.id != '{SYSTEM_TEST_USER_UUID}'::uuid
+        ORDER BY u.id, cs.name
     """
-    return """
+
+
+def count_users_by_name_query() -> str:
+    return f"""
         SELECT COUNT(DISTINCT u.id) as count
         FROM users u
         WHERE u.estado = 1
+          AND u.id != '{SYSTEM_TEST_USER_UUID}'::uuid
           AND (
             LOWER(u.full_name) LIKE $1
             OR LOWER(u.full_name) LIKE $2
@@ -137,11 +133,6 @@ def count_users_by_name_query() -> str:
 
 
 def search_user_by_email_query() -> str:
-    """Query para buscar un usuario por email (activo o inactivo).
-
-    Parámetros posicionales asyncpg:
-      $1 = email (lowercase)
-    """
     return """
         SELECT DISTINCT ON (u.id)
             u.id as user_id,
@@ -163,42 +154,19 @@ def search_user_by_email_query() -> str:
 
 
 def list_all_users_query() -> str:
-    """Query para listar todos los usuarios activos del sistema."""
-    return """
+    return f"""
         SELECT
             id as user_id,
             full_name,
             email
         FROM users
         WHERE estado = 1
+          AND id != '{SYSTEM_TEST_USER_UUID}'::uuid
         ORDER BY full_name ASC
     """
 
 
 def get_user_sector_permissions_query() -> str:
-    """
-    Query para obtener permisos de sectores de un usuario.
-
-    Retorna lista de sectores con información completa y permisos (can_view, can_edit).
-
-    - Sector principal (users.sector_id): siempre incluido con can_view=true, can_edit=true
-    - Sectores adicionales (user_sector_permissions): respeta can_view y can_edit configurados
-
-    Formato retornado:
-    [
-        {
-            "sector_id": "uuid",
-            "sector_acronym": "SECOBRA",
-            "department_id": "uuid",
-            "department_name": "Secretaría de Obras",
-            "department_acronym": "SECOBR",
-            "can_view": true,
-            "can_edit": true,
-            "is_primary": true
-        },
-        ...
-    ]
-    """
     return """
         -- Sector principal del usuario (siempre full access)
         SELECT

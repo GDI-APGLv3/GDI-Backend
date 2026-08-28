@@ -1,23 +1,9 @@
-"""
-Modelos relacionados con la creación de documentos.
-"""
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
-from datetime import datetime
-from typing import Optional, List, Dict
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Optional, List
 
 
 class NoteRecipientsInput(BaseModel):
-    """
-    Destinatarios para documentos tipo NOTA.
-
-    Los recipients se definen SOLO al crear el documento (POST /documents),
-    no se pueden modificar despues en el endpoint de guardado (PATCH /documents/{id}/save).
-
-    - **to**: Destinatarios principales (obligatorio al menos uno)
-    - **cc**: Destinatarios en copia (opcional)
-    - **bcc**: Destinatarios en copia oculta (opcional, solo visible para sender)
-    """
     to: List[str] = Field(
         default_factory=list,
         description="UUIDs de sectores destinatarios principales (TO). Obligatorio al menos uno."
@@ -44,18 +30,6 @@ class NoteRecipientsInput(BaseModel):
 
 
 class CreateDocumentRequest(BaseModel):
-    """
-    Modelo para solicitud de creacion de documento.
-
-    ## Flujo de Documentos
-    1. POST /documents (este request) - Crear documento
-    2. PATCH /documents/{id}/save - Guardar contenido y firmantes
-    3. POST /documents/{id}/start-signing-process - Enviar a firma
-    4. POST /documents/{id}/super-sign - Firmar
-
-    ## Para NOTAS
-    Los recipients (TO, CC, BCC) se definen **aqui al crear**, NO al guardar.
-    """
     document_type_acronym: str = Field(
         ...,
         description="Acronimo del tipo de documento (IF, ME, OF, NOTA, etc.)",
@@ -71,7 +45,6 @@ class CreateDocumentRequest(BaseModel):
         None,
         description="Destinatarios (OBLIGATORIO para tipo NOTA, ignorado para otros tipos). Requiere al menos un destinatario TO."
     )
-    # creator_id eliminado - se obtiene del usuario autenticado (current_user)
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -100,7 +73,6 @@ class CreateDocumentRequest(BaseModel):
     )
 
 class CreateDocumentResponse(BaseModel):
-    """Respuesta a la creación de un documento"""
     document_id: str = Field(..., description="UUID del documento creado")
     status: str = Field(..., description="Estado del documento creado (draft)")
     message: str = Field(..., description="Mensaje descriptivo del resultado de la operación")

@@ -1,7 +1,3 @@
-"""
-Módulo de modelos compartidos.
-Contiene modelos base y utilidades reutilizadas por múltiples dominios.
-"""
 
 from .base import (
     BaseResponse,

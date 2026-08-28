@@ -1,7 +1,8 @@
-"""
-Configuración de fixtures y setup para tests
-"""
 import os
+
+os.environ.setdefault("TESTING_SHARED_SECRET", "secreto-de-tests-gdi241")
+TESTING_SECRET = os.environ["TESTING_SHARED_SECRET"]
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
@@ -9,11 +10,9 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import asyncio
 from typing import Dict, Any
 
-# Test app import
 from main import app
 from models.schemas import AuthenticatedUser, SectorPermission
 
-# Mock data para tests
 MOCK_USER_AUTH = AuthenticatedUser(
     user_id="a1000000-0000-0000-0000-000000000001",
     auth_id="auth0|test_user_123",
@@ -98,19 +97,24 @@ MOCK_DEPARTMENT = {
 
 @pytest.fixture
 def event_loop():
-    """Event loop por test — garantiza que pool y ASGI corren en el mismo loop."""
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
+@pytest.fixture(autouse=True)
+def _reset_dts_rate_limiter():
+    from services.shared import dts_rate_limiter
+    with dts_rate_limiter._fallback_lock:
+        dts_rate_limiter._fallback_window["minute"] = None
+        dts_rate_limiter._fallback_window["count"] = 0
+    yield
+
 @pytest_asyncio.fixture
 async def client():
-    """Cliente HTTP asíncrono con pool asyncpg inicializado en el mismo event loop."""
     import database as db_module
     from database import init_pool, close_pool
     from shared.tenant_validation import clear_all_cache
 
-    # Cerrar pool previo si quedó de un test anterior (loop distinto)
     if db_module.pool is not None:
         try:
             await close_pool()
@@ -136,52 +140,42 @@ async def client():
 
 @pytest.fixture
 def mock_auth_headers():
-    """Headers de autenticación mock"""
     return {"Authorization": "Bearer test_jwt_token"}
 
 @pytest.fixture
 def mock_authenticated_user():
-    """Mock del usuario autenticado"""
     return MOCK_USER_AUTH
 
 @pytest.fixture
 def mock_db_user():
-    """Mock del usuario en base de datos"""
     return MOCK_USER_DB
 
 @pytest.fixture
 def mock_case_data():
-    """Mock de datos de expediente"""
     return MOCK_CASE
 
 @pytest.fixture
 def mock_case_template():
-    """Mock de plantilla de expediente"""
     return MOCK_CASE_TEMPLATE
 
 @pytest.fixture
 def mock_movement_data():
-    """Mock de movimiento de expediente"""
     return MOCK_MOVEMENT
 
 @pytest.fixture
 def mock_document_data():
-    """Mock de documento"""
     return MOCK_DOCUMENT
 
 @pytest.fixture
 def mock_sector_data():
-    """Mock de sector"""
     return MOCK_SECTOR
 
 @pytest.fixture
 def mock_department_data():
-    """Mock de departamento"""
     return MOCK_DEPARTMENT
 
 @pytest.fixture
 def mock_db_connection():
-    """Mock de las funciones asyncpg de database.py para tests sin BD real."""
     with patch('database.fetch_all', new_callable=AsyncMock) as mock_fetch_all, \
          patch('database.fetch_one', new_callable=AsyncMock) as mock_fetch_one, \
          patch('database.fetch_val', new_callable=AsyncMock) as mock_fetch_val, \
@@ -199,33 +193,27 @@ def mock_db_connection():
 
 @pytest.fixture
 def mock_case_service():
-    """Mock del servicio de casos"""
     with patch('services.case_service.CaseService') as mock_service:
         yield mock_service
 
 @pytest.fixture
 def mock_user_service():
-    """Mock del servicio de usuarios"""
     with patch('services.user_service.UserService') as mock_service:
         yield mock_service
 
 @pytest.fixture
 def mock_auth():
-    """Mock del sistema de autenticación"""
     with patch('auth.get_current_user') as mock_auth:
         mock_auth.return_value = MOCK_USER_AUTH
         yield mock_auth
 
-# Utilidades para tests
 def create_mock_response(data: Dict[str, Any], status_code: int = 200):
-    """Crear una respuesta mock"""
     mock_response = MagicMock()
     mock_response.status_code = status_code
     mock_response.json.return_value = data
     return mock_response
 
 def assert_response_success(response, expected_keys=None):
-    """Verificar que la respuesta sea exitosa"""
     assert response.status_code == 200
     data = response.json()
     assert "success" in data
@@ -236,7 +224,6 @@ def assert_response_success(response, expected_keys=None):
             assert key in data
 
 def assert_response_error(response, expected_status_code, expected_message=None):
-    """Verificar que la respuesta sea de error"""
     assert response.status_code == expected_status_code
 
     if expected_message:
@@ -244,11 +231,9 @@ def assert_response_error(response, expected_status_code, expected_message=None)
         assert "detail" in data
         assert expected_message in data["detail"]
 
-# ==================== FIXTURES ACTUALIZADAS PARA TESTING_MODE ====================
 
 @pytest.fixture
 def mock_sector_permission():
-    """Fixture para crear un SectorPermission de prueba."""
     from models.schemas import SectorPermission
     return SectorPermission(
         sector_id="51000000-0000-0000-0000-000000000001",
@@ -263,15 +248,14 @@ def mock_sector_permission():
 
 @pytest.fixture
 def test_headers():
-    """Headers requeridos para tests en TESTING_MODE."""
     return {
         "X-Tenant-Schema": "100_test",
-        "X-User-ID": "a1000000-0000-0000-0000-000000000001"
+        "X-User-ID": "a1000000-0000-0000-0000-000000000001",
+        "X-Testing-Secret": TESTING_SECRET,
     }
 
 @pytest.fixture
 def mock_authenticated_user_new(mock_sector_permission):
-    """Usuario autenticado con SectorPermission correcto."""
     from models.schemas import AuthenticatedUser
     return AuthenticatedUser(
         user_id="a1000000-0000-0000-0000-000000000001",

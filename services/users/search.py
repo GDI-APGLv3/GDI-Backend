@@ -1,15 +1,3 @@
-"""
-Servicio de búsqueda de usuarios - Clean Code Implementation.
-Aplicando principios SOLID, DRY y Single Responsibility Principle.
-
-Arquitectura organizada por responsabilidades:
-1. Validación de entrada
-2. Construcción de queries (AHORA CENTRALIZADAS)
-3. Ejecución de consultas
-4. Formateo de respuestas
-5. Funciones de utilidad
-6. Invitación de usuarios por email
-"""
 
 import re
 from shared.logging import get_logger
@@ -18,7 +6,8 @@ from database import fetch_all, fetch_val
 from services.users.queries import (
     search_users_by_name_query,
     count_users_by_name_query,
-    search_user_by_email_query
+    search_user_by_email_query,
+    get_users_by_ids_query
 )
 from config.constants import (
     SEARCH_QUERY_REQUIRED_ERROR,
@@ -35,40 +24,18 @@ from shared.exceptions import ValidationError
 
 logger = get_logger(__name__)
 
-# ============================================================================
-# FUNCIONES PRINCIPALES - Single Responsibility Principle
-# ============================================================================
 
-async def search_users_for_autocomplete(search_query: str, limit: Optional[int] = None, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Busca usuarios para autocompletado con información completa.
-
-    Args:
-        search_query: Texto a buscar al inicio de nombres o apellidos
-        limit: Número máximo de resultados (None = sin límite)
-        schema_name: Nombre del schema (para multi-tenant)
-
-    Returns:
-        Dict con 'users' (List) y 'total_found' (int)
-
-    Raises:
-        ValidationError: Si los parámetros son inválidos
-    """
+async def search_users_for_autocomplete(search_query: str, limit: Optional[int] = None, *, schema_name: str, conn=None) -> Dict[str, Any]:
     logger.info(f"Iniciando búsqueda de usuarios con query: '{search_query}', limit: {limit}")
 
-    # 1. Validación de entrada
     _validate_search_parameters(search_query, limit)
 
-    # 2. Construcción de patrones de búsqueda
     search_patterns = _build_user_search_patterns(search_query)
 
-    # 3. Ejecución de consulta principal
-    users_raw_data = await _fetch_users_with_search_patterns(search_patterns, limit, schema_name=schema_name)
+    users_raw_data = await _fetch_users_with_search_patterns(search_patterns, limit, schema_name=schema_name, conn=conn)
 
-    # 4. Conteo total
-    total_count = await _count_users_with_search_patterns(search_patterns, schema_name=schema_name)
+    total_count = await _count_users_with_search_patterns(search_patterns, schema_name=schema_name, conn=conn)
 
-    # 5. Formateo de respuesta
     formatted_users = _format_user_search_results(users_raw_data)
 
     logger.info(f"Búsqueda completada: {len(formatted_users)} usuarios retornados de {total_count} encontrados")
@@ -78,14 +45,28 @@ async def search_users_for_autocomplete(search_query: str, limit: Optional[int] 
         "total_found": total_count
     }
 
-# ============================================================================
-# VALIDACIÓN - Single Responsibility Principle
-# ============================================================================
+async def get_users_by_ids(ids: List[str], *, schema_name: str) -> Dict[str, Any]:
+    logger.info(f"Batch fetch de {len(ids)} usuarios por id")
+
+    try:
+        users_raw_data = await fetch_all(
+            get_users_by_ids_query(),
+            ids,
+            schema_name=schema_name
+        )
+    except Exception as e:
+        logger.error(f"Error en batch fetch de usuarios por id: {str(e)}", exc_info=True)
+        raise
+
+    formatted_users = _format_user_search_results(users_raw_data)
+
+    return {
+        "users": formatted_users,
+        "total_found": len(formatted_users)
+    }
+
 
 def _validate_search_parameters(search_query: str, limit: Optional[int]) -> None:
-    """
-    Valida parámetros de búsqueda de usuarios.
-    """
     if not search_query or not isinstance(search_query, str):
         raise ValidationError(SEARCH_QUERY_REQUIRED_ERROR)
 
@@ -102,14 +83,8 @@ def _validate_search_parameters(search_query: str, limit: Optional[int]) -> None
         if limit > SEARCH_MAX_LIMIT:
             raise ValidationError(SEARCH_LIMIT_MAX_ERROR.format(max_limit=SEARCH_MAX_LIMIT))
 
-# ============================================================================
-# CONSTRUCCIÓN DE PATRONES - Single Responsibility Principle
-# ============================================================================
 
 def _build_user_search_patterns(search_query: str) -> Dict[str, str]:
-    """
-    Construye patrones de búsqueda para nombres y apellidos.
-    """
     clean_query = search_query.strip().lower()
 
     return {
@@ -119,28 +94,22 @@ def _build_user_search_patterns(search_query: str) -> Dict[str, str]:
         "original_query": clean_query
     }
 
-# ============================================================================
-# EJECUCIÓN DE CONSULTAS - Single Responsibility Principle
-# ============================================================================
 
-async def _fetch_users_with_search_patterns(search_patterns: Dict[str, str], limit: Optional[int], *, schema_name: str) -> List[Dict]:
-    """
-    Ejecuta la consulta principal para obtener usuarios.
-    Usa fetch_all con parámetros posicionales asyncpg.
-    """
+async def _fetch_users_with_search_patterns(search_patterns: Dict[str, str], limit: Optional[int], *, schema_name: str, conn=None) -> List[Dict]:
     logger.info(f"Fetching users with search patterns: {search_patterns['original_query']}, limit: {limit}")
 
     try:
         query = search_users_by_name_query()
-        # Parámetros: $1=pattern_start, $2=pattern_word_start, $3=search_term, $4=limit
-        results = await fetch_all(
-            query,
+        params = (
             search_patterns["pattern_start"],
             search_patterns["pattern_word_start"],
             search_patterns["search_term"],
             limit,
-            schema_name=schema_name
         )
+        if conn is not None:
+            results = await conn.fetch(query, *params)
+        else:
+            results = await fetch_all(query, *params, schema_name=schema_name)
 
         logger.info(f"Found {len(results)} users matching search patterns")
         return results
@@ -150,22 +119,20 @@ async def _fetch_users_with_search_patterns(search_patterns: Dict[str, str], lim
         raise
 
 
-async def _count_users_with_search_patterns(search_patterns: Dict[str, str], *, schema_name: str) -> int:
-    """
-    Ejecuta la consulta de conteo de usuarios encontrados.
-    """
+async def _count_users_with_search_patterns(search_patterns: Dict[str, str], *, schema_name: str, conn=None) -> int:
     logger.info(f"Counting users with search patterns: {search_patterns['original_query']}")
 
     try:
         query = count_users_by_name_query()
-        # Parámetros: $1=pattern_start, $2=pattern_word_start, $3=search_term
-        result = await fetch_val(
-            query,
+        params = (
             search_patterns["pattern_start"],
             search_patterns["pattern_word_start"],
             search_patterns["search_term"],
-            schema_name=schema_name
         )
+        if conn is not None:
+            result = await conn.fetchval(query, *params)
+        else:
+            result = await fetch_val(query, *params, schema_name=schema_name)
 
         count = int(result) if result is not None else 0
         logger.info(f"Total count: {count} users")
@@ -175,14 +142,8 @@ async def _count_users_with_search_patterns(search_patterns: Dict[str, str], *, 
         logger.error(f"Error counting users with search patterns: {str(e)}", exc_info=True)
         raise
 
-# ============================================================================
-# FORMATEO DE RESPUESTAS - Single Responsibility Principle
-# ============================================================================
 
 def _format_user_search_results(users_raw_data: List) -> List[Dict]:
-    """
-    Formatea los datos crudos de usuarios a la estructura esperada.
-    """
     formatted_users = []
 
     for user in users_raw_data:
@@ -192,6 +153,7 @@ def _format_user_search_results(users_raw_data: List) -> List[Dict]:
             "email": user.get('email'),
             "department_acronym": user.get('department_acronym'),
             "sector_acronym": user.get('sector_acronym'),
+            "sector_color": user.get('sector_color'),
             "seal_name": user.get('seal_name'),
             "profile_picture_url": user.get('profile_picture_url'),
             "is_active": bool(user.get('is_active', 1))
@@ -201,40 +163,8 @@ def _format_user_search_results(users_raw_data: List) -> List[Dict]:
 
     return formatted_users
 
-# ============================================================================
-# FUNCIONES DE UTILIDAD - Single Responsibility Principle
-# ============================================================================
-
-def _extract_user_basic_info_from_row(user_row: Dict) -> Dict[str, Any]:
-    """Extrae información básica del usuario de una fila de BD."""
-    return {
-        "user_id": user_row['id'],
-        "first_name": user_row['first_name'],
-        "last_name": user_row['last_name'],
-        "full_name": f"{user_row['first_name']} {user_row['last_name']}",
-        "email": user_row['email'],
-        "is_active": user_row['is_active']
-    }
-
-def _extract_user_department_info_from_row(user_row: Dict) -> Optional[Dict[str, str]]:
-    """Extrae información del departamento del usuario de una fila de BD."""
-    if user_row.get('department_acronym'):
-        return {
-            "acronym": user_row['department_acronym'],
-            "code": user_row.get('department_code')
-        }
-    return None
-
-def _extract_user_seal_info_from_row(user_row: Dict) -> Optional[str]:
-    """Extrae información del sello del usuario de una fila de BD."""
-    return user_row.get('seal_name')
-
-# ============================================================================
-# FUNCIONES DE INVITACIÓN POR EMAIL - Single Responsibility Principle
-# ============================================================================
 
 def is_email(text: str) -> bool:
-    """Detecta si el texto es un email válido."""
     if not text or not isinstance(text, str):
         return False
 
@@ -242,19 +172,6 @@ def is_email(text: str) -> bool:
     return bool(re.match(email_pattern, text.strip()))
 
 async def search_or_create_user_by_email(email: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Busca usuario por email, NO lo crea si no existe (solo devuelve email virtual).
-
-    Args:
-        email: Email del usuario a buscar
-        schema_name: Nombre del schema (para multi-tenant)
-
-    Returns:
-        Dict con 'users' (List) y 'total_found' (int)
-
-    Raises:
-        ValidationError: Si el email no es válido
-    """
     logger.info("Searching user by email")
 
     if not is_email(email):
@@ -279,14 +196,10 @@ async def search_or_create_user_by_email(email: str, *, schema_name: str) -> Dic
         }
 
 async def _fetch_user_by_email(email: str, *, schema_name: str) -> Optional[Dict]:
-    """
-    Busca usuario por email, sin importar si está activo o inactivo.
-    """
     logger.info("Fetching user by email from database")
 
     try:
         query = search_user_by_email_query()
-        # Parámetro: $1=email
         result = await fetch_all(query, email, schema_name=schema_name)
         row = result[0] if result else None
 
@@ -302,7 +215,6 @@ async def _fetch_user_by_email(email: str, *, schema_name: str) -> Optional[Dict
         raise
 
 def _format_existing_user_for_search(user_data: Dict) -> Dict[str, Any]:
-    """Formatea usuario existente (activo o inactivo) para respuesta de búsqueda."""
     return {
         "user_id": user_data['user_id'],
         "full_name": user_data['full_name'],
@@ -314,10 +226,6 @@ def _format_existing_user_for_search(user_data: Dict) -> Dict[str, Any]:
     }
 
 def _format_virtual_user_for_search(email: str) -> Dict[str, Any]:
-    """
-    Formatea usuario virtual (email que no existe en BD) para respuesta de búsqueda.
-    NO persiste datos en BD - solo retorna estructura temporal.
-    """
     return {
         "user_id": None,
         "full_name": email,

@@ -1,15 +1,11 @@
-"""
-Modelos relacionados con la edición de documentos.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union, Any
 from ..shared.base import DocumentTypeInfo
 from .creation import NoteRecipientsInput
 
 class DocumentSignerDetail(BaseModel):
-    """Información de un firmante para el editor de documentos"""
     user_id: str = Field(..., description="UUID del usuario firmante")
     user_name: str = Field(..., description="Nombre completo del firmante")
     email: Optional[str] = Field(None, description="Email del firmante")
@@ -17,7 +13,11 @@ class DocumentSignerDetail(BaseModel):
     is_numerator: bool = Field(..., description="Indica si este firmante es el numerador")
     profile_picture_url: Optional[str] = Field(None, description="URL de la foto de perfil del firmante")
     department_sector: Optional[str] = Field(None, description="Departamento y sector del firmante en formato 'DEPT#SECTOR'")
-    
+    seal_name: Optional[str] = Field(None, description="Nombre del sello/cargo del firmante")
+    department_acronym: Optional[str] = Field(None, description="Acrónimo del departamento del firmante")
+    sector_acronym: Optional[str] = Field(None, description="Acrónimo del sector del firmante")
+    sector_color: Optional[str] = Field(None, description="Color hex del sector para el badge DPTO#SECTOR")
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
@@ -32,10 +32,10 @@ class DocumentSignerDetail(BaseModel):
     )
 
 class ProposedCaseInfo(BaseModel):
-    """Información de un expediente propuesto para vinculación"""
     case_id: str = Field(..., description="UUID del expediente")
     case_number: str = Field(..., description="Número del expediente")
     reference: Optional[str] = Field(None, description="Referencia o asunto del expediente")
+    is_reserved: bool = Field(False, description="GDI-069: expediente de tipo reservado (reference enmascarada)")
     proposing_date: Optional[datetime] = Field(None, description="Fecha de propuesta de vinculación")
 
     model_config = ConfigDict(
@@ -50,7 +50,6 @@ class ProposedCaseInfo(BaseModel):
     )
 
 class DocumentSigner(BaseModel):
-    """Modelo para representar un firmante del documento"""
     user_id: Optional[str] = Field(None, description="UUID del usuario firmante (null si es email pendiente)")
     email: Optional[str] = Field(None, description="Email del firmante cuando user_id es null")
     is_numerator: bool = Field(False, description="Indica si este firmante es el numerador del documento")
@@ -58,21 +57,16 @@ class DocumentSigner(BaseModel):
     @field_validator('email')
     @classmethod
     def validate_user_identification(cls, v, info):
-        """Valida que se proporcione user_id o email, pero no ambos"""
-        # Obtener user_id de forma segura
         user_id = info.data.get('user_id') if info.data else None
         
-        # Normalizar valores vacíos a None
         if user_id == "null" or user_id == "":
             user_id = None
         if v == "null" or v == "":
             v = None
             
-        # Caso 1: Ni user_id ni email
         if not user_id and not v:
             raise ValueError('Se debe proporcionar user_id o email')
         
-        # Caso 2: Ambos proporcionados y no vacíos
         if user_id and v:
             raise ValueError('No se puede proporcionar user_id y email al mismo tiempo')
             
@@ -96,7 +90,6 @@ class DocumentSigner(BaseModel):
     )
 
 class SaveDocumentRequest(BaseModel):
-    """Modelo para solicitud de guardado de cambios en documento"""
     reference: Optional[str] = Field(None, max_length=250, description="Nuevo asunto o referencia del documento (máximo 250 caracteres)")
     content: Optional[str] = Field(None, max_length=500_000, description="Contenido HTML del documento (se almacena como JSON)")
     signers: Optional[List[DocumentSigner]] = Field(None, description="Lista de firmantes del documento")
@@ -111,6 +104,10 @@ class SaveDocumentRequest(BaseModel):
     proposed_case_ids: Optional[List[str]] = Field(
         None,
         description="Lista de UUIDs de expedientes a los que se propone vincular este documento. Un documento puede estar propuesto a múltiples expedientes diferentes."
+    )
+    auto_link_on_sign: Optional[bool] = Field(
+        False,
+        description="Si es true, la vinculación a los expedientes propuestos se confirma automáticamente al firmar el documento."
     )
 
     model_config = ConfigDict(
@@ -138,7 +135,6 @@ class SaveDocumentRequest(BaseModel):
     )
 
 class SaveDocumentResponse(BaseModel):
-    """Respuesta al guardado de cambios en documento"""
     success: bool = Field(..., description="Indica si la operación fue exitosa")
     message: str = Field(..., description="Mensaje descriptivo del resultado de la operación")
     document_id: str = Field(..., description="UUID del documento actualizado")
@@ -156,7 +152,6 @@ class SaveDocumentResponse(BaseModel):
     )
 
 class DocumentSignerInfo(BaseModel):
-    """Información completa de un firmante del documento"""
     user_id: str = Field(..., description="UUID del usuario firmante")
     full_name: str = Field(..., description="Nombre completo del firmante")
     is_numerator: bool = Field(..., description="Indica si este firmante es el numerador")
@@ -178,7 +173,6 @@ class DocumentSignerInfo(BaseModel):
     )
 
 class RejectionInfo(BaseModel):
-    """Información sobre el rechazo de un documento"""
     reason: str = Field(..., description="Motivo del rechazo")
     rejected_at: str = Field(..., description="Fecha y hora del rechazo en formato ISO")
     rejected_by: str = Field(..., description="UUID del usuario que rechazó")
@@ -196,10 +190,9 @@ class RejectionInfo(BaseModel):
     )
 
 class DocumentDetailResponse(BaseModel):
-    """Respuesta completa con todos los datos del documento editable"""
     document_id: str = Field(..., description="UUID del documento")
     reference: str = Field(..., description="Asunto o referencia del documento")
-    content: Optional[str] = Field(None, description="Contenido HTML del documento")
+    content: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Contenido del documento: HTML string para tipos editor/NOTA/MEMO; objeto (data del formulario) para tipos con formulario controlado (has_fields)")
     status: str = Field(..., description="Estado técnico del documento ('draft' o 'rejected')")
     document_type: DocumentTypeInfo = Field(..., description="Información del tipo de documento")
     created_by: str = Field(..., description="UUID del usuario creador")
@@ -210,28 +203,39 @@ class DocumentDetailResponse(BaseModel):
     rejection_info: Optional[RejectionInfo] = Field(None, description="Información del rechazo (solo si el documento fue rechazado)")
     created_at: Optional[str] = Field(None, description="Fecha y hora de creación en formato ISO")
     updated_at: Optional[str] = Field(None, description="Fecha y hora de última modificación en formato ISO")
-    # Campos para documentos importados
     is_imported: bool = Field(default=False, description="Indica si el documento es importado (PDF subido)")
     pdf_url: Optional[str] = Field(None, description="URL del PDF para documentos importados")
-    # Campo para resumen generado por IA
     resume: Optional[str] = Field(None, description="Resumen del documento generado por IA")
     short_resume: Optional[str] = Field(None, description="Resumen corto del documento generado por IA (1-2 oraciones)")
-    # Campo para destinatarios de NOTA
     recipients: Optional[Dict[str, List]] = Field(
         None,
         description="Destinatarios para documentos tipo NOTA. Contiene to, cc, bcc con datos de cada sector"
     )
-    # Campo para expedientes propuestos
+    memo_recipients: Optional[Dict[str, List]] = Field(
+        None,
+        description="Destinatarios para documentos tipo MEMO. Contiene to, cc, bcc con datos de cada usuario"
+    )
     proposed_cases: Optional[List[ProposedCaseInfo]] = Field(
         None,
         description="Lista de expedientes a los que se propone vincular este documento"
+    )
+    auto_link_on_sign: bool = Field(
+        default=False,
+        description="True si al menos una propuesta activa tiene auto_link_on_sign=true (el checkbox 'Vincular cuando se firme' está tildado)"
+    )
+    field_definitions: Optional[List] = Field(
+        None,
+        description="Definiciones de los campos del formulario controlado (FFCC). Presente solo cuando el tipo de documento tiene formulario controlado. El frontend lo usa para renderizar el panel de formulario."
+    )
+    embedded_files: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Adjuntos embebidos del documento (metadata, nunca r2_key). Es una lista (posiblemente vacia) cuando el tipo de documento acepta embebidos; null cuando no los acepta."
     )
 
     model_config = ConfigDict(
         json_schema_extra={
             "examples": [
                 {
-                    # Ejemplo 1: Documento en draft (sin rechazo)
                     "document_id": "550e8400-e29b-41d4-a716-446655440000",
                     "reference": "Solicitud de declaración de interés municipal",
                     "content": "<h1>Título del documento</h1><p>Contenido con formato...</p>",

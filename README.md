@@ -92,7 +92,7 @@ draft → sent_to_sign → [firman todos] → official
 
 ## MCP Server
 
-Servidor MCP con OAuth 2.0 automático (RFC 9728 + RFC 8414), compatible con Claude Code, ChatGPT y Gemini. Producción: `https://mcp.gdilatam.com/mcp`.
+Servidor MCP con OAuth 2.0 automático (RFC 9728 + RFC 8414), compatible con Claude Code, ChatGPT y Gemini. Producción: `https://gateway.your-domain.com/mcp`.
 
 - **33 tools de lectura**: búsqueda de expedientes/documentos/registros, historial con resúmenes IA, firmas pendientes, etc.
 - **9 tools de escritura**: crear/guardar/proponer documentos, iniciar firma, rechazar, asignar expedientes, gestionar responsables

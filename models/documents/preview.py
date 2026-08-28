@@ -1,14 +1,8 @@
-"""
-Modelos Pydantic para previsualización de documentos.
-Define los esquemas de response para generación de PDFs de previsualización.
-"""
 
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
-from datetime import datetime
 
 class DocumentPreviewResponse(BaseModel):
-    """Response para operación de previsualización de documento."""
     success: bool = Field(..., description="Indica si la previsualización se generó exitosamente")
     message: str = Field(..., description="Mensaje descriptivo")
     document_id: str = Field(..., description="UUID del documento")
@@ -17,7 +11,6 @@ class DocumentPreviewResponse(BaseModel):
     pdf_generation: Dict[str, Any] = Field(..., description="Información de la generación del PDF")
 
 class DocumentPreviewInfo(BaseModel):
-    """Información optimizada del documento para previsualización."""
     document_id: str = Field(..., description="UUID del documento")
     reference: str = Field(..., description="Referencia del documento")
     document_type: Dict[str, str] = Field(..., description="Información del tipo de documento")
@@ -28,7 +21,6 @@ class DocumentPreviewInfo(BaseModel):
     document_generate_id: Optional[str] = Field(None, description="UUID del PDF generado si existe")
 
 class PreviewInfoResponse(BaseModel):
-    """Response para endpoint preview-info."""
     success: bool = Field(True, description="Indica si la operación fue exitosa")
     message: str = Field(..., description="Mensaje descriptivo")
     document_id: str = Field(..., description="UUID del documento")

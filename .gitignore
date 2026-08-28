@@ -74,10 +74,16 @@ htmlcov/
 temp_previews/
 temp_*.json
 nul
-temp_yanina_service.txt
+temp_*_service.txt
 
 # Archivos de listados temporales
 *_files.txt
 *_files_raw.txt
 .claude/settings.local.json
 AGENTS.md
+
+# Memoria local de los subagentes (por maquina, no se comparte)
+.claude/agent-memory/
+
+# Estado local de wrangler/miniflare (emulador R2 del worker public-pdf)
+.wrangler/

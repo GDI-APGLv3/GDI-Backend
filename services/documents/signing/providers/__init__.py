@@ -1,6 +1,3 @@
-"""
-Tipos de resultado para poll_signing de proveedores de firma digital.
-"""
 from dataclasses import dataclass
 
 

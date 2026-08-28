@@ -1,8 +1,3 @@
-"""
-Endpoints para aceptar/rechazar documentos propuestos en expedientes
-POST /cases/{case_id}/proposed-documents/{proposed_id}/accept
-POST /cases/{case_id}/proposed-documents/{proposed_id}/reject
-"""
 
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, Field
@@ -27,10 +22,6 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["expedientes"])
 
-
-# ============================================================================
-# RESPONSE MODELS
-# ============================================================================
 
 class AcceptProposedDocumentData(BaseModel):
     link_id: str = Field(..., example="link-123")
@@ -81,10 +72,6 @@ class ProposeDocumentResponse(BaseModel):
     message: str = Field(..., example="Documento propuesto para vincular al expediente")
 
 
-# ============================================================================
-# ENDPOINTS
-# ============================================================================
-
 @router.post(
     "/{case_id}/proposed-documents/{proposed_id}/accept",
     response_model=AcceptProposedDocumentResponse
@@ -107,7 +94,6 @@ async def accept_proposed_document(
 
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # Obtener sector y nombre del usuario
         user_query = "SELECT sector_id, full_name FROM users WHERE id = $1"
         user_result = await fetch_one(user_query, db_user_id, schema_name=schema_name)
 
@@ -117,7 +103,6 @@ async def accept_proposed_document(
         user_sector_id = str(user_result['sector_id'])
         user_full_name = user_result['full_name']
 
-        # Aceptar propuesta (vincula + desactiva)
         link_result = await CaseService.accept_proposed_document(
             case_id=case_id,
             proposed_id=proposed_id,
@@ -178,12 +163,10 @@ async def reject_proposed_document(
 
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # Obtener sector del usuario para historial
         user_query = "SELECT sector_id FROM users WHERE id = $1"
         user_result = await fetch_one(user_query, db_user_id, schema_name=schema_name)
         user_sector_id = str(user_result['sector_id']) if user_result else None
 
-        # Rechazar propuesta (desactiva + registra historial)
         result = await CaseService.reject_proposed_document(
             case_id=case_id,
             proposed_id=proposed_id,

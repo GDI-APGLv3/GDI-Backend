@@ -1,7 +1,3 @@
-"""
-Endpoints para pruebas de autenticación con Auth0.
-Permite verificar que la integración funcione correctamente.
-"""
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import JSONResponse
@@ -80,7 +76,6 @@ async def exchange_auth0_token(token: str):
     Returns:
         Información decodificada del token
     """
-    # 🔒 Verificar si estamos en modo testing
     testing_mode = os.getenv("TESTING_MODE", "false").lower() == "true"
 
     if not testing_mode:
@@ -89,7 +84,6 @@ async def exchange_auth0_token(token: str):
             detail="Endpoint no disponible en modo producción"
         )
 
-    # ✅ Solo ejecuta esto si TESTING_MODE=true
     try:
         from auth import verify_token
         payload = verify_token(token)

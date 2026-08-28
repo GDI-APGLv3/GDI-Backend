@@ -1,4 +1,3 @@
-"""Endpoint para obtener detalles de documento en estado editable."""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request
@@ -52,7 +51,7 @@ async def get_document_editor_details(
         if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
             from shared.exceptions import AuthorizationError
             raise AuthorizationError("No tiene permisos para ver este documento")
-        result = await get_document_details_for_editing(document_id, schema_name=schema_name)
+        result = await get_document_details_for_editing(document_id, request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(
             "Detalles de documento obtenidos exitosamente",

@@ -1,4 +1,3 @@
-"""Validaciones de dominio para Cases"""
 
 from shared.logging import get_logger
 from typing import Dict, Any
@@ -8,7 +7,6 @@ logger = get_logger(__name__)
 
 
 async def validate_and_get_user(connection, user_id: str) -> Dict[str, Any]:
-    """Valida que el usuario existe y retorna sus datos completos."""
     result = await connection.fetchrow(
         """
         SELECT
@@ -39,12 +37,13 @@ async def validate_and_get_user(connection, user_id: str) -> Dict[str, Any]:
 
 
 async def validate_and_get_template(connection, template_id: str) -> Dict[str, Any]:
-    """Valida que el template existe, está activo y retorna sus datos."""
     result = await connection.fetchrow(
         """
         SELECT
             ct.id,
             ct.filing_department_id,
+            ct.filing_sector_id,
+            ct.creation_channel,
             ct.type_name,
             ct.acronym,
             ct.is_active
@@ -64,12 +63,44 @@ async def validate_and_get_template(connection, template_id: str) -> Dict[str, A
     template_data = {
         'id': result['id'],
         'filing_department_id': str(result['filing_department_id']),
+        'filing_sector_id': str(result['filing_sector_id']),
+        'creation_channel': result['creation_channel'],
         'type_name': result['type_name'],
-        'acronym': result['acronym']
+        'acronym': result['acronym'],
+        'is_active': result['is_active'],
     }
 
     logger.info(f"Template validado: {template_data['type_name']} ({template_data['acronym']})")
     return template_data
+
+
+async def validate_and_get_citizen(connection, citizen_id: str) -> Dict[str, Any]:
+    result = await connection.fetchrow(
+        "SELECT id, full_name, estado FROM citizens WHERE id = $1",
+        citizen_id
+    )
+
+    if not result:
+        logger.info(f"Ciudadano {citizen_id[:8]}... no encontrado")
+        raise NotFoundError(f"Ciudadano {citizen_id} no encontrado en el sistema")
+
+    citizen_data = {
+        'citizen_id': str(result['id']),
+        'full_name': result['full_name'],
+        'estado': result['estado'],
+    }
+
+    logger.info(f"Ciudadano validado: {citizen_data['full_name']}")
+    return citizen_data
+
+
+def validate_creation_channel_for_citizen(template_data: Dict[str, Any]) -> None:
+    channel = template_data.get('creation_channel')
+    if channel not in ('api', 'both'):
+        raise ValidationError(
+            f"El tipo de expediente '{template_data.get('acronym')}' no admite creacion "
+            f"por Trámites a Distancia (creation_channel='{channel}', requiere 'api' o 'both')."
+        )
 
 
 async def validate_department_permissions(
@@ -77,7 +108,6 @@ async def validate_department_permissions(
     user_id: str,
     department_id: str
 ) -> None:
-    """Valida que el usuario tenga permisos en el departamento especificado."""
     result = await connection.fetchrow(
         """
         SELECT 1
@@ -109,7 +139,6 @@ async def validate_owner_sector_belongs_to_department(
     owner_sector_id: str,
     filing_department_id: str
 ) -> None:
-    """Valida que el sector propietario pertenezca al departamento correcto."""
     result = await connection.fetchrow(
         """
         SELECT id as sector_id, acronym as name, department_id

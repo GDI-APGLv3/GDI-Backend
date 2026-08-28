@@ -1,12 +1,3 @@
-"""
-Endpoint para búsqueda de usuarios - Arquitectura modular.
-Aplicando principios SOLID: Endpoint con separación total de responsabilidades.
-
-Siguiendo el patrón de endpoints especializados:
-- Endpoint de 2-3 líneas máximo
-- Toda la lógica delegada al servicio  
-- Manejo de errores centralizado
-"""
 
 from fastapi import APIRouter, Query, Depends
 from typing import Optional
@@ -17,6 +8,7 @@ from auth import get_current_user
 from services.users.search import search_users_for_autocomplete, search_or_create_user_by_email, is_email
 from shared.exceptions import exception_to_http_exception
 from shared.dependencies import get_tenant_schema
+from database import get_conn
 
 router = APIRouter()
 
@@ -180,20 +172,16 @@ async def search_users_endpoint(
     - Si q es texto normal → Búsqueda normal por nombre
     """
     try:
-        # Detectar si es búsqueda por email o por nombre
         if is_email(q):
-            # Búsqueda/creación por email
             result = await search_or_create_user_by_email(email=q, schema_name=schema_name)
         else:
-            # Búsqueda normal por nombre - Single Responsibility
-            result = await search_users_for_autocomplete(search_query=q, limit=limit, schema_name=schema_name)
+            async with get_conn(schema_name=schema_name) as conn:
+                result = await search_users_for_autocomplete(search_query=q, limit=limit, schema_name=schema_name, conn=conn)
 
-        # Respuesta directa usando **unpacking como en editor-details
         return UserSearchResponse(
             search_query=q,
             **result
         )
 
     except Exception as e:
-        # Manejo centralizado de errores
         raise exception_to_http_exception(e)

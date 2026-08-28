@@ -1,34 +1,30 @@
-"""
-INSERT-only audit trail para firmas (Ley 25.506 - Firma Digital Argentina).
-
-La tabla public.firma_audit_log tiene REVOKE UPDATE/DELETE: los registros
-no pueden modificarse una vez insertados.
-
-Usa asyncpg (patrón del proyecto) y nunca lanza excepciones
-hacia el caller: loggea el error pero no interrumpe el flujo de firma.
-
-Columnas opcionales (cert_*, tsa_*, revocation_*) se populan en Fase 2
-cuando se integra firma digital con token/cloud.
-"""
-import logging
+from shared.logging import get_logger
 import re
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE,
 )
 
-def _uuid_or_none(val: str | None) -> str | None:
-    """Retorna val si es UUID válido, None si no (evita error ::uuid cast con session_ids alfanuméricos de AutoFirma)."""
-    if val and _UUID_RE.match(val):
-        return val
+def _como_fecha(valor):
+    if valor is None or isinstance(valor, datetime):
+        return valor
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if not texto:
+            return None
+        try:
+            return datetime.fromisoformat(texto.replace("Z", "+00:00"))
+        except ValueError:
+            log.warning("audit_log.fecha_ilegible valor=%r — se guarda NULL", texto[:40])
+            return None
+    log.warning("audit_log.fecha_tipo_inesperado tipo=%s — se guarda NULL", type(valor).__name__)
     return None
 
-# Nombre de la tabla en el schema public (compartida entre todos los tenants)
+
 _AUDIT_TABLE = "public.firma_audit_log"
 
 
@@ -37,8 +33,8 @@ async def log_signature_event(
     schema_name: str,
     document_id: str,
     user_id: str,
-    signature_method: str,           # 'electronic', 'digital_token', 'digital_cloud'
-    result: str,                      # 'ok', 'fail', 'pending'
+    signature_method: str,
+    result: str,
     failure_reason: str | None = None,
     session_id: str | None = None,
     user_cuit: str | None = None,
@@ -63,50 +59,11 @@ async def log_signature_event(
     revocation_status: str | None = None,
     revocation_check_time: datetime | None = None,
     r2_object_key: str | None = None,
+    actor_type: str = "user",
 ) -> None:
-    """
-    Inserta un registro en public.firma_audit_log.
-
-    Async (asyncpg). Nunca lanza excepción hacia el caller:
-    si falla el INSERT, loggea el error y continúa.
-
-    Args:
-        schema_name: Schema del tenant (keyword-only). Guardado en la fila para correlación.
-        document_id: UUID del documento firmado.
-        user_id: UUID del usuario que firmó.
-        signature_method: 'electronic' (Fase 1) | 'digital_token' | 'digital_cloud' (Fase 2+).
-        result: 'ok' | 'fail' | 'pending'.
-        failure_reason: Mensaje de error si result='fail'.
-        session_id: UUID de la sesión de firma (Fase 2, None en Fase 1).
-        user_cuit: CUIT del firmante (Fase 2, None en Fase 1).
-        official_number: Número oficial asignado (solo numerador exitoso).
-        document_hash_pre: SHA-256 del PDF antes de firmar (Fase 2).
-        document_hash_post: SHA-256 del PDF firmado (Fase 2).
-        cert_serial: Número de serie del certificado (Fase 2).
-        cert_issuer_dn: DN del emisor del certificado (Fase 2).
-        cert_subject_dn: DN del sujeto del certificado (Fase 2).
-        cert_subject_cuit: CUIT en el certificado (Fase 2).
-        cert_not_after: Fecha de vencimiento del certificado (Fase 2).
-        cert_policy_oids: Lista de OIDs de política del certificado (Fase 2).
-        signature_algorithm: Algoritmo de firma (ej: 'SHA256withRSA') (Fase 2).
-        signature_level: Nivel PAdES (ej: 'B-B', 'B-T') (Fase 2).
-        tsa_url: URL del servidor de timestamp (Fase 2).
-        tsa_serial: Número de serie del timestamp (Fase 2).
-        tsa_time: Timestamp del TSA (Fase 2).
-        time_skew_seconds: Diferencia entre reloj del servidor y TSA (Fase 2).
-        ip_address: IP del cliente (formato inet de PostgreSQL).
-        user_agent: User-Agent del cliente.
-        revocation_method: 'crl' | 'ocsp' (Fase 2).
-        revocation_status: 'good' | 'revoked' | 'unknown' (Fase 2).
-        revocation_check_time: Momento de la verificación de revocación (Fase 2).
-        r2_object_key: Key del objeto R2 resultante de la firma.
-    """
     try:
         from database import execute
 
-        # La tabla firma_audit_log vive en public (compartida entre tenants).
-        # Usamos 'public' como schema_name para el SET search_path,
-        # y guardamos el schema_name del tenant en la columna correspondiente.
         await execute(
             f"""
             INSERT INTO {_AUDIT_TABLE} (
@@ -139,7 +96,8 @@ async def log_signature_event(
                 revocation_check_time,
                 result,
                 failure_reason,
-                r2_object_key
+                r2_object_key,
+                actor_type
             ) VALUES (
                 $1,
                 $2,
@@ -170,7 +128,8 @@ async def log_signature_event(
                 $26,
                 $27,
                 $28,
-                $29
+                $29,
+                $30
             )
             """,
             schema_name,
@@ -186,22 +145,23 @@ async def log_signature_event(
             cert_issuer_dn,
             cert_subject_dn,
             cert_subject_cuit,
-            cert_not_after,
+            _como_fecha(cert_not_after),
             cert_policy_oids,
             signature_algorithm,
             signature_level,
             tsa_url,
             tsa_serial,
-            tsa_time,
+            _como_fecha(tsa_time),
             time_skew_seconds,
             ip_address,
             user_agent,
             revocation_method,
             revocation_status,
-            revocation_check_time,
+            _como_fecha(revocation_check_time),
             result,
             failure_reason,
             r2_object_key,
+            actor_type,
             schema_name="public",
         )
 
@@ -216,7 +176,6 @@ async def log_signature_event(
         )
 
     except Exception:
-        # NUNCA interrumpir el flujo de firma por un fallo del audit log.
         log.exception(
             "audit_log.insert_failed",
             extra={

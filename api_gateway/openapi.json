@@ -1,0 +1,3873 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "GDI MCP Server API",
+    "version": "1.0.0",
+    "description": "API de Gestión Documental Inteligente para gobiernos latinoamericanos. Permite consultar expedientes, documentos, firmas pendientes y catálogos del sistema."
+  },
+  "servers": [
+    {
+      "url": "__OPENAPI_BASE_URL__"
+    }
+  ],
+  "paths": {
+    "/api/v1/cases/search": {
+      "get": {
+        "operationId": "searchCases",
+        "summary": "Buscar expedientes",
+        "description": "Busca expedientes por número, referencia, contenido de documentos, nombres, direcciones, etc.",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar (número, referencia, contenido)"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "inactive",
+                "archived"
+              ]
+            },
+            "description": "Estado del expediente"
+          },
+          {
+            "name": "date_filter",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "hoy",
+                "ayer",
+                "ultimos_7_dias",
+                "ultimos_30_dias"
+              ]
+            },
+            "description": "Filtro temporal"
+          },
+          {
+            "name": "sector_filter",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filtrar por sector (acronym)"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Página"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por página (max 100)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de expedientes con case_number, reference, ai_summary"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}": {
+      "get": {
+        "operationId": "getCase",
+        "summary": "Detalle de expediente",
+        "description": "Obtiene información completa de un expediente específico",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          },
+          {
+            "name": "include_documents",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Incluir lista de documentos"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle del expediente"
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/history": {
+      "get": {
+        "operationId": "getCaseHistory",
+        "summary": "Historial de expediente",
+        "description": "Obtiene historial completo con movimientos, documentos y resumen IA",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Historial con ai_summary, movements, documents"
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/documents": {
+      "get": {
+        "operationId": "getCaseDocuments",
+        "summary": "Documentos del expediente",
+        "description": "Lista documentos oficiales y propuestos vinculados al expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de documentos oficiales y propuestos"
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/permissions": {
+      "get": {
+        "operationId": "getCasePermissions",
+        "summary": "Permisos sobre expediente",
+        "description": "Consulta qué acciones puede realizar el usuario sobre el expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Permisos: can_view, can_transfer, can_archive, etc."
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/search": {
+      "get": {
+        "operationId": "searchDocuments",
+        "summary": "Buscar documentos",
+        "description": "Busca documentos por número, referencia, contenido completo, nombres, etc.",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "sent_to_sign",
+                "signed",
+                "rejected"
+              ]
+            },
+            "description": "Estado del documento"
+          },
+          {
+            "name": "document_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Tipo de documento (INF, DICT, CAEX, etc.)"
+          },
+          {
+            "name": "case_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filtrar por expediente"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Página"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por página"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de documentos"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/pending-signatures": {
+      "get": {
+        "operationId": "getPendingSignatures",
+        "summary": "Firmas pendientes",
+        "description": "Lista documentos que esperan la firma del usuario actual",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Lista de documentos pendientes de firma"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}": {
+      "get": {
+        "operationId": "getDocument",
+        "summary": "Detalle de documento",
+        "description": "Obtiene información completa del documento incluyendo resumen IA",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle del documento con ai_summary"
+          },
+          "404": {
+            "description": "Documento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/content": {
+      "get": {
+        "operationId": "getDocumentContent",
+        "summary": "Contenido completo del documento",
+        "description": "Obtiene el contenido HTML completo del documento (solo oficiales)",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento oficial"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contenido HTML del documento"
+          },
+          "404": {
+            "description": "Documento no encontrado"
+          },
+          "400": {
+            "description": "Solo disponible para documentos oficiales"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/url": {
+      "get": {
+        "operationId": "getDocumentUrl",
+        "summary": "URL de descarga del documento",
+        "description": "Obtiene URL firmada temporal para descargar el PDF del documento oficial",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento oficial"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "URL del documento con expiración"
+          },
+          "404": {
+            "description": "Documento no encontrado o no es oficial"
+          },
+          "401": {
+            "description": "API Key inválida"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/document-types": {
+      "get": {
+        "operationId": "getDocumentTypes",
+        "summary": "Tipos de documentos",
+        "description": "Lista todos los tipos de documentos disponibles (INF, DICT, CAEX, etc.)",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Lista de tipos con name y acronym"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/users/{user_id}": {
+      "get": {
+        "operationId": "getUserInfo",
+        "summary": "Información del usuario",
+        "description": "Obtiene información del usuario: sector, roles, permisos adicionales",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del usuario"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Info del usuario con sector y roles"
+          },
+          "404": {
+            "description": "Usuario no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/document-states": {
+      "get": {
+        "operationId": "getDocumentStates",
+        "summary": "Estados de documentos",
+        "description": "Catálogo de estados posibles para documentos",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Lista de estados con nombre y código"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/number/{case_number}": {
+      "get": {
+        "operationId": "getCaseByNumber",
+        "summary": "Buscar expediente por número",
+        "description": "Obtiene un expediente por su número exacto",
+        "parameters": [
+          {
+            "name": "case_number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Número exacto del expediente (ej: EE-2026-00001234)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Expediente encontrado"
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/prepare-assignment": {
+      "get": {
+        "operationId": "prepareAssignment",
+        "summary": "Preparar asignación",
+        "description": "Verifica permisos y obtiene información para asignar expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Información de permisos y sectores disponibles"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/assign": {
+      "post": {
+        "operationId": "assignCase",
+        "summary": "Asignar expediente",
+        "description": "Asigna un expediente a otro sector sin transferir propiedad",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "target_sector_id",
+                  "reason"
+                ],
+                "properties": {
+                  "target_sector_id": {
+                    "type": "string",
+                    "description": "UUID del sector destino"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Motivo de la asignación (5-500 chars)"
+                  },
+                  "assigned_user_id": {
+                    "type": "string",
+                    "description": "UUID del usuario asignado (opcional)"
+                  },
+                  "create_official_doc": {
+                    "type": "boolean",
+                    "description": "Generar documento PV automático"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Asignación exitosa"
+          },
+          "403": {
+            "description": "Sin permisos para asignar"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/close-assign": {
+      "post": {
+        "operationId": "closeAssignment",
+        "summary": "Cerrar asignación",
+        "description": "Cierra una asignación de expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "movement_id",
+                  "reason"
+                ],
+                "properties": {
+                  "movement_id": {
+                    "type": "string",
+                    "description": "UUID del movimiento a cerrar"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Razón del cierre (5-500 chars)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Asignación cerrada"
+          },
+          "404": {
+            "description": "Movimiento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/assignments": {
+      "get": {
+        "operationId": "getAssignments",
+        "summary": "Listar assignments activos",
+        "description": "Devuelve los assignments activos del expediente con sus tareas anidadas",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de assignments con tareas"
+          },
+          "403": {
+            "description": "Sin permisos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/assignable-users": {
+      "get": {
+        "operationId": "getAssignableUsers",
+        "summary": "Typeahead de usuarios asignables",
+        "description": "Busca usuarios asignables para tareas (mín 2 chars, máx 50 resultados). sector_id opcional para filtrar por sector.",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto de búsqueda (mín 2 caracteres)"
+          },
+          {
+            "name": "sector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del sector (opcional)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de usuarios asignables"
+          },
+          "400": {
+            "description": "Parámetros inválidos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/available-responsibles": {
+      "get": {
+        "operationId": "getAvailableResponsibles",
+        "summary": "Usuarios disponibles para responsable",
+        "description": "Lista usuarios disponibles para asignar como responsable. type=ADMIN|ADDITIONAL requerido. sector_id opcional.",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ADMIN",
+                "ADDITIONAL"
+              ]
+            },
+            "description": "Tipo de responsable"
+          },
+          {
+            "name": "sector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del sector (opcional)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de usuarios disponibles"
+          },
+          "400": {
+            "description": "Parámetros inválidos"
+          },
+          "403": {
+            "description": "Sin permisos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/tasks/{task_id}": {
+      "patch": {
+        "operationId": "updateTask",
+        "summary": "Reasignar responsable de tarea",
+        "description": "Reasigna el responsable de una tarea sin cerrarla. assigned_user_id null quita el responsable.",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID de la tarea"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "assigned_user_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UUID del nuevo responsable, null para quitar"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Responsable actualizado"
+          },
+          "400": {
+            "description": "Usuario no pertenece al sector de la tarea"
+          },
+          "403": {
+            "description": "Sin permisos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/tasks/{task_id}/close": {
+      "post": {
+        "operationId": "closeTask",
+        "summary": "Cerrar tarea",
+        "description": "Cierra una tarea de asignación. Si es la última tarea abierta del sector y falta closing_reason válido devuelve 409 {is_last_task: true}.",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID de la tarea"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "closing_reason": {
+                    "type": "string",
+                    "description": "Motivo del cierre (obligatorio si es la última tarea, mín 5 chars)"
+                  },
+                  "create_official_doc": {
+                    "type": "boolean",
+                    "description": "Generar PV de cierre al cerrar el sector (default false)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tarea cerrada"
+          },
+          "400": {
+            "description": "Parámetros inválidos"
+          },
+          "403": {
+            "description": "Sin permisos"
+          },
+          "409": {
+            "description": "Última tarea del sector: requiere closing_reason válido (is_last_task: true)"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/": {
+      "post": {
+        "operationId": "createDocument",
+        "summary": "Crear documento",
+        "description": "Crea un nuevo documento en estado borrador. Soporta todos los tipos: INF, DICT, NOTA, MEMO, etc. Para NOTA/MEMO incluir recipients con to/cc/bcc.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "document_type_acronym",
+                  "reference"
+                ],
+                "properties": {
+                  "document_type_acronym": {
+                    "type": "string",
+                    "description": "Acrónimo del tipo (INF, DICT, NOTA, MEMO, etc.)"
+                  },
+                  "reference": {
+                    "type": "string",
+                    "description": "Descripción del documento"
+                  },
+                  "case_id": {
+                    "type": "string",
+                    "description": "UUID del expediente a vincular (opcional)"
+                  },
+                  "recipients": {
+                    "type": "object",
+                    "description": "Destinatarios para NOTA (sector UUIDs) o MEMO (user UUIDs).",
+                    "properties": {
+                      "to": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "description": "Destinatarios principales"
+                      },
+                      "cc": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "description": "Copia"
+                      },
+                      "bcc": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "description": "Copia oculta"
+                      }
+                    }
+                  }
+                }
+              },
+              "examples": {
+                "informe": {
+                  "summary": "Crear informe simple",
+                  "value": {
+                    "document_type_acronym": "INF",
+                    "reference": "Informe de actividades mensuales"
+                  }
+                },
+                "nota": {
+                  "summary": "Crear NOTA entre sectores",
+                  "value": {
+                    "document_type_acronym": "NOTA",
+                    "reference": "Solicitud de insumos de oficina",
+                    "recipients": {
+                      "to": [
+                        "<sector-uuid>"
+                      ],
+                      "cc": [],
+                      "bcc": []
+                    }
+                  }
+                },
+                "memo": {
+                  "summary": "Crear MEMO entre personas",
+                  "value": {
+                    "document_type_acronym": "MEMO",
+                    "reference": "Convocatoria reunión de equipo",
+                    "recipients": {
+                      "to": [
+                        "<user-uuid>"
+                      ],
+                      "cc": [],
+                      "bcc": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Documento creado"
+          },
+          "400": {
+            "description": "Datos inválidos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/start-signing": {
+      "post": {
+        "operationId": "startSigning",
+        "summary": "Iniciar proceso de firma",
+        "description": "Envía un documento al proceso de firma",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proceso de firma iniciado"
+          },
+          "403": {
+            "description": "No autorizado (debe ser el creador)"
+          },
+          "409": {
+            "description": "Documento no puede firmarse en su estado actual"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/sign": {
+      "post": {
+        "operationId": "signDocument",
+        "summary": "Firmar documento",
+        "description": "Firma un documento como el usuario actual",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documento firmado"
+          },
+          "403": {
+            "description": "No autorizado"
+          },
+          "409": {
+            "description": "Estado invalido"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/reject": {
+      "post": {
+        "operationId": "rejectDocument",
+        "summary": "Rechazar documento",
+        "description": "Rechaza un documento en proceso de firma",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Motivo del rechazo"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Documento rechazado"
+          },
+          "403": {
+            "description": "No autorizado"
+          },
+          "409": {
+            "description": "Estado invalido"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/": {
+      "post": {
+        "operationId": "createCase",
+        "summary": "Crear expediente",
+        "description": "Crea un nuevo expediente con caratula automatica",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "case_template_id",
+                  "reference"
+                ],
+                "properties": {
+                  "case_template_id": {
+                    "type": "string",
+                    "description": "UUID del template"
+                  },
+                  "reference": {
+                    "type": "string",
+                    "description": "Asunto del expediente"
+                  },
+                  "owner_sector_id": {
+                    "type": "string",
+                    "description": "UUID del sector propietario (opcional)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Expediente creado"
+          },
+          "400": {
+            "description": "Datos invalidos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/transfer": {
+      "post": {
+        "operationId": "transferCase",
+        "summary": "Transferir expediente",
+        "description": "Transfiere propiedad del expediente a otro sector",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "target_sector_id",
+                  "reason"
+                ],
+                "properties": {
+                  "target_sector_id": {
+                    "type": "string",
+                    "description": "UUID del sector destino"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Motivo (5-500 chars)"
+                  },
+                  "assigned_user_id": {
+                    "type": "string",
+                    "description": "UUID usuario asignado (opcional)"
+                  },
+                  "create_official_doc": {
+                    "type": "boolean",
+                    "description": "Generar PV automatico"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transferencia exitosa"
+          },
+          "403": {
+            "description": "Sin permisos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/documents/link": {
+      "post": {
+        "operationId": "linkDocumentToCase",
+        "summary": "Vincular documento oficial",
+        "description": "Vincula un documento oficial firmado a un expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "official_document_id"
+                ],
+                "properties": {
+                  "official_document_id": {
+                    "type": "string",
+                    "description": "UUID del documento oficial"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Documento vinculado"
+          },
+          "403": {
+            "description": "Sin permisos"
+          },
+          "404": {
+            "description": "No encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/documents/propose": {
+      "post": {
+        "operationId": "proposeDocument",
+        "summary": "Proponer documento",
+        "description": "Propone un borrador para vincular al expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "document_draft_id"
+                ],
+                "properties": {
+                  "document_draft_id": {
+                    "type": "string",
+                    "description": "UUID del borrador"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Propuesta creada"
+          },
+          "400": {
+            "description": "Datos invalidos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/prepare-transfer": {
+      "get": {
+        "operationId": "prepareTransfer",
+        "summary": "Preparar transferencia",
+        "description": "Obtiene sectores disponibles para transferir expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sectores disponibles"
+          },
+          "403": {
+            "description": "Sin permisos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/documents/accept-proposal": {
+      "post": {
+        "operationId": "acceptProposal",
+        "summary": "Aceptar propuesta",
+        "description": "Acepta documento propuesto y lo vincula",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "proposed_id"
+                ],
+                "properties": {
+                  "proposed_id": {
+                    "type": "string",
+                    "description": "UUID de la propuesta"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Propuesta aceptada"
+          },
+          "404": {
+            "description": "Propuesta no encontrada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/documents/reject-proposal": {
+      "post": {
+        "operationId": "rejectProposal",
+        "summary": "Rechazar propuesta",
+        "description": "Rechaza documento propuesto sin vincularlo",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "proposed_id"
+                ],
+                "properties": {
+                  "proposed_id": {
+                    "type": "string",
+                    "description": "UUID de la propuesta"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Propuesta rechazada"
+          },
+          "404": {
+            "description": "Propuesta no encontrada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/sectors": {
+      "get": {
+        "operationId": "getSectors",
+        "summary": "Sectores y departamentos",
+        "description": "Lista todos los sectores activos con sus departamentos",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Lista de sectores"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/case-templates": {
+      "get": {
+        "operationId": "getCaseTemplates",
+        "summary": "Templates de expedientes",
+        "description": "Lista plantillas disponibles para crear expedientes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Lista de templates"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/users/search": {
+      "get": {
+        "operationId": "searchUsers",
+        "summary": "Buscar usuarios",
+        "description": "Busca usuarios por nombre para autocompletado",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar (min 2 chars)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 10
+            },
+            "description": "Cantidad maxima"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de usuarios"
+          },
+          "400": {
+            "description": "Query muy corta"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/sectors/{sector_id}/users": {
+      "get": {
+        "operationId": "getSectorUsers",
+        "summary": "Usuarios de un sector",
+        "description": "Obtiene los usuarios que pertenecen a un sector especifico",
+        "parameters": [
+          {
+            "name": "sector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del sector"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de usuarios del sector"
+          },
+          "404": {
+            "description": "Sector no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/search-official/{doc_number}": {
+      "get": {
+        "operationId": "searchDocumentByNumber",
+        "summary": "Buscar documento por numero oficial",
+        "description": "Busca un documento oficial por su numero exacto (ej: INF-2026-00000060-TXST-TESO)",
+        "parameters": [
+          {
+            "name": "doc_number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Numero oficial del documento"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documento encontrado"
+          },
+          "404": {
+            "description": "Documento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/signature-details": {
+      "get": {
+        "operationId": "getSignatureDetails",
+        "summary": "Detalles de firma de un documento",
+        "description": "Obtiene lista de firmantes, estado de cada uno y orden de firma",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalles de firma con firmantes y estados"
+          },
+          "404": {
+            "description": "Documento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/import": {
+      "post": {
+        "operationId": "importDocument",
+        "summary": "Importar documento PDF externo",
+        "description": "Importa un documento PDF externo al sistema",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Archivo PDF a importar"
+                  },
+                  "document_type_acronym": {
+                    "type": "string",
+                    "description": "Tipo de documento"
+                  },
+                  "reference": {
+                    "type": "string",
+                    "description": "Descripcion/asunto"
+                  },
+                  "case_id": {
+                    "type": "string",
+                    "description": "UUID del expediente (opcional)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Documento importado"
+          },
+          "400": {
+            "description": "Datos invalidos"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/{document_id}/imported-pdf": {
+      "put": {
+        "operationId": "replaceImportedPdf",
+        "summary": "Reemplazar PDF de documento importado",
+        "description": "Reemplaza el archivo PDF de un documento previamente importado",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento importado"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Nuevo archivo PDF"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF reemplazado"
+          },
+          "404": {
+            "description": "Documento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/documents/check-signer-permissions": {
+      "get": {
+        "operationId": "checkSignerPermissions",
+        "summary": "Verificar permisos de firmante",
+        "description": "Verifica si un usuario tiene permisos para firmar un documento",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del documento"
+          },
+          {
+            "name": "signer_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del firmante (opcional, usa el usuario actual)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Permisos del firmante"
+          },
+          "404": {
+            "description": "Documento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/users/list": {
+      "get": {
+        "operationId": "listAllUsers",
+        "summary": "Listar todos los usuarios",
+        "description": "Obtiene lista paginada de todos los usuarios del tenant",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Pagina"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "description": "Resultados por pagina"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Buscar por nombre o email"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de usuarios"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notes/received": {
+      "get": {
+        "operationId": "getNotesReceived",
+        "summary": "Notas recibidas",
+        "description": "Lista notas oficiales recibidas",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Pagina"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por pagina"
+          },
+          {
+            "name": "unread_only",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Solo no leidas"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Buscar en contenido"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de notas"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notes/sent": {
+      "get": {
+        "operationId": "getSentNotes",
+        "summary": "Obtener notas enviadas",
+        "description": "Lista notas/comunicaciones enviadas por el usuario",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Pagina"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por pagina"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Buscar en contenido de notas"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de notas enviadas"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notes/archived": {
+      "get": {
+        "operationId": "getArchivedNotes",
+        "summary": "Obtener notas archivadas",
+        "description": "Lista notas archivadas por el usuario",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Pagina"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por pagina"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Buscar en contenido de notas"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de notas archivadas"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notes/{note_id}/archive": {
+      "patch": {
+        "operationId": "archiveNote",
+        "summary": "Archivar nota",
+        "description": "Archiva una nota especifica",
+        "parameters": [
+          {
+            "name": "note_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID de la nota"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Nota archivada"
+          },
+          "404": {
+            "description": "Nota no encontrada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/notes/{note_id}": {
+      "get": {
+        "operationId": "getNoteDetail",
+        "summary": "Detalle de nota",
+        "description": "Obtiene detalle completo de una nota incluyendo contenido, remitente y destinatarios",
+        "parameters": [
+          {
+            "name": "note_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID de la nota"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle de la nota"
+          },
+          "404": {
+            "description": "Nota no encontrada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sync/schema": {
+      "get": {
+        "operationId": "syncSchema",
+        "summary": "Catálogo de tablas sincronizables (Backup)",
+        "description": "Requiere X-API-Key backup. Sin rate limit. Informativo.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Catálogo de tablas con counts"
+          },
+          "401": {
+            "description": "Acceso denegado"
+          },
+          "403": {
+            "description": "Origen no autorizado"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sync/data": {
+      "get": {
+        "operationId": "syncData",
+        "summary": "Datos incrementales de una tabla (Backup)",
+        "description": "Requiere X-API-Key backup. Rate limit: usa rate_limit_per_minute de la key. since siempre obligatorio.",
+        "parameters": [
+          {
+            "name": "table",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filas de la tabla"
+          },
+          "400": {
+            "description": "Tabla no válida o parámetros faltantes"
+          },
+          "401": {
+            "description": "Acceso denegado"
+          },
+          "403": {
+            "description": "Origen no autorizado"
+          },
+          "429": {
+            "description": "Rate limit (Retry-After header)"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sync/documents": {
+      "get": {
+        "operationId": "syncDocuments",
+        "summary": "PDFs de documentos oficiales firmados con presigned URLs (Backup)",
+        "description": "Requiere X-API-Key backup. Devuelve presigned URLs de R2 (TTL 600s). Solo documentos firmados (signed_at IS NOT NULL). since siempre obligatorio.",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de documentos con presigned URLs"
+          },
+          "400": {
+            "description": "Parámetro since faltante o inválido"
+          },
+          "401": {
+            "description": "Acceso denegado"
+          },
+          "403": {
+            "description": "Origen no autorizado"
+          },
+          "429": {
+            "description": "Rate limit (Retry-After header)"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/registries": {
+      "get": {
+        "operationId": "getRegistryFamilies",
+        "summary": "Listar familias de registro (tipos de legajo)",
+        "description": "Devuelve las familias de legajo configuradas en el tenant (ARQ, LUM, ORD, etc.) con sus data_schema, estados y permisos.",
+        "responses": {
+          "200": {
+            "description": "Lista de familias de registro"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/search": {
+      "get": {
+        "operationId": "searchRecords",
+        "summary": "Buscar legajos",
+        "description": "Busca legajos por numero, display_name, campos data (JSONB), estado, familia. Soporta paginacion.",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar"
+          },
+          {
+            "name": "registry_family_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID de familia de registro"
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Estado del legajo"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de legajos"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records": {
+      "post": {
+        "operationId": "createRecord",
+        "summary": "Crear legajo",
+        "description": "Crea un nuevo legajo en una familia. Requiere display_name y registry_family_id. Dispara generacion asincrona de resumen IA.",
+        "responses": {
+          "201": {
+            "description": "Legajo creado"
+          },
+          "400": {
+            "description": "Datos invalidos"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}": {
+      "get": {
+        "operationId": "getRecord",
+        "summary": "Detalle de legajo",
+        "description": "Obtiene datos completos del legajo incluyendo data (JSONB), historial basico, resumen IA.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle del legajo"
+          },
+          "404": {
+            "description": "Legajo no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "updateRecord",
+        "summary": "Actualizar legajo",
+        "description": "Actualiza display_name, state, next_expiration o data completo del legajo.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Legajo actualizado"
+          },
+          "404": {
+            "description": "Legajo no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/fields/{field_name}": {
+      "patch": {
+        "operationId": "updateRecordField",
+        "summary": "Actualizar un campo individual del legajo",
+        "description": "Actualiza un solo campo dentro del data JSONB del legajo.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "field_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campo actualizado"
+          },
+          "404": {
+            "description": "Legajo o campo no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/fields/{field_name}/verify": {
+      "post": {
+        "operationId": "verifyRecordField",
+        "summary": "Marcar campo como verificado",
+        "description": "Marca un campo del legajo como verificado con timestamp y usuario.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "field_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Campo verificado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/history": {
+      "get": {
+        "operationId": "getRecordHistory",
+        "summary": "Historial del legajo",
+        "description": "Devuelve el historial de cambios del legajo enriquecido con contexto de documentos y expedientes vinculados.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Historial del legajo"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/report": {
+      "post": {
+        "operationId": "generateRecordReport",
+        "summary": "Generar informe IFRLM del legajo",
+        "description": "Genera on-demand el Informe de Registro Legajo Multiproposito (IFRLM): PDF via PDFComposer, firma con Notary, sube a R2 y lo registra como documento oficial.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "IFRLM generado y firmado"
+          },
+          "500": {
+            "description": "Error en pipeline externo (PDFComposer/Notary/R2)"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/relations": {
+      "get": {
+        "operationId": "getRecordRelations",
+        "summary": "Relaciones del legajo",
+        "description": "Lista relaciones del legajo con otros legajos (parent, child, related, replaces, sibling, cousin).",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de relaciones"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createRecordRelation",
+        "summary": "Crear relacion entre legajos",
+        "description": "Vincula dos legajos con un tipo de relacion.",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Relacion creada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/relations/{relation_id}": {
+      "delete": {
+        "operationId": "deleteRecordRelation",
+        "summary": "Eliminar relacion entre legajos",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "relation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Relacion eliminada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/cases": {
+      "get": {
+        "operationId": "getRecordCases",
+        "summary": "Expedientes vinculados al legajo",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de expedientes vinculados"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "linkRecordCase",
+        "summary": "Vincular expediente al legajo",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Expediente vinculado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/cases/{link_id}": {
+      "delete": {
+        "operationId": "unlinkRecordCase",
+        "summary": "Desvincular expediente del legajo",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "link_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Expediente desvinculado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/documents": {
+      "get": {
+        "operationId": "getRecordDocuments",
+        "summary": "Documentos vinculados al legajo",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de documentos vinculados"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "linkRecordDocument",
+        "summary": "Vincular documento al legajo",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Documento vinculado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/records/{record_id}/documents/{link_id}": {
+      "delete": {
+        "operationId": "unlinkRecordDocument",
+        "summary": "Desvincular documento del legajo",
+        "parameters": [
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "link_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Documento desvinculado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/responsibles": {
+      "get": {
+        "operationId": "getCaseResponsibles",
+        "summary": "Listar responsables de expediente",
+        "description": "Lista responsables activos (ADMIN y ADDITIONAL) de un expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de responsables activos"
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "addCaseResponsible",
+        "summary": "Agregar responsable a expediente",
+        "description": "Agrega un responsable (ADMIN o ADDITIONAL) al expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "user_id",
+                  "type",
+                  "sector_id"
+                ],
+                "properties": {
+                  "user_id": {
+                    "type": "string",
+                    "description": "UUID del usuario a agregar"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "ADMIN",
+                      "ADDITIONAL"
+                    ],
+                    "description": "Tipo de responsable"
+                  },
+                  "sector_id": {
+                    "type": "string",
+                    "description": "UUID del sector del usuario"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Motivo (opcional, default \"Asignación de responsable\")"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Responsable agregado"
+          },
+          "400": {
+            "description": "Datos inválidos"
+          },
+          "403": {
+            "description": "Sin permisos para modificar este expediente"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/responsibles/{responsible_id}": {
+      "delete": {
+        "operationId": "removeCaseResponsible",
+        "summary": "Quitar responsable de expediente",
+        "description": "Quita (soft delete) un responsable del expediente",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          },
+          {
+            "name": "responsible_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del registro en case_responsibles"
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "Remoción de responsable"
+            },
+            "description": "Motivo de remoción"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Responsable removido"
+          },
+          "403": {
+            "description": "Sin permisos para modificar este expediente"
+          },
+          "404": {
+            "description": "Responsable no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/subsanar": {
+      "post": {
+        "operationId": "subsanarCaseDocument",
+        "summary": "Subsanar documento oficial del expediente",
+        "description": "Desactiva un documento oficial erróneo y lo vincula al documento que justifica la subsanación. Solo usuarios ADMIN del expediente.",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "official_document_id_erroneo",
+                  "official_document_id_justifica"
+                ],
+                "properties": {
+                  "official_document_id_erroneo": {
+                    "type": "string",
+                    "description": "UUID del documento a desactivar"
+                  },
+                  "official_document_id_justifica": {
+                    "type": "string",
+                    "description": "UUID del documento que justifica la subsanación"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Documento subsanado exitosamente"
+          },
+          "400": {
+            "description": "Datos inválidos (ej: ambos IDs iguales)"
+          },
+          "403": {
+            "description": "Sin permisos ADMIN sobre este expediente"
+          },
+          "404": {
+            "description": "Expediente o documento no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cases/{case_id}/movements": {
+      "get": {
+        "operationId": "getCaseMovements",
+        "summary": "Movimientos del expediente",
+        "description": "Lista plana de movimientos de un expediente (sin ai_summary; distinto de /history que incluye análisis IA)",
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del expediente"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de movimientos con total"
+          },
+          "401": {
+            "description": "No autorizado"
+          },
+          "404": {
+            "description": "Expediente no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/memos/received": {
+      "get": {
+        "operationId": "getReceivedMemos",
+        "summary": "Memos recibidos",
+        "description": "Obtiene memos recibidos por el usuario autenticado",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Página"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por página (max 100)"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de memos recibidos"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/memos/sent": {
+      "get": {
+        "operationId": "getSentMemos",
+        "summary": "Memos enviados",
+        "description": "Obtiene memos enviados por el usuario autenticado",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Página"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por página (max 100)"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de memos enviados"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/memos/archived": {
+      "get": {
+        "operationId": "getArchivedMemos",
+        "summary": "Memos archivados",
+        "description": "Obtiene memos archivados por el usuario autenticado",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Página"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Resultados por página (max 100)"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto a buscar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de memos archivados"
+          },
+          "401": {
+            "description": "No autorizado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/memos/{memo_id}": {
+      "get": {
+        "operationId": "getMemoDetail",
+        "summary": "Detalle de memo",
+        "description": "Obtiene el detalle de un memo o nota",
+        "parameters": [
+          {
+            "name": "memo_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "UUID del memo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle del memo"
+          },
+          "400": {
+            "description": "memo_id inválido (se espera UUID)"
+          },
+          "404": {
+            "description": "Memo no encontrado"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/search/semantic": {
+      "get": {
+        "operationId": "semanticSearch",
+        "summary": "Búsqueda semántica de documentos",
+        "description": "Busca documentos similares por contenido usando embeddings, con vinculaciones a expedientes y legajos",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Texto de búsqueda (mínimo 3 caracteres)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Máximo de resultados (max 50)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documentos similares con vinculaciones a expedientes y legajos"
+          },
+          "400": {
+            "description": "query requerido (min 3 caracteres)"
+          },
+          "503": {
+            "description": "Búsqueda temporalmente no disponible"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/signing/async-poll/{session_id}": {
+      "get": {
+        "operationId": "pollAsyncSigning",
+        "summary": "Estado de sesion de firma asincronica",
+        "description": "Devuelve el estado de una sesion de firma encolada. Es la ruta que responde el campo poll_url de POST /documents/{document_id}/sign cuando la firma sale por el carril asincronico (flow: electronic_async). El campo official_number se completa cuando status='signed'. Una sesion de otro usuario o de otro tenant responde 404, igual que una inexistente.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "UUID de la sesion (campo session_id de la respuesta de sign)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Estado de la sesion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "processing",
+                        "signed",
+                        "failed",
+                        "expired"
+                      ]
+                    },
+                    "official_number": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "auto_link_results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "reason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "failure_reason": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "session_id invalido (se espera UUID)"
+          },
+          "401": {
+            "description": "API Key o User ID invalidos"
+          },
+          "404": {
+            "description": "Sesion de firma no encontrada"
+          }
+        },
+        "security": [
+          {
+            "OAuth2": [
+              "openid",
+              "profile",
+              "email"
+            ]
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "OAuth2": {
+        "type": "oauth2",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "https://__OPENAPI_AUTH0_DOMAIN__/authorize",
+            "tokenUrl": "https://__OPENAPI_AUTH0_DOMAIN__/oauth/token",
+            "scopes": {
+              "openid": "OpenID Connect",
+              "profile": "User profile",
+              "email": "User email"
+            }
+          }
+        }
+      },
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API Key para autenticación (fallback)"
+      }
+    }
+  }
+}

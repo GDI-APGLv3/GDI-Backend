@@ -1,0 +1,9 @@
+{
+  "name": "gdi-public-pdf",
+  "private": true,
+  "version": "1.0.0",
+  "description": "GDI Public PDF Router - sirve PDFs publicos por municipio desde R2 (GDI-098 D10)",
+  "dependencies": {
+    "aws4fetch": "^1.0.20"
+  }
+}

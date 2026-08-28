@@ -1,88 +1,131 @@
-"""
-Excepciones personalizadas centralizadas para manejo consistente de errores.
-Define la jerarquía de excepciones de la aplicación.
-"""
 
+import asyncio
+
+import asyncpg
 from typing import Any, Dict, Optional
 from fastapi import HTTPException, status
-import logging
+from shared.logging import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 class GDIBaseException(Exception):
-    """
-    Excepción base para todas las excepciones personalizadas de GDI.
-    """
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
         self.message = message
         self.details = details or {}
         super().__init__(message)
 
 class ValidationError(GDIBaseException):
-    """
-    Error de validación de datos.
-    """
     pass
 
 class BusinessLogicError(GDIBaseException):
-    """
-    Error de lógica de negocio.
-    """
     pass
 
 class DatabaseError(GDIBaseException):
-    """
-    Error de base de datos.
-    """
+    pass
+
+class DatabaseBusyError(DatabaseError):
+    pass
+
+class TransientLookupError(DatabaseBusyError):
     pass
 
 class AuthorizationError(GDIBaseException):
-    """
-    Error de autorización/permisos.
-    """
     pass
 
 class NotFoundError(GDIBaseException):
-    """
-    Error cuando un recurso no se encuentra.
-    """
     pass
 
 class ConflictError(GDIBaseException):
-    """
-    Error de conflicto (recurso ya existe, estado inválido, etc.).
-    """
     pass
+
+class StaleReservationError(ConflictError):
+    def __init__(self, document_id: str, reservation_id: str | None = None):
+        msg = f"La reserva de numeración del documento '{document_id}' ya no está vigente"
+        if reservation_id:
+            msg += f" (ticket {reservation_id[:8]}...)"
+        super().__init__(msg)
+        self.document_id = document_id
+        self.reservation_id = reservation_id
+
+
+class SpecialLaneBusyError(ConflictError):
+    def __init__(self, document_type_id: str, department_id: str, year: int):
+        msg = (
+            "Hay una numeración en curso para este tipo de documento en su departamento. "
+            "Reintentá en unos segundos."
+        )
+        super().__init__(msg)
+        self.document_type_id = document_type_id
+        self.department_id = department_id
+        self.year = year
+
+class EscriQueueFullError(ConflictError):
+    def __init__(self, reason: str, retry_after: int = 30):
+        msg = (
+            "El sistema de firma está temporalmente saturado. "
+            f"Reintentá en ~{retry_after} segundos."
+        )
+        super().__init__(msg)
+        self.reason = reason
+        self.retry_after = retry_after
+
 
 class ExternalServiceError(GDIBaseException):
-    """
-    Error al comunicarse con servicios externos.
-    """
     pass
 
-# Excepciones específicas del dominio de documentos
+
+class NotaryError(ExternalServiceError):
+    pass
+
+
+class NotaryUnavailableError(NotaryError):
+    pass
+
+
+class NotaryTimeoutError(NotaryUnavailableError):
+    pass
+
+
+class NotaryBusinessError(NotaryError):
+    pass
+
+
+class NotaryBreakerOpenError(NotaryError):
+    def __init__(self, retry_after: int = 30):
+        msg = (
+            "El servicio de firma está en mantenimiento. "
+            f"Reintentá en ~{retry_after} segundos."
+        )
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+class R2Error(ExternalServiceError):
+    def __init__(self, message: str, error_code: str | None = None):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class R2ObjectLockedError(R2Error):
+    pass
+
+
+class PreOficialNotProvisionedError(R2Error):
+    pass
+
 
 class DocumentNotFoundError(NotFoundError):
-    """
-    Error cuando un documento no se encuentra.
-    """
     def __init__(self, document_id: str):
         super().__init__(f"Documento con ID '{document_id}' no encontrado")
         self.document_id = document_id
 
 class DocumentStateError(BusinessLogicError):
-    """
-    Error relacionado con el estado de un documento.
-    """
     def __init__(self, message: str, current_state: str, required_state: str = None):
         super().__init__(message)
         self.current_state = current_state
         self.required_state = required_state
 
 class DocumentPermissionError(AuthorizationError):
-    """
-    Error de permisos sobre un documento.
-    """
     def __init__(self, user_id: str, document_id: str, action: str):
         super().__init__(f"Usuario '{user_id}' no tiene permisos para '{action}' en documento '{document_id}'")
         self.user_id = user_id
@@ -90,120 +133,155 @@ class DocumentPermissionError(AuthorizationError):
         self.action = action
 
 class DocumentAlreadySignedError(ConflictError):
-    """
-    Error cuando se intenta firmar un documento ya firmado.
-    """
     def __init__(self, document_id: str, user_id: str):
         super().__init__(f"El documento '{document_id}' ya fue firmado por el usuario '{user_id}'")
         self.document_id = document_id
         self.user_id = user_id
 
 class DocumentAlreadyRejectedError(ConflictError):
-    """
-    Error cuando se intenta operar sobre un documento ya rechazado.
-    """
     def __init__(self, document_id: str):
         super().__init__(f"El documento '{document_id}' ya fue rechazado y no puede ser modificado")
         self.document_id = document_id
 
 class InvalidSignatureOrderError(BusinessLogicError):
-    """
-    Error cuando se intenta firmar fuera del orden establecido.
-    """
     def __init__(self, document_id: str, user_id: str, expected_signer: str):
         super().__init__(f"Orden de firma incorrecto en documento '{document_id}'. Usuario '{user_id}' no puede firmar, se esperaba '{expected_signer}'")
         self.document_id = document_id
         self.user_id = user_id
         self.expected_signer = expected_signer
 
+class SignerTurnPendingError(ConflictError):
+    def __init__(self, pending_common_signers: int):
+        msg = (
+            "Todavía no es tu turno de firmar: "
+            f"queda(n) {pending_common_signers} firma(s) anterior(es) en proceso. "
+            "El numerador firma al final — reintentá en unos segundos."
+        )
+        super().__init__(msg)
+        self.pending_common_signers = pending_common_signers
+
 class NumeratorRequiredError(BusinessLogicError):
-    """
-    Error cuando se requiere numerador pero no hay uno disponible.
-    """
     def __init__(self, document_id: str):
         super().__init__(f"El documento '{document_id}' requiere numeración pero no tiene numerador asignado")
         self.document_id = document_id
 
-# Excepciones específicas del dominio de usuarios
 
 class UserNotFoundError(NotFoundError):
-    """
-    Error cuando un usuario no se encuentra.
-    """
     def __init__(self, user_id: str):
         super().__init__(f"Usuario con ID '{user_id}' no encontrado")
         self.user_id = user_id
 
 class UserInactiveError(BusinessLogicError):
-    """
-    Error cuando un usuario está inactivo.
-    """
     def __init__(self, user_id: str):
         super().__init__(f"Usuario con ID '{user_id}' está inactivo")
         self.user_id = user_id
 
-# Excepciones específicas del dominio de casos/expedientes
-
-class CaseNotFoundError(NotFoundError):
-    """
-    Error cuando un caso/expediente no se encuentra.
-    """
-    def __init__(self, case_id: str):
-        super().__init__(f"Expediente con ID '{case_id}' no encontrado")
-        self.case_id = case_id
 
 class CasePermissionError(AuthorizationError):
-    """
-    Error de permisos sobre un caso/expediente.
-    """
     def __init__(self, user_id: str, case_id: str, action: str):
         super().__init__(f"Usuario '{user_id}' no tiene permisos para '{action}' en expediente '{case_id}'")
         self.user_id = user_id
         self.case_id = case_id
         self.action = action
 
-class CaseStateError(BusinessLogicError):
-    """
-    Error relacionado con el estado de un caso/expediente.
-    """
-    def __init__(self, message: str, current_state: str = None, required_state: str = None):
-        super().__init__(message)
-        self.current_state = current_state
-        self.required_state = required_state
 
-# Excepciones específicas del dominio de sectores
+class IsLastTaskError(BusinessLogicError):
+    pass
 
-class SectorNotFoundError(NotFoundError):
-    """
-    Error cuando un sector no se encuentra.
-    """
-    def __init__(self, sector_id: str):
-        super().__init__(f"Sector con ID '{sector_id}' no encontrado")
-        self.sector_id = sector_id
 
-class SectorInactiveError(BusinessLogicError):
-    """
-    Error cuando un sector está inactivo.
-    """
-    def __init__(self, sector_id: str):
-        super().__init__(f"Sector con ID '{sector_id}' está inactivo")
-        self.sector_id = sector_id
+class DocumentSignedWhileRejectingError(ConflictError):
+    def __init__(self, document_id: str):
+        super().__init__(
+            f"El documento '{document_id}' fue firmado y convertido en acto oficial "
+            "durante el proceso de rechazo — la operación fue abortada para preservar "
+            "la integridad del acto administrativo."
+        )
+        self.document_id = document_id
 
-# Funciones para convertir excepciones a HTTPException
+
+class DocumentRejectedWhileInQueueError(ConflictError):
+    def __init__(self, document_id: str):
+        super().__init__(
+            f"El documento '{document_id}' fue rechazado antes de que el worker "
+            "pudiera firmarlo — la firma async se aborta."
+        )
+        self.document_id = document_id
+
+
+class NumeratorPreCasError(ConflictError):
+    pass
+
+
+class NumeratorUploadError(ConflictError):
+    pass
+
+
+class NotaryHashMismatchError(NotaryBusinessError):
+    pass
+
+
+_TRANSIENT_DB_ERRORS: tuple = (
+    DatabaseBusyError,
+    asyncio.TimeoutError,
+    TimeoutError,
+    asyncpg.exceptions.QueryCanceledError,
+    asyncpg.exceptions.ConnectionDoesNotExistError,
+    asyncpg.exceptions.InterfaceError,
+    asyncpg.exceptions.TooManyConnectionsError,
+    asyncpg.exceptions.CannotConnectNowError,
+    asyncpg.exceptions.PostgresConnectionError,
+    ConnectionResetError,
+    OSError,
+)
+
+
+def is_transient_db_error(exc: Exception) -> bool:
+    return isinstance(exc, _TRANSIENT_DB_ERRORS)
+
+
+def reraise_if_transient(exc: Exception, *, context: str) -> None:
+    if is_transient_db_error(exc):
+        raise TransientLookupError(
+            f"No se pudo completar la consulta ({context}): base de datos saturada",
+            details={"context": context, "cause": type(exc).__name__},
+        ) from exc
+
+
+def causada_por_pool_saturado(exc: BaseException, _profundidad_max: int = 12) -> bool:
+    vistas = set()
+    actual = exc
+    for _ in range(_profundidad_max):
+        if actual is None or id(actual) in vistas:
+            return False
+        vistas.add(id(actual))
+        if isinstance(actual, DatabaseBusyError):
+            return True
+        actual = actual.__cause__ or actual.__context__
+    return False
+
 
 def exception_to_http_exception(exc: Exception) -> HTTPException:
-    """
-    Convierte excepciones personalizadas a HTTPException de FastAPI.
-    
-    Args:
-        exc: Excepción (puede ser GDIBaseException o cualquier Exception)
-        
-    Returns:
-        HTTPException correspondiente
-    """
-    # Si no es una excepción personalizada, manejarla como error genérico
+    if not isinstance(exc, DatabaseBusyError) and causada_por_pool_saturado(exc):
+        _logger.warning(
+            "[GDI-372] %s enmascaraba un pool saturado; se responde 503",
+            type(exc).__name__,
+        )
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+            detail={
+                "message": "Servidor ocupado, reintente en unos segundos",
+                "type": "DatabaseBusyError"
+            }
+        )
+
     if not isinstance(exc, GDIBaseException):
         _logger.error(f"Unhandled exception: {type(exc).__name__}: {exc}")
+        try:
+            from shared.error_alerts import report_error
+            report_error(None, exc, kind="UNHANDLED")
+        except Exception:
+            pass
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -220,7 +298,6 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
     if exc.details:
         error_detail["details"] = exc.details
     
-    # Mapeo de excepciones a códigos HTTP
     if isinstance(exc, ValidationError):
         return HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -251,6 +328,26 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
             detail=error_detail
         )
     
+    elif isinstance(exc, TransientLookupError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "5"},
+            detail={
+                "message": exc.message,
+                "type": "TransientLookupError",
+            }
+        )
+
+    elif isinstance(exc, DatabaseBusyError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+            detail={
+                "message": "Servidor ocupado, reintente en unos segundos",
+                "type": "DatabaseBusyError"
+            }
+        )
+
     elif isinstance(exc, DatabaseError):
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -260,6 +357,13 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
             }
         )
     
+    elif isinstance(exc, NotaryBreakerOpenError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": str(exc.retry_after)},
+            detail=error_detail,
+        )
+
     elif isinstance(exc, ExternalServiceError):
         return HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -267,7 +371,6 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
         )
     
     else:
-        # Error genérico
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -277,16 +380,6 @@ def exception_to_http_exception(exc: Exception) -> HTTPException:
         )
 
 def handle_database_error(error: Exception, operation: str) -> DatabaseError:
-    """
-    Maneja errores de base de datos y los convierte a excepciones personalizadas.
-
-    Args:
-        error: Error original de la base de datos
-        operation: Descripción de la operación que falló
-
-    Returns:
-        DatabaseError con información del error
-    """
     import asyncpg
 
     if isinstance(error, asyncpg.IntegrityConstraintViolationError):
@@ -313,32 +406,13 @@ def handle_database_error(error: Exception, operation: str) -> DatabaseError:
             details={"original_error": str(error), "type": "UnknownDatabaseError"}
         )
 
-def validate_and_raise(condition: bool, exception_class: type, message: str, **kwargs):
-    """
-    Valida una condición y lanza excepción si es falsa.
-    
-    Args:
-        condition: Condición a validar
-        exception_class: Clase de excepción a lanzar
-        message: Mensaje de error
-        **kwargs: Argumentos adicionales para la excepción
-    """
-    if not condition:
-        raise exception_class(message, **kwargs)
-
-# Decorador para manejo automático de excepciones
 def handle_exceptions(func):
-    """
-    Decorador para manejo automático de excepciones personalizadas.
-    Convierte excepciones GDI a HTTPException automáticamente.
-    """
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except GDIBaseException as exc:
             raise exception_to_http_exception(exc)
         except Exception as exc:
-            # Log del error no manejado (aquí podrías agregar logging)
             _logger.error(f"Error no manejado en {func.__name__}: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -350,7 +424,6 @@ def handle_exceptions(func):
     
     return wrapper
 
-# Constantes para tipos de error comunes
 class ErrorTypes:
     VALIDATION_ERROR = "ValidationError"
     NOT_FOUND = "NotFoundError"
@@ -362,7 +435,6 @@ class ErrorTypes:
     EXTERNAL_SERVICE = "ExternalServiceError"
     INTERNAL_ERROR = "InternalServerError"
 
-# Mensajes de error comunes
 class ErrorMessages:
     DOCUMENT_NOT_FOUND = "Documento no encontrado"
     USER_NOT_FOUND = "Usuario no encontrado"

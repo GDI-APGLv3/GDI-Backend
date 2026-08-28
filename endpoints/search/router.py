@@ -1,4 +1,3 @@
-"""Semantic search endpoint."""
 
 from fastapi import APIRouter, Request, Query, HTTPException
 from shared.logging import get_logger
@@ -27,7 +26,7 @@ async def search_semantic(
         con 502/503/504). El usuario ve el error real y los textResults se
         conservan (logica de useSmartSearch).
       - httpx.TransportError (red/cold-start, tras agotar retries del
-        embedding_client + budget wall-clock 5s) -> 503: el front lo trata como
+        embedding_client + budget wall-clock 12s) -> 503: el front lo trata como
         cold-start y reintenta con su propio backoff (~23s en retryWithBackoff).
       - httpx.HTTPError catch-all para casos exoticos (DecodingError, etc.) -> 500.
       - Cualquier otra Exception -> 500.
@@ -37,19 +36,13 @@ async def search_semantic(
     try:
         return await semantic_search(q, user_id, schema_name=schema_name, limit=limit, source="api")
     except httpx.HTTPStatusError as e:
-        # Bug real de AgenteLANG: respondio con 4xx/5xx. NO es cold-start.
-        # Mapeamos a 500 para que el front NO entre en retry-loop (su predicado
-        # isColdStartError solo dispara con 502/503/504).
         status = e.response.status_code if e.response is not None else "?"
         logger.error("AgenteLANG HTTP error %s: %s", status, e)
         raise HTTPException(status_code=500, detail="Error en servicio de embeddings")
     except httpx.TransportError as e:
-        # AgenteLANG dormido / inalcanzable tras agotar retries + budget del
-        # embedding_client. 503 -> el front reintenta con su propio backoff.
         logger.error("AgenteLANG unreachable after retries: %s", e)
         raise HTTPException(status_code=503, detail="Busqueda temporalmente no disponible")
     except httpx.HTTPError as e:
-        # Catch-all para casos exoticos de httpx (DecodingError, TooManyRedirects).
         logger.error("AgenteLANG httpx error (no clasificado): %s", e)
         raise HTTPException(status_code=500, detail="Error en busqueda semantica")
     except Exception as e:

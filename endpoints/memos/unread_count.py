@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener el contador de memos no leidos.
-Util para el badge en el menu lateral del frontend.
-"""
 
 from fastapi import APIRouter, Depends
 from shared.logging import get_logger

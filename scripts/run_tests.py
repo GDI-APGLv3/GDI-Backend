@@ -1,12 +1,8 @@
-"""
-Script para ejecutar todos los tests del sistema de expedientes
-"""
 import subprocess
 import sys
 import os
 
 def install_dependencies():
-    """Instala las dependencias de testing si no están instaladas"""
     print("📦 Instalando dependencias de testing...")
     try:
         subprocess.run([
@@ -22,14 +18,11 @@ def install_dependencies():
     return True
 
 def run_tests():
-    """Ejecuta todos los tests"""
     print("\n🧪 Ejecutando tests del sistema de expedientes...")
     
-    # Cambiar al directorio del proyecto
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     
     try:
-        # Ejecutar pytest con configuración verbose
         result = subprocess.run([
             sys.executable, "-m", "pytest", 
             "tests/",
@@ -46,7 +39,6 @@ def run_tests():
         return False
 
 def run_specific_test_file(test_file):
-    """Ejecuta un archivo específico de tests"""
     print(f"\n🧪 Ejecutando tests de {test_file}...")
     
     try:
@@ -66,20 +58,16 @@ def run_specific_test_file(test_file):
         return False
 
 def main():
-    """Función principal"""
     print("🚀 Sistema de Testing para Backend de Expedientes")
     print("=" * 50)
     
-    # Verificar si estamos en el directorio correcto
     if not os.path.exists("tests"):
         print("❌ No se encontró el directorio 'tests'. Asegúrate de ejecutar desde el directorio del proyecto.")
         return
     
-    # Instalar dependencias
     if not install_dependencies():
         return
     
-    # Opciones de testing
     print("\nOpciones disponibles:")
     print("1. Ejecutar todos los tests")
     print("2. Ejecutar tests específicos")

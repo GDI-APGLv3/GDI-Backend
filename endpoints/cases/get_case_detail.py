@@ -1,9 +1,8 @@
-"""Endpoint para obtener detalles completos de un expediente"""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
@@ -16,11 +15,10 @@ from shared.exceptions import (
 )
 from shared.utils import get_authenticated_user
 from shared.dependencies import get_tenant_schema
+from database import get_conn
 from config.constants import (
     CASE_DETAIL_SUCCESS_MESSAGE,
-    CASE_DETAIL_ERROR,
     CASE_NOT_FOUND_ERROR,
-    USER_NOT_FOUND_ERROR,
     USER_UNAUTHENTICATED_ERROR
 )
 
@@ -29,19 +27,17 @@ router = APIRouter(tags=["expedientes"])
 
 
 class SectorInfo(BaseModel):
-    """Información de un sector"""
     acronym: str = Field(..., example="SMG#LEGAL")
     department: str = Field(..., example="Secretaría Municipal de Gobierno")
 
 
 class TemplateInfo(BaseModel):
-    """Información de plantilla de expediente"""
     name: str = Field(..., example="Expediente Administrativo")
     acronym: str = Field(..., example="EXP-ADM")
+    is_reserved: bool = Field(False, description="Si el tipo de expediente es reservado (GDI-069)")
 
 
 class CaseDetailData(BaseModel):
-    """Datos detallados de un expediente"""
     id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000")
     case_number: str = Field(..., example="EXP-2024-001-SMG")
     reference: str = Field(..., example="Expediente de prueba")
@@ -52,10 +48,11 @@ class CaseDetailData(BaseModel):
         {"acronym": "SMG#CONTABLE", "department": "Contaduría"},
         {"acronym": "SMG#RRHH", "department": "Recursos Humanos"}
     ])
+    is_favorite: bool = Field(False, example=True, description="Indica si el usuario marcó este expediente como favorito")
+    ai_summary: Optional[str] = Field(None, description="Resumen IA completo del expediente")
 
 
 class CaseDetailResponse(BaseModel):
-    """Modelo para respuesta de detalle de expediente"""
     success: bool = Field(..., example=True)
     data: Optional[CaseDetailData]
     message: str = Field(..., example="Detalle del expediente EXP-2024-001-SMG obtenido correctamente")
@@ -70,18 +67,16 @@ async def get_case_detail(
 ) -> CaseDetailResponse:
     """Obtener detalles completos de un expediente."""
     try:
-        # Validar usuario autenticado primero (antes de logging)
         tenant_user_id = getattr(request.state, 'tenant_user_id', None)
         if not tenant_user_id:
             raise ValidationError(USER_UNAUTHENTICATED_ERROR)
 
         logger.info(f"Get case detail request - Case: {case_id[:8]}, User: {tenant_user_id[:8]}")
 
-        # Obtener y validar usuario
         db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
-        # Obtener detalle del expediente
-        case_detail = await CaseService.get_case_detail(case_id, db_user_id, schema_name=schema_name)
+        async with get_conn(schema_name=schema_name, user_id=db_user_id) as conn:
+            case_detail = await CaseService.get_case_detail(case_id, db_user_id, schema_name=schema_name, conn=conn)
 
         if not case_detail:
             logger.warning(f"Case not found or access denied: {case_id[:8]}")
@@ -104,7 +99,6 @@ async def get_case_detail(
             BusinessLogicError("Error al obtener el detalle del expediente")
         )
 
-# Pydantic models for movements endpoint
 class UserInfo(BaseModel):
     id: Optional[str] = Field(None, example="123e4567-e89b-12d3-a456-426614174000")
     name: Optional[str] = Field(None, example="Juan")
@@ -148,25 +142,21 @@ async def get_case_movements(
     Obtener el historial de movimientos del expediente con información de usuarios y sectores.
     """
     from shared.exceptions import exception_to_http_exception
-    from config.constants import MOVEMENTS_SUCCESS_MESSAGE, MOVEMENTS_ACCESS_DENIED
-    import logging
+    from config.constants import MOVEMENTS_SUCCESS_MESSAGE
 
     logger = get_logger(__name__)
 
     try:
         logger.info(f"Fetching movements for case: {case_id}")
 
-        # Obtener usuario autenticado
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting movements for case {case_id}")
 
-        # Verificar permisos (404 para no revelar existencia del expediente)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # Obtener movimientos
         movements = await CaseService.get_case_movements(case_id, schema_name=schema_name)
         
         logger.info(f"Successfully fetched {len(movements)} movements for case {case_id}")
@@ -184,7 +174,6 @@ async def get_case_movements(
         logger.error(f"Error in get_case_movements endpoint: {str(e)}")
         raise exception_to_http_exception(e)
 
-# Pydantic models for documents endpoint
 class OfficialDocumentItem(BaseModel):
     id: str = Field(..., example="123e4567-e89b-12d3-a456-426614174000")
     document_id: str = Field(..., example="123e4567-e89b-12d3-a456-426614174001")
@@ -197,6 +186,8 @@ class OfficialDocumentItem(BaseModel):
     short_resume: Optional[str] = Field(None, example="Resumen del documento")
     linked_by: Optional[str] = Field(None, example="Juan Pérez")
     linked_sector: Optional[str] = Field(None, example="GOB#SGOB")
+    is_reserved: bool = Field(False, description="GDI-069: tipo de documento reservado")
+    is_public: bool = Field(False, description="GDI-098: tipo de documento público (visibility='publico')")
 
 class ProposedDocumentItem(BaseModel):
     id: str = Field(..., example="123e4567-e89b-12d3-a456-426614174002")
@@ -206,6 +197,8 @@ class ProposedDocumentItem(BaseModel):
     document_number: Optional[str] = Field(None, example="INF-2025-0000001-MUNI")
     document_type_name: Optional[str] = Field(None, example="Informe")
     document_type_acronym: Optional[str] = Field(None, example="INF")
+    is_reserved: bool = Field(False, description="GDI-069: tipo de documento reservado")
+    is_public: bool = Field(False, description="GDI-098: tipo de documento público (visibility='publico')")
     can_link: bool = Field(False, example=True, description="true si el documento está firmado (oficial)")
     proposed_date: Optional[str] = Field(None, example="2024-01-15T10:30:00")
     proposed_by: Optional[str] = Field(None, example="Juan Pérez")
@@ -234,33 +227,27 @@ async def get_case_documents(
     Los documentos oficiales incluyen pdf_url con URL firmada de Cloudflare R2.
     """
     from shared.exceptions import exception_to_http_exception
-    from config.constants import DOCUMENTS_SUCCESS_MESSAGE, DOCUMENTS_ACCESS_DENIED
-    import logging
+    from config.constants import DOCUMENTS_SUCCESS_MESSAGE
 
     logger = get_logger(__name__)
 
     try:
-        # Validar usuario autenticado primero
         tenant_user_id = getattr(request.state, 'tenant_user_id', None)
         if not tenant_user_id:
             raise ValidationError(USER_UNAUTHENTICATED_ERROR)
 
         logger.info(f"Fetching documents for case: {case_id}")
 
-        # Obtener usuario autenticado
         db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting documents for case {case_id}")
 
-        # Verificar permisos (404 para no revelar existencia del expediente)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # Obtener documentos (incluye URLs de PDFs)
         documents = await CaseService.get_case_documents(case_id, schema_name=schema_name)
 
-        # Filtrar proposed docs: solo usuarios con permiso de edición los ven
         permissions = await CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
         if not permissions.get('can_link_documents', False):
             documents['proposed'] = []
@@ -279,7 +266,6 @@ async def get_case_documents(
         logger.error(f"Error in get_case_documents endpoint: {str(e)}")
         raise exception_to_http_exception(e)
 
-# Pydantic models for permissions endpoint
 class PermissionsData(BaseModel):
     can_view: bool = Field(..., example=True)
     can_transfer: bool = Field(..., example=True)
@@ -316,25 +302,21 @@ async def get_user_case_permissions(
     - ownership_level: Nivel de relación (owner, creator, department_member, participant)
     """
     from shared.exceptions import exception_to_http_exception
-    from config.constants import PERMISSIONS_SUCCESS_MESSAGE, PERMISSIONS_ACCESS_DENIED
-    import logging
+    from config.constants import PERMISSIONS_SUCCESS_MESSAGE
 
     logger = get_logger(__name__)
 
     try:
         logger.info(f"Fetching permissions for case: {case_id}")
 
-        # Obtener usuario autenticado
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting permissions for case {case_id}")
 
-        # Verificar permisos (404 para no revelar existencia del expediente)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # Obtener permisos calculados
         permissions = await CaseService.get_user_case_permissions(case_id, db_user_id, schema_name=schema_name)
         
         logger.info(f"Successfully calculated permissions for user {db_user_id} on case {case_id}")
@@ -349,11 +331,16 @@ async def get_user_case_permissions(
         logger.error(f"Error in get_user_case_permissions endpoint: {str(e)}")
         raise exception_to_http_exception(e)
 
-# Pydantic models for case-history endpoint
 class HistoryUserInfo(BaseModel):
     name: str = Field(..., example="Juan Pérez")
     sector_department: str = Field(..., example="ADGEN#SEC")
     photo_url: str = Field(..., example="")
+
+class HistoryTargetInfo(BaseModel):
+    name: str = Field("", example="Pablo Rios")
+    sector_acronym: str = Field("", example="ADGEN#SEC")
+    sector_color: Optional[str] = Field(None, example="#dc8e09")
+    photo_url: Optional[str] = Field(None, example="")
 
 class HistoryMovementItem(BaseModel):
     user: HistoryUserInfo
@@ -364,6 +351,7 @@ class HistoryMovementItem(BaseModel):
     closed_at: Optional[str] = Field(None, example="2024-01-20T15:45:00")
     closing_reason: Optional[str] = Field(None, example="Movimiento cerrado")
     resume: Optional[str] = Field(None, example="- Punto 1\n- Punto 2", description="Resume del documento (solo para document_link)")
+    target: Optional[HistoryTargetInfo] = Field(None, description="Usuario asignado/mencionado (responsable o @mención): carita, DPTO#SECTOR y color")
 
 class CaseHistoryData(BaseModel):
     case_number: str = Field(..., example="EXP-2024-001-SMG")
@@ -392,24 +380,20 @@ async def get_case_history(
     """
     from shared.exceptions import exception_to_http_exception
     from config.constants import CASE_HISTORY_SUCCESS_MESSAGE
-    import logging
 
     logger = get_logger(__name__)
 
     try:
         logger.info(f"Fetching history for case: {case_id}")
 
-        # Validar usuario autenticado
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
         logger.info(f"User {db_user_id} requesting history for case {case_id}")
 
-        # Verificar permisos (404 para no revelar existencia del expediente)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied: User {db_user_id} cannot view case {case_id}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # Obtener historial del expediente
         history = await CaseService.get_case_history(case_id, schema_name=schema_name)
         
         logger.info(f"Successfully fetched history for case {case_id}: {len(history['movements'])} movements")

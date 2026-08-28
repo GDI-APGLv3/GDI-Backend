@@ -1,12 +1,8 @@
-"""
-Modelos relacionados con el rechazo de documentos.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Dict, Any
 
 class RejectDocumentRequest(BaseModel):
-    """Datos necesarios para rechazar un documento"""
     reason: str = Field(..., min_length=5, max_length=500, description="Motivo del rechazo (mínimo 5 caracteres)")
     
     model_config = ConfigDict(
@@ -23,7 +19,6 @@ class RejectDocumentRequest(BaseModel):
     )
 
 class RejectDocumentResponse(BaseModel):
-    """Respuesta al endpoint de rechazo de documento"""
     success: bool = Field(..., description="Indica si el rechazo fue procesado exitosamente")
     message: str = Field(..., description="Mensaje descriptivo del resultado")
     document_id: str = Field(..., description="UUID del documento rechazado")

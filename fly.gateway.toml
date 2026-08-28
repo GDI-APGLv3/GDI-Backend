@@ -5,19 +5,25 @@ primary_region = "gru"
   dockerfile = "Dockerfile.gateway"
 
 [env]
+  ENVIRONMENT = "development"
   TZ = "America/Argentina/Buenos_Aires"
   PORT = "8080"
   PYTHONUNBUFFERED = "1"
+
+  GUNICORN_WORKERS = "2"
+  ASYNCPG_MIN_SIZE = "2"
+  ASYNCPG_MAX_SIZE = "8"
   DB_PORT = "5432"
   DB_USER = "postgres"
   DB_NAME = "railway"
-  AUTH0_DOMAIN = "<your-tenant>.auth0.com"
-  AUTH0_AUDIENCE = "https://<your-tenant>.auth0.com/api/v2/"
+  AUTH0_DOMAIN = "auth-cliente.your-domain.com"
+  AUTH0_AUDIENCE = "https://<your-auth0-tenant>.us.auth0.com/api/v2/"
+  AUTH0_ISSUERS = "https://<your-auth0-tenant>.us.auth0.com/,https://auth-cliente.your-domain.com/"
   MCP_RESOURCE_URI = "https://<your-gateway-app>.fly.dev"
   TESTING_MODE = "false"
   CF_R2_SIGN_EXPIRATION = "600"
-  PDFCOMPOSER_URL = "http://<your-pdfcomposer-app>.internal:8080"
-  NOTARY_URL = "http://<your-notary-app>.internal:8080"
+  PDFCOMPOSER_URL = "http://<your-pdfcomposer-app>.flycast:8080"
+  NOTARY_URL = "http://<your-notary-app>.flycast:8080"
   EMAIL_SERVICE_URL = "http://<your-email-service>.internal:8080"
   AGENT_URL = "https://<your-agent-app>.fly.dev"
   FRONTEND_URL = "https://your-frontend.vercel.app"
@@ -25,14 +31,14 @@ primary_region = "gru"
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
-  auto_start_machines = false
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
   min_machines_running = 0
 
   [http_service.concurrency]
     type = "requests"
-    hard_limit = 250
-    soft_limit = 200
+    hard_limit = 80
+    soft_limit = 40
 
 [[http_service.checks]]
   grace_period = "30s"

@@ -1,4 +1,3 @@
-"""Endpoint para obtener el feed de actividad del Dashboard."""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, Query, Request
@@ -41,14 +40,12 @@ async def get_feed(
     - Resumen IA del documento de soporte (si aplica)
     """
     try:
-        # Validar usuario autenticado
         tenant_user_id = getattr(request.state, 'tenant_user_id', None)
         if not tenant_user_id:
             raise ValidationError(USER_UNAUTHENTICATED_ERROR)
 
         logger.info(f"Getting feed - User: {tenant_user_id[:8]}, Page: {page}")
 
-        # Obtener usuario validado
         db_user_id = await get_authenticated_user(tenant_user_id, schema_name=schema_name)
 
         result = await DashboardService.get_feed(

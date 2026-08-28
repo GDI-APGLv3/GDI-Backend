@@ -1,26 +1,11 @@
-"""
-Servicio para generacion de informes IFRLM (Informe de Legajo).
-
-El IFRLM es un documento oficial que contiene un snapshot del legajo
-en un momento dado. Similar al CAEX para expedientes.
-
-- Se genera automaticamente al crear un legajo (informe inicial)
-- Se puede generar on-demand cuando el usuario necesita un snapshot actualizado
-
-NOTA: El document_type "IFRLM" debe existir en la BD con is_active=true.
-Si no existe, la generacion fallara con un error claro indicando que se necesita
-crear el tipo de documento en la BD.
-
-Pipeline: create_and_sign_case_document() -> PDFComposer /ifrlm/ -> Notary -> R2
-"""
 
 import html
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from shared.logging import get_logger
 from database import fetch_all, fetch_one, transaction
-from shared.exceptions import ValidationError, NotFoundError, ExternalServiceError, AuthorizationError
+from shared.exceptions import NotFoundError, AuthorizationError
 from services.rlm.permissions import check_permission
 from services.rlm.queries import (
     get_record_detail_query,
@@ -31,7 +16,6 @@ from services.rlm.queries import (
 
 logger = get_logger(__name__)
 
-# Acronimo del tipo de documento IFRLM (debe existir en BD con is_active=true)
 IFRLM_DOCUMENT_TYPE = "IFRLM"
 
 
@@ -43,39 +27,8 @@ async def generate_ifrlm(
     notes: str = None,
     is_initial: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Genera un informe IFRLM para un legajo.
-
-    Flujo:
-    1. Obtener datos actuales del legajo (campos JSONB, docs vinculados, cases vinculados)
-    2. Construir snapshot HTML
-    3. Llamar a create_and_sign_case_document() que ejecuta el pipeline completo:
-       - Crear documento draft
-       - Numerar con advisory lock
-       - PDFComposer /ifrlm/ -> Notary -> R2
-       - Actualizar a 'signed'
-    4. Vincular IFRLM al legajo (record_document_links)
-    5. Registrar en historial: action=ifrlm_generated
-
-    Args:
-        record_id: UUID del legajo
-        user_id: UUID del usuario que genera el informe
-        schema_name: Schema del tenant
-        notes: Notas opcionales para la vinculacion
-        is_initial: True si es el informe inicial (generado al crear el legajo)
-
-    Returns:
-        Dict con document_id, official_number y datos del informe creado
-
-    Raises:
-        NotFoundError: Si el legajo no existe
-        ValidationError: Si el tipo IFRLM no existe en BD
-        ExternalServiceError: Si falla la creacion del documento o el pipeline PDF
-        AuthorizationError: Si el usuario no tiene permisos
-    """
     logger.info(f"Generando IFRLM para record {record_id[:8]} por user {user_id[:8]}")
 
-    # 1. Obtener datos completos del legajo
     record = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -85,32 +38,27 @@ async def generate_ifrlm(
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
-    # 1b. Verificar permisos del usuario sobre este legajo
     if not await check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para generar informes de este legajo")
 
-    # 2. Obtener documentos vinculados (hasta 100 para el snapshot)
     linked_docs = await fetch_all(
         get_record_documents_query(),
         record_id, 100, 0,
         schema_name=schema_name,
     ) or []
 
-    # 3. Obtener expedientes vinculados (hasta 100 para el snapshot)
     linked_cases = await fetch_all(
         get_record_cases_query(),
         record_id, 100, 0,
         schema_name=schema_name,
     ) or []
 
-    # 4. Obtener info del usuario generador
     user_info = await fetch_one(
         get_user_sector_info_query(),
         user_id,
         schema_name=schema_name,
     )
 
-    # 5. Construir snapshot
     snapshot_data = _build_snapshot_data(
         record=record,
         linked_docs=linked_docs,
@@ -121,16 +69,13 @@ async def generate_ifrlm(
     link_notes = notes or ("Informe inicial" if is_initial else "Informe de legajo")
     reference = f"Informe de legajo {record['record_number']}"
 
-    # 6. Obtener datos del firmante y settings del tenant
     from services.shared.signer_data import get_signer_data
     from services.shared.settings_utils import get_city_from_settings, get_logo_url
-    from config.constants import DEFAULT_LOGO_URL
 
     signer_data = await get_signer_data(user_id, schema_name=schema_name)
     city = await get_city_from_settings(schema_name=schema_name)
     logo_url = await get_logo_url(schema_name=schema_name)
 
-    # 7. Definir builders para create_and_sign_case_document
     def html_builder():
         return _build_ifrlm_html(snapshot_data)
 
@@ -152,7 +97,6 @@ async def generate_ifrlm(
             "city_name": city,
         }
 
-    # 8. Ejecutar pipeline completo via create_and_sign_case_document
     from services.cases._document_creator_base import create_and_sign_case_document
 
     result = await create_and_sign_case_document(
@@ -168,7 +112,6 @@ async def generate_ifrlm(
 
     document_id = result["document_id"]
 
-    # 9-10. Vincular IFRLM + registrar historial (atómico)
     from services.rlm.queries import insert_document_link_query, insert_history_query
 
     after_data = {
@@ -208,34 +151,16 @@ async def generate_ifrlm(
     }
 
 
-# ============================================================================
-# FUNCIONES AUXILIARES
-# ============================================================================
-
 def _build_snapshot_data(
     record: dict,
     linked_docs: list,
     linked_cases: list,
     user_info: Optional[dict],
 ) -> Dict[str, Any]:
-    """
-    Construye el snapshot de datos del legajo para el informe.
-
-    Args:
-        record: Datos del legajo (de get_record_detail_query)
-        linked_docs: Lista de documentos vinculados
-        linked_cases: Lista de expedientes vinculados
-        user_info: Info del usuario generador
-
-    Returns:
-        Dict con datos estructurados para el informe
-    """
     now = datetime.now()
 
-    # Datos del legajo
     record_data = record.get("data") or {}
 
-    # Preparar lista de documentos vinculados
     docs_list = []
     for doc in linked_docs:
         docs_list.append({
@@ -247,7 +172,6 @@ def _build_snapshot_data(
             "notes": doc.get("notes"),
         })
 
-    # Preparar lista de expedientes vinculados
     cases_list = []
     for case in linked_cases:
         cases_list.append({
@@ -279,27 +203,15 @@ def _build_snapshot_data(
 
 
 def _build_ifrlm_html(snapshot: Dict[str, Any]) -> str:
-    """
-    Construye el HTML del informe IFRLM.
-
-    Args:
-        snapshot: Datos del snapshot del legajo
-
-    Returns:
-        String HTML del informe
-    """
-    # Construir seccion de campos del legajo
     fields_html = ""
     data = snapshot.get("data") or {}
     data_schema = snapshot.get("data_schema") or {}
     field_definitions = data_schema or {}
 
     for field_name, field_value in data.items():
-        # Intentar obtener el label del campo desde el schema
         field_def = field_definitions.get(field_name, {})
         label = html.escape(str(field_def.get("label", field_name)))
 
-        # Formatear el valor (ya escapado internamente)
         display_value = _format_field_value(field_value)
 
         fields_html += f"""
@@ -316,7 +228,6 @@ def _build_ifrlm_html(snapshot: Dict[str, Any]) -> str:
             </tr>
         """
 
-    # Construir seccion de documentos vinculados
     docs_html = ""
     for doc in snapshot.get("linked_documents", []):
         official_num = html.escape(str(doc.get("official_number") or "Sin numerar"))
@@ -330,7 +241,6 @@ def _build_ifrlm_html(snapshot: Dict[str, Any]) -> str:
     if not docs_html:
         docs_html = "<li style='color: #999;'>Sin documentos vinculados</li>"
 
-    # Construir seccion de expedientes vinculados
     cases_html = ""
     for case in snapshot.get("linked_cases", []):
         case_num = html.escape(str(case.get("case_number") or "Sin numero"))
@@ -392,25 +302,10 @@ def _build_ifrlm_html(snapshot: Dict[str, Any]) -> str:
 
 
 def _format_field_value(value: Any) -> str:
-    """
-    Formatea un valor de campo enriquecido para mostrar en HTML.
-
-    Los campos enriquecidos pueden ser:
-    - Strings simples
-    - Dicts con {value, expiration_date, document_id, notes, verified_by, verified_at}
-    - Otros tipos (numeros, booleanos, listas)
-
-    Args:
-        value: Valor del campo
-
-    Returns:
-        String formateado para HTML
-    """
     if value is None:
         return "<span style='color: #999;'>-</span>"
 
     if isinstance(value, dict):
-        # Campo enriquecido
         parts = []
         actual_value = value.get("value", "")
         if actual_value is not None:

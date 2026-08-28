@@ -1,23 +1,8 @@
-"""SQL queries for semantic search.
 
-Parameter order for asyncpg ($N positional):
+from services.cases.reserved_predicate import build_reserved_or_exists
 
-SEMANTIC_SEARCH_SQL:
-  $1 = user_id          (repeated: permissions filter)
-  $2 = embedding        (vector string)
-  $3 = query_text
-  $4 = threshold
-  $5 = candidate_limit
-  $6 = result_limit
-  $7 = excluded_types   (text[]: tipos de documento excluidos, ej. ['CAEX','PV','TST','IFRLM'])
-
-LOOKUP_DOCUMENT_SQL:
-  $1 = user_id
-  $2 = search_official (ILIKE)
-  $3 = search_ref_a    (ILIKE)
-  $4 = search_ref_b    (ILIKE)
-  $5 = result_limit
-"""
+_RESERVED_MAIN_COD = build_reserved_or_exists(case_ref="cod.case_id", user_ph="$1")
+_RESERVED_LAT_C = build_reserved_or_exists(case_ref="c.id", user_ph="$1")
 
 SEMANTIC_SEARCH_SQL = """
 WITH
@@ -39,9 +24,9 @@ vector_cands AS (
         dc.official_document_id,
         dc.chunk_text,
         dc.chunk_index,
-        1 - (dc.embedding <=> $2::vector) AS similarity
+        1 - (dc.embedding <=> $2::halfvec(768)) AS similarity
     FROM document_chunks dc
-    ORDER BY dc.embedding <=> $2::vector
+    ORDER BY dc.embedding <=> $2::halfvec(768)
     LIMIT $5
 ),
 bm25_cands AS (
@@ -105,60 +90,89 @@ permitted AS (
         )
         OR od.signer_sector_ids && COALESCE(
             (SELECT ARRAY_AGG(sector_id) FILTER (WHERE sector_id IS NOT NULL) FROM user_sectors),
-            '{}'::uuid[]
+            '{{}}'::uuid[]
         )
         OR EXISTS (
-            SELECT 1 FROM case_official_documents cod
-            JOIN case_movements cm ON cm.case_id = cod.case_id
-            WHERE cod.official_document_id = od.id
-              AND cod.is_active = true
-              AND cm.is_active = true
-              AND cm.assigned_sector_id IN (SELECT sector_id FROM user_sectors)
-        )
-        OR EXISTS (
-            SELECT 1 FROM case_official_documents cod
-            JOIN case_movements cm ON cm.case_id = cod.case_id
-            WHERE cod.official_document_id = od.id
-              AND cod.is_active = true
-              AND cm.type = 'transfer'
-              AND cm.is_active = false
-              AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
-              AND cm.closed_at = (
-                  SELECT MAX(cm2.closed_at) FROM case_movements cm2
-                  WHERE cm2.case_id = cod.case_id
-                    AND cm2.type = 'transfer' AND cm2.is_active = false
-              )
-        )
-        OR EXISTS (
-            -- Admin por creacion (cuando no hay transfers): mirrors can_user_view_case caso 3c
-            SELECT 1 FROM case_official_documents cod
-            JOIN case_movements cm ON cm.case_id = cod.case_id
-            WHERE cod.official_document_id = od.id
-              AND cod.is_active = true
-              AND cm.type = 'creation'
-              AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
-              AND NOT EXISTS (
-                  SELECT 1 FROM case_movements cm3
-                  WHERE cm3.case_id = cod.case_id AND cm3.type = 'transfer'
-              )
-        )
-        OR EXISTS (
-            -- Creador del expediente vinculado: mirrors can_user_view_case caso 2
-            SELECT 1 FROM case_official_documents cod
+            -- Acceso al documento via expediente vinculado (colapsa las 5 ramas
+            -- viejas de asignado/admin-transfer/admin-creacion/creador/flag-global
+            -- en 1 solo EXISTS con el split reservado/no-reservado de GDI-069.
+            -- Ver PLAN.md Rev.3.1 correccion 1.)
+            SELECT 1
+            FROM case_official_documents cod
             JOIN cases c ON c.id = cod.case_id
+            JOIN case_templates ct ON ct.id = c.case_template_id
             WHERE cod.official_document_id = od.id
               AND cod.is_active = true
-              AND c.created_by_user_id = $1
-        )
-        OR EXISTS (
-            -- Flag global de expedientes: usuario ve todos los expedientes,
-            -- ergo puede encontrar documentos vinculados a expedientes via semantic search.
-            -- Mirrors can_user_view_case caso 1.
-            SELECT 1 FROM case_official_documents cod
-            JOIN users u_global ON u_global.id = $1
-            WHERE cod.official_document_id = od.id
-              AND cod.is_active = true
-              AND u_global.can_global_search_cases = true
+              AND (
+                (
+                  NOT ct.is_reserved AND (
+                      EXISTS (
+                          SELECT 1 FROM case_movements cm
+                          WHERE cm.case_id = cod.case_id AND cm.is_active = true
+                            AND cm.assigned_sector_id IN (SELECT sector_id FROM user_sectors)
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM case_movements cm
+                          WHERE cm.case_id = cod.case_id AND cm.type = 'transfer' AND cm.is_active = false
+                            AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
+                            AND cm.closed_at = (
+                                SELECT MAX(cm2.closed_at) FROM case_movements cm2
+                                WHERE cm2.case_id = cod.case_id AND cm2.type = 'transfer' AND cm2.is_active = false
+                            )
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM case_movements cm
+                          WHERE cm.case_id = cod.case_id AND cm.type = 'creation'
+                            AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
+                            AND NOT EXISTS (
+                                SELECT 1 FROM case_movements cm3
+                                WHERE cm3.case_id = cod.case_id AND cm3.type = 'transfer'
+                            )
+                      )
+                      OR c.created_by_user_id = $1
+                      OR EXISTS (
+                          SELECT 1 FROM users u_global WHERE u_global.id = $1 AND u_global.can_global_search_cases = true
+                      )
+                  )
+                )
+                OR
+                (
+                  ct.is_reserved AND (
+                      EXISTS (
+                          SELECT 1 FROM case_responsibles cr
+                          WHERE cr.case_id = cod.case_id AND cr.user_id = $1 AND cr.is_active = true
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM case_movements cm
+                          JOIN sectors s ON s.id = cm.admin_sector_id
+                          JOIN departments d ON d.id = s.department_id
+                          WHERE cm.case_id = cod.case_id AND cm.is_active = false
+                            AND cm.type IN ('creation','transfer')
+                            AND cm.closed_at = (
+                                SELECT MAX(cm2.closed_at) FROM case_movements cm2
+                                WHERE cm2.case_id = cod.case_id AND cm2.type IN ('creation','transfer') AND cm2.is_active = false
+                            )
+                            AND d.head_user_id = $1
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM case_movements cm
+                          JOIN sectors s ON s.id = cm.assigned_sector_id
+                          JOIN departments d ON d.id = s.department_id
+                          WHERE cm.case_id = cod.case_id AND cm.is_active = true
+                            AND cm.assigned_sector_id IS NOT NULL
+                            AND d.head_user_id = $1
+                      )
+                      OR EXISTS (
+                          -- R4 (GDI-069 fix 07/07): actuante con tarea de
+                          -- asignacion ABIERTA en el expediente
+                          SELECT 1 FROM case_assignment_tasks cat
+                          WHERE cat.case_id = cod.case_id
+                            AND cat.assigned_user_id = $1
+                            AND cat.status = 'open'
+                      )
+                  )
+                )
+              )
         )
         OR EXISTS (
             SELECT 1 FROM record_document_links rdl
@@ -191,13 +205,21 @@ FROM permitted p
 JOIN official_documents od ON p.official_document_id = od.id
 JOIN document_types dt ON od.document_type_id = dt.id
 LEFT JOIN LATERAL (
+    -- GDI-069 (Fuga 2, paridad de puertas): un caso reservado solo aparece en
+    -- linked_cases si el usuario ($1) tiene visibilidad de ESE caso (mismo
+    -- split R1/R2/R3 que el gate de acceso via expediente, arriba).
     SELECT json_agg(json_build_object(
         'case_id', c.id,
         'case_number', c.case_number
     )) AS linked_cases
     FROM case_official_documents cod
     JOIN cases c ON c.id = cod.case_id
+    JOIN case_templates ct_lc ON ct_lc.id = c.case_template_id
     WHERE cod.official_document_id = od.id AND cod.is_active = true
+      AND (
+        NOT ct_lc.is_reserved
+        OR {RESERVED_LAT_C}
+      )
 ) cases_agg ON true
 LEFT JOIN LATERAL (
     SELECT json_agg(json_build_object(
@@ -213,7 +235,7 @@ LEFT JOIN LATERAL (
 ) records_agg ON true
 ORDER BY p.rrf_score DESC
 LIMIT $6;
-"""
+""".format(RESERVED_MAIN_COD=_RESERVED_MAIN_COD, RESERVED_LAT_C=_RESERVED_LAT_C)
 
 LOOKUP_DOCUMENT_SQL = """
 WITH
@@ -243,13 +265,21 @@ SELECT
 FROM official_documents od
 JOIN document_types dt ON od.document_type_id = dt.id
 LEFT JOIN LATERAL (
+    -- GDI-069 (Fuga 2, paridad de puertas): un caso reservado solo aparece en
+    -- linked_cases si el usuario ($1) tiene visibilidad de ESE caso (mismo
+    -- split R1/R2/R3 que el gate de acceso via expediente, abajo).
     SELECT json_agg(json_build_object(
         'case_id', c.id,
         'case_number', c.case_number
     )) AS linked_cases
     FROM case_official_documents cod
     JOIN cases c ON c.id = cod.case_id
+    JOIN case_templates ct_lc ON ct_lc.id = c.case_template_id
     WHERE cod.official_document_id = od.id AND cod.is_active = true
+      AND (
+        NOT ct_lc.is_reserved
+        OR {RESERVED_LAT_C}
+      )
 ) cases_agg ON true
 LEFT JOIN LATERAL (
     SELECT json_agg(json_build_object(
@@ -279,58 +309,59 @@ WHERE od.signed_at IS NOT NULL
     )
     OR od.signer_sector_ids && COALESCE(
         (SELECT ARRAY_AGG(sector_id) FILTER (WHERE sector_id IS NOT NULL) FROM user_sectors),
-        '{}'::uuid[]
+        '{{}}'::uuid[]
     )
     OR EXISTS (
-        SELECT 1 FROM case_official_documents cod
-        JOIN case_movements cm ON cm.case_id = cod.case_id
-        WHERE cod.official_document_id = od.id
-          AND cod.is_active = true
-          AND cm.is_active = true
-          AND cm.assigned_sector_id IN (SELECT sector_id FROM user_sectors)
-    )
-    OR EXISTS (
-        SELECT 1 FROM case_official_documents cod
-        JOIN case_movements cm ON cm.case_id = cod.case_id
-        WHERE cod.official_document_id = od.id
-          AND cod.is_active = true
-          AND cm.type = 'transfer'
-          AND cm.is_active = false
-          AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
-          AND cm.closed_at = (
-              SELECT MAX(cm2.closed_at) FROM case_movements cm2
-              WHERE cm2.case_id = cod.case_id
-                AND cm2.type = 'transfer' AND cm2.is_active = false
-          )
-    )
-    OR EXISTS (
-        -- Admin por creacion sin transfers: mirrors can_user_view_case caso 3c
-        SELECT 1 FROM case_official_documents cod
-        JOIN case_movements cm ON cm.case_id = cod.case_id
-        WHERE cod.official_document_id = od.id
-          AND cod.is_active = true
-          AND cm.type = 'creation'
-          AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
-          AND NOT EXISTS (
-              SELECT 1 FROM case_movements cm3
-              WHERE cm3.case_id = cod.case_id AND cm3.type = 'transfer'
-          )
-    )
-    OR EXISTS (
-        -- Creador del expediente vinculado: mirrors can_user_view_case caso 2
-        SELECT 1 FROM case_official_documents cod
+        -- Acceso al documento via expediente vinculado (colapsa las 5 ramas
+        -- viejas de asignado/admin-transfer/admin-creacion/creador/flag-global
+        -- en 1 solo EXISTS con el split reservado/no-reservado de GDI-069.
+        -- Ver PLAN.md Rev.3.1 correccion 1.)
+        SELECT 1
+        FROM case_official_documents cod
         JOIN cases c ON c.id = cod.case_id
+        JOIN case_templates ct ON ct.id = c.case_template_id
         WHERE cod.official_document_id = od.id
           AND cod.is_active = true
-          AND c.created_by_user_id = $1
-    )
-    OR EXISTS (
-        -- Flag global de expedientes: mirrors can_user_view_case caso 1
-        SELECT 1 FROM case_official_documents cod
-        JOIN users u_global ON u_global.id = $1
-        WHERE cod.official_document_id = od.id
-          AND cod.is_active = true
-          AND u_global.can_global_search_cases = true
+          AND (
+            (
+              NOT ct.is_reserved AND (
+                  EXISTS (
+                      SELECT 1 FROM case_movements cm
+                      WHERE cm.case_id = cod.case_id AND cm.is_active = true
+                        AND cm.assigned_sector_id IN (SELECT sector_id FROM user_sectors)
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM case_movements cm
+                      WHERE cm.case_id = cod.case_id AND cm.type = 'transfer' AND cm.is_active = false
+                        AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
+                        AND cm.closed_at = (
+                            SELECT MAX(cm2.closed_at) FROM case_movements cm2
+                            WHERE cm2.case_id = cod.case_id AND cm2.type = 'transfer' AND cm2.is_active = false
+                        )
+                  )
+                  OR EXISTS (
+                      -- Admin por creacion sin transfers: mirrors can_user_view_case caso 3c
+                      SELECT 1 FROM case_movements cm
+                      WHERE cm.case_id = cod.case_id AND cm.type = 'creation'
+                        AND cm.admin_sector_id IN (SELECT sector_id FROM user_sectors)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM case_movements cm3
+                            WHERE cm3.case_id = cod.case_id AND cm3.type = 'transfer'
+                        )
+                  )
+                  OR c.created_by_user_id = $1
+                  OR EXISTS (
+                      SELECT 1 FROM users u_global WHERE u_global.id = $1 AND u_global.can_global_search_cases = true
+                  )
+              )
+            )
+            OR
+            (
+              ct.is_reserved AND (
+                  {RESERVED_MAIN_COD}
+              )
+            )
+          )
     )
     OR EXISTS (
         SELECT 1 FROM record_document_links rdl
@@ -347,4 +378,4 @@ WHERE od.signed_at IS NOT NULL
   )
 ORDER BY od.signed_at DESC
 LIMIT $5;
-"""
+""".format(RESERVED_MAIN_COD=_RESERVED_MAIN_COD, RESERVED_LAT_C=_RESERVED_LAT_C)

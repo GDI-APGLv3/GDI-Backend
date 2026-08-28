@@ -1,40 +1,34 @@
-"""
-Dispatcher de firma digital.
+from shared.logging import get_logger
 
-Orquesta el flujo de firma digital (AutoFirma / token FNMT):
-  1. Obtiene datos del documento y signer desde BD
-  2. Valida CUIT del usuario
-  3. Adquiere lock R2
-  4. Si es numerador: reserva numero oficial
-  5. Descarga PDF desde inprocess/
-  6. Si es numerador: aplica stamp con numero
-  7. Llama al provider (AutoFirma) para crear sesion
-  8. Registra audit log con estado 'pending'
-"""
-import logging
-from datetime import timezone
-
-from database import fetch_one, fetch_all
+from database import fetch_one
 from services.r2_client import r2_get_object
 from services.documents.signing.r2_lock import (
     acquire_signing_lock_R2, release_signing_lock_R2_fail,
 )
 from services.documents.signing.audit_logger import log_signature_event
-from shared.exceptions import ValidationError
+from services.documents.retrieval.pending_signatures import _is_my_turn_condition
+from shared.exceptions import ValidationError, SignerTurnPendingError
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 async def _get_signing_data(document_id: str, user_id: str, *, schema_name: str) -> dict:
-    """Obtiene datos del signer y documento desde BD."""
     row = await fetch_one(
-        """
+        f"""
         SELECT
             ds.is_numerator,
             ds.signing_order,
+            ds.status AS signer_status,
             u."CountryID" as user_cuit,
             dt.signature_policy,
-            dt.acronym as doc_type_acronym
+            dt.acronym as doc_type_acronym,
+            {_is_my_turn_condition('ds')} AS is_my_turn,
+            (SELECT count(*)
+               FROM document_signers ds_pend
+              WHERE ds_pend.document_id = ds.document_id
+                AND ds_pend.is_numerator = false
+                AND (ds_pend.status = 'pending' OR ds_pend.status IS NULL)
+            ) AS pending_common_signers
         FROM document_signers ds
         JOIN users u ON ds.user_id = u.id
         LEFT JOIN document_draft dd ON ds.document_id = dd.id
@@ -53,9 +47,6 @@ async def _get_signing_data(document_id: str, user_id: str, *, schema_name: str)
 
 
 async def _fetch_signing_inputs(document_id: str, *, schema_name: str) -> dict:
-    """
-    Obtiene desde BD todos los datos necesarios para llamar a reserve_number().
-    """
     from datetime import datetime
 
     doc_row = await fetch_one(
@@ -125,18 +116,6 @@ async def _validate_numbering_permissions(
     *,
     schema_name: str,
 ) -> None:
-    """
-    Valida permisos de numeración usando el validador único.
-
-    Obtiene el document_type_id del draft y delega a
-    can_user_number_document_type. Si la validación falla lanza
-    ValidationError con el mismo mensaje que el path electrónico
-    (numerator.py), garantizando comportamiento idéntico entre
-    firma digital y electrónica.
-
-    Raises:
-        ValidationError: si el usuario no tiene permiso de rango o sector.
-    """
     from database import fetch_one as _fetch_one
     from services.documents.signing.numbering_permissions import (
         can_user_number_document_type,
@@ -169,15 +148,13 @@ async def _reserve_number_async(
     user_id: str,
     *,
     schema_name: str,
-) -> tuple[str, int | None]:
-    """
-    Reserva un número oficial para el documento.
-    """
+    batch_id: str | None = None,
+) -> tuple[str, int | None, str]:
     from shared.numbering import reserve_number
 
     inputs = await _fetch_signing_inputs(document_id, schema_name=schema_name)
 
-    official_number, _department_id, sequence = await reserve_number(
+    official_number, _department_id, sequence, reservation_id = await reserve_number(
         document_type_acronym=inputs["acronym"],
         user_id=user_id,
         year=inputs["current_year"],
@@ -189,9 +166,10 @@ async def _reserve_number_async(
         resume=inputs.get("resume"),
         signers=inputs["signers"],
         signer_sector_ids=inputs["signer_sector_ids"],
+        batch_id=batch_id,
     )
 
-    return official_number, sequence
+    return official_number, sequence, reservation_id
 
 
 async def _cancel_number_async(
@@ -200,7 +178,6 @@ async def _cancel_number_async(
     schema_name: str,
     reason: str,
 ) -> None:
-    """Cancela reserva de número (soft-fail)."""
     try:
         from shared.numbering import cancel_number
         await cancel_number(document_id, schema_name=schema_name, reason=reason)
@@ -209,7 +186,6 @@ async def _cancel_number_async(
 
 
 async def _count_completed_signers(document_id: str, *, schema_name: str) -> int:
-    """Cuenta firmantes que ya completaron su firma. Usado para calcular posición en layout 2 columnas."""
     row = await fetch_one(
         "SELECT COUNT(*) AS n FROM document_signers"
         " WHERE document_id = $1::uuid AND signed_at IS NOT NULL",
@@ -224,35 +200,39 @@ async def dispatch_digital_signing(
     user_id: str,
     *,
     schema_name: str,
-    provider_name: str = "autofirma",
     ip_address: str | None = None,
     user_agent: str | None = None,
+    batch_id: str | None = None,
 ) -> dict:
-    """
-    Despacha el flujo de firma digital para un documento.
-
-    Orquesta: lock R2 → reserva numero (numerador) → stamp PDF → provider session.
-
-    Returns:
-        dict compatible con SuperSignResponse (campos opcionales de flujo digital incluidos).
-    """
     log.info(
         f"dispatch_digital_signing start doc={document_id[:8]}... user={user_id[:8]}..."
     )
 
-    # 1. Obtener datos de BD
     signing_data = await _get_signing_data(document_id, user_id, schema_name=schema_name)
 
     is_numerator: bool = bool(signing_data.get("is_numerator"))
     user_cuit: str | None = signing_data.get("user_cuit")
 
-    # 2. Validar CUIT
+    signer_status = signing_data.get("signer_status")
+    if signer_status not in ("pending", None):
+        raise ValidationError(
+            f"El usuario ya firmó este documento (status: {signer_status})"
+        )
+
+    if not signing_data.get("is_my_turn"):
+        pendientes = int(signing_data.get("pending_common_signers") or 0)
+        log.info(
+            "dispatch_digital_signing: firma fuera de turno doc=%s user=%s "
+            "(pendientes=%d, numerador=%s)",
+            document_id[:8], user_id[:8], pendientes, is_numerator,
+        )
+        raise SignerTurnPendingError(pendientes)
+
     if user_cuit is None:
         raise ValidationError(
             "Este documento requiere Firma Digital, para proceder es necesario que su usuario tenga registrado su Número de Identificación Nacional. Solicite a su administrador local del sistema."
         )
 
-    # 3. Adquirir lock R2
     lock_acquired = await acquire_signing_lock_R2(
         schema_name=schema_name, doc_id=document_id
     )
@@ -260,12 +240,10 @@ async def dispatch_digital_signing(
         raise ValidationError("document_already_signing")
 
     reserved_number: str | None = None
+    reservation_id: str | None = None
 
     try:
-        # 4. Si es numerador: validar permisos y luego reservar numero
         if is_numerator:
-            # Validar permisos con el mismo validador que la firma electrónica.
-            # Se ejecuta dentro del try para que el lock R2 se libere si falla.
             await _validate_numbering_permissions(
                 user_id,
                 document_id,
@@ -273,12 +251,16 @@ async def dispatch_digital_signing(
             )
 
             try:
-                reserved_number, _seq = await _reserve_number_async(
+                reserved_number, _seq, reservation_id = await _reserve_number_async(
                     document_id,
                     user_id,
                     schema_name=schema_name,
+                    batch_id=batch_id,
                 )
-                log.info(f"dispatch_digital_signing number_reserved={reserved_number}")
+                log.info(
+                    f"dispatch_digital_signing number_reserved={reserved_number} "
+                    f"ticket={reservation_id[:8] if reservation_id else 'N/A'}..."
+                )
             except Exception:
                 await release_signing_lock_R2_fail(
                     schema_name=schema_name,
@@ -286,15 +268,11 @@ async def dispatch_digital_signing(
                 )
                 raise
 
-        # 5. Descargar PDF desde inprocess/
         inprocess_key = f"inprocess/{document_id.replace('-', '')}.pdf"
         pdf_bytes = await r2_get_object(
             schema_name=schema_name, key=inprocess_key, bucket="tosign",
         )
 
-        # 6. Stamp via Notary para calcular posición de firma
-        # - Numerador: estampa número oficial + calcula posición
-        # - No numerador: solo calcula posición (número vacío = Notary no estampa)
         sig_llx, sig_lly, sig_urx, sig_ury = 50.0, 30.0, 250.0, 110.0
         from services.shared.notary_api import call_notary_stamp_only
         from services.shared.settings_utils import get_city_from_settings
@@ -312,7 +290,6 @@ async def dispatch_digital_signing(
         except Exception as stamp_err:
             log.warning(f"dispatch_digital_signing stamp_notary_fail (usando posición default): {stamp_err}")
 
-        # 7. Llamar al provider
         from services.documents.signing.providers.firmador_gdi import FirmadorGDIProvider
 
         provider = FirmadorGDIProvider()
@@ -330,10 +307,11 @@ async def dispatch_digital_signing(
             sig_lly=sig_lly,
             sig_urx=sig_urx,
             sig_ury=sig_ury,
+            reservation_id=reservation_id,
+            batch_id=batch_id,
         )
 
     except Exception as exc:
-        # Rollback lock en cualquier error post-adquisicion
         try:
             await release_signing_lock_R2_fail(
                 schema_name=schema_name, doc_id=document_id,
@@ -341,7 +319,6 @@ async def dispatch_digital_signing(
         except Exception as lock_err:
             log.warning(f"dispatch_digital_signing lock_rollback_error: {lock_err}")
 
-        # Cancelar numero reservado si aplica
         if reserved_number:
             try:
                 await _cancel_number_async(
@@ -354,7 +331,6 @@ async def dispatch_digital_signing(
 
         raise
 
-    # 8. Audit log pendiente
     try:
         await log_signature_event(
             schema_name=schema_name,
@@ -370,7 +346,6 @@ async def dispatch_digital_signing(
     except Exception as audit_err:
         log.warning(f"dispatch_digital_signing audit_log soft-fail: {audit_err}")
 
-    # 9. Construir respuesta
     expires_at = session_data["expires_at"]
     expires_at_iso = (
         expires_at.isoformat()
@@ -393,4 +368,5 @@ async def dispatch_digital_signing(
         "poll_url": f"/digital-signature/poll/{session_data['session_id']}",
         "user_payload": session_data["user_payload"],
         "expires_at": expires_at_iso,
+        "file_id": session_data["file_id"],
     }

@@ -1,4 +1,3 @@
-"""Endpoints para vinculación de documentos con legajos."""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, Query

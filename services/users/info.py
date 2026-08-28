@@ -1,9 +1,3 @@
-"""
-Servicio para obtener información detallada de un usuario del tenant.
-
-Expone la misma estructura de datos que el endpoint del Gateway (SET B)
-`GET /api/v1/system/users/{user_id}` (tools/system.py::get_user_info).
-"""
 from typing import Dict, Any
 
 from shared.logging import get_logger
@@ -14,28 +8,6 @@ logger = get_logger(__name__)
 
 
 async def get_user_info(user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtener información detallada de un usuario del tenant.
-
-    Devuelve datos del perfil, sector principal, roles y sectores adicionales
-    con permisos. Idéntica estructura a la que retorna el endpoint REST del
-    Gateway (SET B) para `GET /api/v1/system/users/{user_id}`.
-
-    Args:
-        user_id: UUID del usuario a consultar
-        schema_name: Schema de la municipalidad (keyword-only)
-
-    Returns:
-        Dict con:
-        - user_id, full_name, email, profile_picture_url, estado
-        - last_access, created_at (ISO strings o None)
-        - sector: dict con id, acronym, department_id, department_name, department_acronym
-        - roles: lista de nombres de rol
-        - additional_sectors: lista de sectores adicionales con permisos
-
-    Raises:
-        NotFoundError: Si el usuario no existe en el tenant
-    """
     if not user_id:
         raise ValueError("user_id es requerido")
 

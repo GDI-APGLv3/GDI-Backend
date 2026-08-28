@@ -1,14 +1,9 @@
-"""
-Modelos de respuesta para el módulo de NOTAS.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Any
-from datetime import datetime
 
 
 class PaginationInfo(BaseModel):
-    """Información de paginación"""
     page: int = Field(..., description="Página actual (1-indexed)")
     page_size: int = Field(..., description="Elementos por página")
     total: int = Field(..., description="Total de elementos")
@@ -27,20 +22,17 @@ class PaginationInfo(BaseModel):
 
 
 class SenderInfo(BaseModel):
-    """Información del sector emisor"""
     sector_id: str = Field(..., description="UUID del sector")
     acronym: str = Field(..., description="Acrónimo del sector")
     department_name: str = Field(..., description="Nombre del departamento")
 
 
 class ReadStatus(BaseModel):
-    """Estado de lectura de una nota"""
     opened: bool = Field(..., description="Si fue abierta por el sector")
     opened_at: Optional[str] = Field(None, description="Fecha de apertura (ISO format)")
 
 
 class RecipientSummary(BaseModel):
-    """Resumen de un recipient para listas"""
     sector_id: str = Field(..., description="UUID del sector")
     type: str = Field(..., description="Tipo: TO, CC, BCC")
     acronym: str = Field(..., description="Acrónimo del sector")
@@ -48,7 +40,6 @@ class RecipientSummary(BaseModel):
 
 
 class NoteSummary(BaseModel):
-    """Resumen de nota para listas (sent/received)"""
     document_id: str = Field(..., description="UUID del documento")
     official_number: str = Field(..., description="Número oficial de la nota")
     reference: str = Field(..., description="Asunto de la nota")
@@ -58,7 +49,6 @@ class NoteSummary(BaseModel):
 
 
 class NoteSentSummary(NoteSummary):
-    """Resumen de nota enviada (incluye recipients y openings)"""
     recipients: List[RecipientSummary] = Field(
         default_factory=list,
         description="Lista de destinatarios"
@@ -67,14 +57,12 @@ class NoteSentSummary(NoteSummary):
 
 
 class NoteReceivedSummary(NoteSummary):
-    """Resumen de nota recibida (incluye sender y read status)"""
     recipient_type: str = Field(..., description="Tipo de recipient (TO, CC)")
     sender: SenderInfo = Field(..., description="Información del sector emisor")
     read_status: ReadStatus = Field(..., description="Estado de lectura")
 
 
 class NoteSentListResponse(BaseModel):
-    """Respuesta para lista de notas enviadas"""
     notes: List[NoteSentSummary] = Field(..., description="Lista de notas enviadas")
     pagination: PaginationInfo = Field(..., description="Información de paginación")
 
@@ -102,7 +90,6 @@ class NoteSentListResponse(BaseModel):
 
 
 class NoteReceivedListResponse(BaseModel):
-    """Respuesta para lista de notas recibidas"""
     notes: List[NoteReceivedSummary] = Field(..., description="Lista de notas recibidas")
     pagination: PaginationInfo = Field(..., description="Información de paginación")
 
@@ -132,13 +119,7 @@ class NoteReceivedListResponse(BaseModel):
     )
 
 
-# ============================================================================
-# ARCHIVADO DE NOTAS
-# ============================================================================
-
-
 class ArchiveNoteRequest(BaseModel):
-    """Request para archivar/desarchivar una nota"""
     archived: bool = Field(..., description="True para archivar, False para desarchivar")
     sector_id: str = Field(..., description="UUID del sector desde el cual se archiva")
 
@@ -153,7 +134,6 @@ class ArchiveNoteRequest(BaseModel):
 
 
 class ArchiveNoteResponse(BaseModel):
-    """Respuesta al archivar/desarchivar una nota"""
     document_id: str = Field(..., description="UUID del documento")
     sector_id: str = Field(..., description="UUID del sector")
     is_archived: bool = Field(..., description="Nuevo estado de archivado")
@@ -172,7 +152,6 @@ class ArchiveNoteResponse(BaseModel):
 
 
 class NoteArchivedSummary(NoteSummary):
-    """Resumen de nota archivada (incluye sender, read status y archive info)"""
     recipient_type: str = Field(..., description="Tipo de recipient (TO, CC)")
     sender: SenderInfo = Field(..., description="Información del sector emisor")
     read_status: ReadStatus = Field(..., description="Estado de lectura")
@@ -181,7 +160,6 @@ class NoteArchivedSummary(NoteSummary):
 
 
 class NoteArchivedListResponse(BaseModel):
-    """Respuesta para lista de notas archivadas"""
     notes: List[NoteArchivedSummary] = Field(..., description="Lista de notas archivadas")
     pagination: PaginationInfo = Field(..., description="Información de paginación")
 
@@ -214,13 +192,11 @@ class NoteArchivedListResponse(BaseModel):
 
 
 class DocumentTypeInfo(BaseModel):
-    """Información del tipo de documento"""
     name: str = Field(..., description="Nombre completo")
     acronym: str = Field(..., description="Acrónimo")
 
 
 class MyAccessInfo(BaseModel):
-    """Información de acceso del usuario actual"""
     is_sender: bool = Field(..., description="Si es el emisor")
     recipient_type: Optional[str] = Field(None, description="Tipo de recipient si aplica")
     sector_id: Optional[str] = Field(None, description="UUID del sector con el que se accede a la nota")
@@ -231,16 +207,17 @@ class MyAccessInfo(BaseModel):
 
 
 class OpeningInfo(BaseModel):
-    """Información de una apertura de nota"""
     sector_id: str = Field(..., description="UUID del sector")
     sector_acronym: str = Field(..., description="Acrónimo del sector")
+    sector_color: Optional[str] = Field(None, description="Color primario del sector (hex)")
     user_id: str = Field(..., description="UUID del usuario")
     user_name: str = Field(..., description="Nombre del usuario")
+    profile_picture_url: Optional[str] = Field(None, description="URL de foto de perfil del usuario")
+    seal_name: Optional[str] = Field(None, description="Sello/cargo del usuario que abrió")
     opened_at: Optional[str] = Field(None, description="Fecha de apertura")
 
 
 class RecipientDetailInfo(BaseModel):
-    """Información detallada de recipient"""
     sector_id: str = Field(..., description="UUID del sector")
     acronym: str = Field(..., description="Acrónimo del sector")
     department_name: str = Field(..., description="Nombre del departamento")
@@ -248,7 +225,6 @@ class RecipientDetailInfo(BaseModel):
 
 
 class RecipientsDetail(BaseModel):
-    """Recipients con detalle completo"""
     to: List[RecipientDetailInfo] = Field(default_factory=list)
     cc: List[RecipientDetailInfo] = Field(default_factory=list)
     bcc: Optional[List[RecipientDetailInfo]] = Field(None, description="Solo visible para sender")
@@ -257,15 +233,14 @@ class RecipientsDetail(BaseModel):
 
 
 class ProposedCaseInfo(BaseModel):
-    """Información de un expediente propuesto para vincular"""
     case_id: str = Field(..., description="UUID del expediente")
     case_number: str = Field(..., description="Número del expediente")
     reference: Optional[str] = Field(None, description="Asunto del expediente")
     proposing_date: Optional[str] = Field(None, description="Fecha de propuesta")
+    is_reserved: bool = Field(False, description="GDI-069: expediente de tipo reservado (reference enmascarada)")
 
 
 class NoteDetail(BaseModel):
-    """Detalle completo de una nota"""
     document_id: str = Field(..., description="UUID del documento")
     official_number: str = Field(..., description="Número oficial")
     reference: str = Field(..., description="Asunto")
@@ -288,7 +263,6 @@ class NoteDetail(BaseModel):
 
 
 class NoteDetailResponse(NoteDetail):
-    """Respuesta para detalle de nota"""
     model_config = ConfigDict(
         json_schema_extra={
             "example": {

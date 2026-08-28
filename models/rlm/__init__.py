@@ -1,4 +1,3 @@
-"""Módulo RLM (Registro Legajo Multipropósito) - Modelos Pydantic."""
 from models.rlm.schemas import (
     CreateRecordRequest,
     UpdateRecordRequest,
@@ -11,3 +10,16 @@ from models.rlm.schemas import (
     FieldResponse,
     HistoryResponse,
 )
+
+__all__ = [
+    "CreateRecordRequest",
+    "UpdateRecordRequest",
+    "RecordResponse",
+    "RecordListResponse",
+    "RegistryListResponse",
+    "RegistryDetailResponse",
+    "UpdateFieldRequest",
+    "VerifyFieldRequest",
+    "FieldResponse",
+    "HistoryResponse",
+]

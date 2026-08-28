@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener contenido HTML de documentos oficiales.
-Usado por frontend/integraciones que necesitan el contenido completo.
-"""
 from shared.logging import get_logger
 from fastapi import APIRouter, HTTPException, Path, Request, status, Depends
 from typing import Dict, Any
@@ -38,12 +34,12 @@ async def get_document_content(
     del usuario sobre el documento.
     """
     document_id = str(document_id)
-    # SEC-11: Verificar permisos de visualizacion
     from services.documents.permissions import can_user_view_document
     if not await can_user_view_document(document_id, request.state.tenant_user_id, schema_name=schema_name):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tiene permisos para ver este documento")
 
-    logger.info(f"[GET CONTENT] Usuario {current_user.get('id', '')[:8] if current_user.get('id') else 'unknown'} solicitando contenido de {document_id[:8]}")
+    _uid = getattr(current_user, "user_id", None)
+    logger.info(f"[GET CONTENT] Usuario {_uid[:8] if _uid else 'unknown'} solicitando contenido de {document_id[:8]}")
 
     try:
         result = await get_official_document_content(document_id, schema_name)

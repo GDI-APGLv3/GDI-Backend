@@ -1,10 +1,6 @@
-"""Preview Data Fetcher - REFACTORIZADO
-MIGRADO: Fase 6 asyncpg
-"""
 
 from shared.logging import get_logger
 from typing import Dict, Any
-from database import fetch_one
 from shared.exceptions import DocumentNotFoundError
 from config.constants import DEFAULT_LOGO_URL
 from services.shared.user_data import get_user_complete_data, get_document_signers_for_preview
@@ -17,17 +13,17 @@ logger = get_logger(__name__)
 
 
 class PreviewDataFetcher:
-    """Obtiene y estructura datos para generar un preview."""
 
     def __init__(self, *, schema_name: str):
-        """Inicializa el fetcher con el schema del tenant."""
         self.schema_name = schema_name
 
-    async def get_complete_document_data(self, document_id: str) -> Dict[str, Any]:
-        """Obtiene todos los datos necesarios para el preview del documento."""
+    async def get_complete_document_data(
+        self, document_id: str, *, document_info: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
         logger.info(f"Obteniendo datos completos para preview de documento {document_id}")
 
-        document_info = await self._fetch_document_basic_info(document_id)
+        if document_info is None:
+            document_info = await self._fetch_document_basic_info(document_id)
         creator_data = await get_user_complete_data(str(document_info['created_by']), schema_name=self.schema_name)
         signers_data = await get_document_signers_for_preview(document_id, schema_name=self.schema_name)
 
@@ -42,7 +38,6 @@ class PreviewDataFetcher:
         return preview_data
 
     async def _fetch_document_basic_info(self, document_id: str) -> Dict[str, Any]:
-        """Obtiene información básica del documento."""
         from database import get_conn
 
         async with get_conn(schema_name=self.schema_name) as conn:
@@ -64,10 +59,22 @@ class PreviewDataFetcher:
                     "Asigne un tipo antes de generar preview."
                 )
 
-            content_text = DocumentBuilder._extract_content(doc_data['content'])
-            display_status = await get_display_state_name(doc_data['status'], schema_name=self.schema_name)
+            fd_row = await conn.fetchrow(
+                "SELECT field_definitions FROM document_type_fields "
+                "WHERE document_type_id = $1",
+                doc_data.get('document_type_id'),
+            )
+            if fd_row is not None:
+                field_defs = fd_row['field_definitions'] if fd_row else []
+                raw_data = doc_data['content'] if isinstance(doc_data['content'], dict) else {}
+                from services.documents.ffcc_renderer import ffcc_to_html
+                content_text = ffcc_to_html(field_defs, raw_data)
+                logger.info(f"Formulario controlado preview HTML generado: {len(content_text)} chars")
+            else:
+                content_text = DocumentBuilder._extract_content(doc_data['content'])
 
-            # Obtener logo del municipio desde settings
+            display_status = await get_display_state_name(doc_data['status'], schema_name=self.schema_name, conn=conn)
+
             settings_result = await conn.fetchrow("SELECT logo_url FROM settings LIMIT 1")
             logo_url = settings_result['logo_url'] if settings_result and settings_result.get('logo_url') else DEFAULT_LOGO_URL
 

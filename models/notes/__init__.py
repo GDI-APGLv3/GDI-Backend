@@ -1,7 +1,3 @@
-"""
-Modelos para el módulo de NOTAS.
-Sistema de documentos oficiales con destinatarios (TO/CC/BCC) y tracking de apertura.
-"""
 
 from .recipients import RecipientInfo, VisibleRecipientsResponse
 from .responses import (

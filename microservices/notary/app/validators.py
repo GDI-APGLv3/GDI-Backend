@@ -1,86 +1,29 @@
-"""
-Módulo de validaciones para el servicio de notarización digital
-
-Este módulo contiene todas las funciones de validación necesarias para
-el procesamiento seguro de documentos PDF, incluyendo validación de formato,
-tamaño, contenido y parámetros de entrada.
-
-Características principales:
-- Validación de formato y tamaño de archivos PDF
-- Sanitización de nombres de archivo
-- Validación de parámetros de firma y estampado
-- Verificación de disponibilidad de espacio en documentos
-- Manejo de errores con códigos específicos
-
-Autor: Sistema de Notarización Digital
-Versión: 1.0.0
-"""
 import re
 from fastapi import HTTPException, UploadFile
 from typing import Optional
 from .config import (
-    LETTER_WIDTH, LETTER_HEIGHT, MAX_PDF_SIZE_MB, SPECIAL_CHARS
+    LETTER_WIDTH, LETTER_HEIGHT, MAX_SIGNABLE_PDF_SIZE_MB, SPECIAL_CHARS
 )
 
-# Regex para tenant_id: solo alfanuméricos, guiones y underscores
 TENANT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 class ValidationError(Exception):
-    """
-    Excepción personalizada para errores de validación
-    
-    Proporciona información detallada sobre errores de validación,
-    incluyendo mensajes descriptivos y códigos de error específicos
-    para facilitar el manejo y depuración.
-    
-    Attributes:
-        message (str): Mensaje descriptivo del error
-        error_code (str): Código único del error para identificación
-    """
     def __init__(self, message: str, error_code: str):
         self.message = message
         self.error_code = error_code
         super().__init__(self.message)
 
 def validate_pdf_format(pdf_file: UploadFile) -> bytes:
-    """
-    Valida el formato y tamaño de un archivo PDF subido
-    
-    Realiza validaciones básicas del archivo PDF incluyendo verificación
-    de tamaño máximo, formato de archivo y estructura básica PDF.
-    
-    Args:
-        pdf_file (UploadFile): Archivo PDF subido a través de la API
-        
-    Returns:
-        bytes: Contenido binario del PDF validado y listo para procesamiento
-        
-    Raises:
-        HTTPException: Si el archivo no cumple con los requisitos:
-            - FILE_TOO_LARGE: Archivo excede el tamaño máximo permitido
-            - INVALID_PDF_FILE: No se puede leer el archivo o no es un PDF válido
-            
-    Note:
-        - Tamaño máximo definido por MAX_PDF_SIZE_MB en config.py
-        - Verifica que el archivo comience con la signatura PDF (%PDF)
-        - Resetea el puntero del archivo después de la lectura
-        
-    Example:
-        >>> pdf_content = validate_pdf_format(uploaded_file)
-        >>> len(pdf_content) > 0  # True si es válido
-    """
-    # Validar tamaño del archivo
-    if pdf_file.size > MAX_PDF_SIZE_MB * 1024 * 1024:
+    if pdf_file.size > MAX_SIGNABLE_PDF_SIZE_MB * 1024 * 1024:
         raise HTTPException(
             status_code=400,
-            detail=f"PDF file too large. Maximum size: {MAX_PDF_SIZE_MB}MB",
+            detail=f"PDF file too large. Maximum size: {MAX_SIGNABLE_PDF_SIZE_MB}MB",
             headers={"error_code": "FILE_TOO_LARGE"}
         )
     
-    # Leer contenido del archivo
     try:
         pdf_content = pdf_file.file.read()
-        pdf_file.file.seek(0)  # Reset file pointer
+        pdf_file.file.seek(0)
     except Exception as e:
         raise HTTPException(
             status_code=400,
@@ -88,7 +31,6 @@ def validate_pdf_format(pdf_file: UploadFile) -> bytes:
             headers={"error_code": "INVALID_PDF_FILE"}
         )
     
-    # Validación básica de que sea un PDF
     if not pdf_content.startswith(b'%PDF'):
         raise HTTPException(
             status_code=400,
@@ -100,42 +42,23 @@ def validate_pdf_format(pdf_file: UploadFile) -> bytes:
 
 
 def validate_signature_params(name: str, seal: str, department: str, entity: str) -> dict:
-    """
-    Valida los parámetros obligatorios para la firma
-    
-    Args:
-        name: Nombre del firmante
-        seal: Sello
-        department: Departamento
-        entity: Entidad
-        
-    Returns:
-        dict: Parámetros validados
-        
-    Raises:
-        HTTPException: Si algún parámetro es inválido
-    """
     errors = []
     
-    # Validar name
     if not name or len(name.strip()) == 0:
         errors.append("name is required")
     elif len(name) > 100:
         errors.append("name must be 100 characters or less")
     
-    # Validar seal
     if not seal or len(seal.strip()) == 0:
         errors.append("seal is required")
     elif len(seal) > 50:
         errors.append("seal must be 50 characters or less")
     
-    # Validar department
     if not department or len(department.strip()) == 0:
         errors.append("department is required")
     elif len(department) > 100:
         errors.append("department must be 100 characters or less")
     
-    # Validar entity
     if not entity or len(entity.strip()) == 0:
         errors.append("entity is required")
     elif len(entity) > 100:
@@ -156,29 +79,14 @@ def validate_signature_params(name: str, seal: str, department: str, entity: str
     }
 
 def validate_stamp_params(document_number: Optional[str], city: Optional[str]) -> Optional[dict]:
-    """
-    Valida los parámetros opcionales para el estampado
-    
-    Args:
-        document_number: Número de documento (opcional)
-        city: Ciudad (obligatorio si se envía document_number)
-        
-    Returns:
-        dict o None: Parámetros validados o None si no se requiere estampado
-        
-    Raises:
-        HTTPException: Si los parámetros son inválidos
-    """
     if not document_number:
         return None
     
     errors = []
     
-    # Validar document_number
     if len(document_number) > 40:
         errors.append("document_number must be 40 characters or less")
     
-    # Validar city (obligatorio si se envía document_number)
     if not city or len(city.strip()) == 0:
         errors.append("city is required when document_number is provided")
     elif len(city) > 50:
@@ -197,15 +105,6 @@ def validate_stamp_params(document_number: Optional[str], city: Optional[str]) -
     }
 
 def sanitize_filename(filename: str) -> str:
-    """
-    Sanitiza el nombre del archivo reemplazando caracteres especiales
-
-    Args:
-        filename: Nombre del archivo original
-
-    Returns:
-        str: Nombre del archivo sanitizado
-    """
     sanitized = filename
     for char in SPECIAL_CHARS:
         sanitized = sanitized.replace(char, '-')
@@ -213,15 +112,6 @@ def sanitize_filename(filename: str) -> str:
 
 
 def validate_stamp_position(stamp_position: Optional[str]) -> None:
-    """
-    Valida que stamp_position sea 'first' o 'last'
-
-    Args:
-        stamp_position: Posición del estampado ('first' o 'last')
-
-    Raises:
-        HTTPException: Si stamp_position no es válido
-    """
     if stamp_position is not None:
         valid_positions = ["first", "last"]
         if stamp_position not in valid_positions:
@@ -233,19 +123,6 @@ def validate_stamp_position(stamp_position: Optional[str]) -> None:
 
 
 def validate_tenant_id(tenant_id: str) -> str:
-    """
-    Valida que tenant_id solo contenga caracteres seguros (alfanuméricos, guiones, underscores).
-    Previene path traversal (e.g. ../../etc/passwd).
-
-    Args:
-        tenant_id: ID del tenant a validar
-
-    Returns:
-        str: tenant_id validado
-
-    Raises:
-        HTTPException 400: Si tenant_id contiene caracteres no permitidos
-    """
     if not tenant_id or not TENANT_ID_PATTERN.match(tenant_id):
         raise HTTPException(
             status_code=400,

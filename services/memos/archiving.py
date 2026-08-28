@@ -1,11 +1,3 @@
-"""
-Servicios de archivado para MEMOS.
-Permite a los recipients archivar/desarchivar memos recibidos.
-
-Diferencias clave con NOTAS:
-- El usuario archiva para si mismo (user_id en vez de sector_id)
-- Verificacion de acceso por user_id
-"""
 
 from typing import Dict, Any
 from shared.logging import get_logger
@@ -26,15 +18,6 @@ async def toggle_memo_archive(
     archived: bool,
     *, schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Archiva o desarchiva un memo para un usuario especifico.
-    Solo recipients pueden archivar (el sender no puede).
-
-    Raises:
-        NotFoundError: Si el documento no existe o el usuario no es recipient
-        AuthorizationError: Si el usuario es el sender
-    """
-    # Verificar que el usuario NO sea el sender
     is_sender_result = await fetch_one(
         check_user_is_sender_query(), document_id, user_id,
         schema_name=schema_name
@@ -46,7 +29,6 @@ async def toggle_memo_archive(
             "Solo los destinatarios pueden archivar."
         )
 
-    # Verificar que el usuario sea recipient
     recipient = await fetch_one(
         get_memo_recipient_info_query(), document_id, user_id,
         schema_name=schema_name
@@ -58,7 +40,6 @@ async def toggle_memo_archive(
             f"del memo {document_id}"
         )
 
-    # Actualizar estado de archivado en transacción
     async with transaction(schema_name=schema_name) as conn:
         result = await conn.fetchrow(
             update_memo_archived_status_query(),
@@ -86,12 +67,6 @@ async def get_memo_archive_status(
     user_id: str,
     *, schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Obtiene el estado de archivado de un memo para un usuario especifico.
-
-    Raises:
-        NotFoundError: Si el usuario no es recipient del documento
-    """
     recipient = await fetch_one(
         get_memo_recipient_info_query(), document_id, user_id,
         schema_name=schema_name

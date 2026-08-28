@@ -81,3 +81,17 @@ fly secrets set \
 - BD interna: `<your-postgres-app>.internal` (red privada Fly.io)
 - Microservicios internos: `http://{app-name}.internal:8080`
 - Frontend: URL publica de Vercel
+
+### Variables opcionales de endurecimiento
+
+| Variable | Default | Que hace |
+|----------|---------|----------|
+| `ENLACE_HOSTS` | *(vacio)* | Hostnames publicos, separados por coma, que quedan restringidos a las rutas de firma (`/health`, `/digital-signature/*`). **Vacio = el filtro no se aplica a ningun host.** |
+| `PDF_TRUSTED_HOSTS` | *(vacio)* | Hosts exactos de los que PDFComposer descarga imagenes sin fijar el DNS al IP ya resuelto. Poner aqui SOLO dominios propios. |
+| `PDF_TRUSTED_HOST_SUFFIXES` | `.r2.cloudflarestorage.com` | Idem, por sufijo de dominio. |
+| `DEFAULT_LOGO_URL` | *(vacio)* | Logo de caratulas cuando el municipio no configuro el suyo. Vacio = se genera sin logo. |
+| `DEFAULT_ISOLOGO_URL` | *(vacio)* | Idem para el isologo. |
+
+> Las tres primeras controlan defensas. Dejarlas vacias no rompe el sistema, pero
+> desactiva el filtro de host y obliga a PDFComposer a fijar el DNS en todas las
+> descargas (que es el comportamiento mas seguro).

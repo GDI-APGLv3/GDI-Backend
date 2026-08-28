@@ -1,4 +1,3 @@
-"""Endpoints para campos enriquecidos y historial del módulo RLM."""
 
 from uuid import UUID
 

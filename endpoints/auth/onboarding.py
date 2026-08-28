@@ -1,13 +1,9 @@
-"""
-Endpoint GET /api/auth/onboarding - Información de acceso multi-tenant.
-Retorna tenants disponibles y perfil del usuario autenticado.
-"""
 
 from shared.logging import get_logger
 from fastapi import APIRouter, Request, HTTPException, status
 from auth import decode_jwt_from_request
 from shared.tenant_validation import get_user_tenants, invalidate_user_cache
-from models.tenant_models import OnboardingResponse, OnboardingUser, TenantAccess, UserProfile
+from models.tenant_models import OnboardingResponse, OnboardingUser, TenantAccess
 from models.tags import Tags
 from database import fetch_one, execute, DEMO_MODE
 
@@ -94,7 +90,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
     - Usuario con al menos 1 tenant (raises 403 si no)
     """
     try:
-        # 1. Extraer email del JWT con fallback chain
         logger.info("Extrayendo información del JWT")
         jwt_payload = decode_jwt_from_request(request)
         email = (
@@ -113,29 +108,23 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                 detail="No se pudo identificar el email del usuario"
             )
 
-        # 2. Obtener Auth0 metadata (del JWT o de headers enviados por frontend)
         full_name = jwt_payload.get("name")
         picture = jwt_payload.get("picture")
 
-        # Si el JWT no tiene name, usar header X-User-Name (enviado por frontend)
         if not full_name:
             full_name = request.headers.get("X-User-Name")
 
-        # Fallback final: usar parte del email antes del @
         if not full_name:
             full_name = email.split("@")[0]
 
-        # Si el JWT no tiene picture, usar header X-User-Picture (enviado por frontend)
         if not picture:
             picture = request.headers.get("X-User-Picture")
 
         logger.info(f"Procesando onboarding para auth_id={jwt_payload.get('sub')}")
         logger.info(f"Auth0 metadata - name: {full_name}, picture: {picture or 'NULL'}")
 
-        # 3. Obtener tenants del usuario
         tenants_data = await get_user_tenants(email)
 
-        # 4. Si no tiene tenants, decidir según DEMO_MODE
         if not tenants_data:
             if not DEMO_MODE:
                 logger.warning(f"auth_id={jwt_payload.get('sub')} sin acceso a ninguna municipalidad")
@@ -144,8 +133,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                     detail="No tiene acceso a ninguna municipalidad. Contacte al administrador."
                 )
 
-            # --- DEMO_MODE: auto-crear usuario SOLO en 100_test ---
-            # Verificar si el schema 100_test existe en la BD
             schema_check = await fetch_one(
                 "SELECT 1 FROM information_schema.schemata WHERE schema_name = '100_test'",
                 schema_name="public",
@@ -161,10 +148,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
 
             real_auth_id = jwt_payload.get("sub")
 
-            # 4.1 Crear usuario en 100_test.users
-            # - Sector random de los activos
-            # - Incluye profile_picture_url de Auth0
-            # NOTA: sellos se manejan en tabla user_seals separada
             DEFAULT_TENANT_SCHEMA = "100_test"
             create_user_query = """
                 INSERT INTO users (email, full_name, auth_id, estado, sector_id, profile_picture_url)
@@ -187,7 +170,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
             except Exception as e:
                 logger.warning(f"auth_id={real_auth_id} ya existe o error creando: {e}")
 
-            # 4.2 Registrar en user_registry (foto de perfil se obtiene de {schema}.users)
             register_query = """
                 INSERT INTO public.user_registry (email, schema_name, is_default)
                 VALUES ($1, '100_test', true)
@@ -199,7 +181,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
             except Exception as e:
                 logger.warning(f"Error registrando en user_registry: {e}")
 
-            # 4.3 Asignar un sello aleatorio al usuario en user_seals
             assign_seal_query = """
                 INSERT INTO user_seals (user_id, city_seal_id)
                 SELECT u.id, cs.id
@@ -215,8 +196,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
             except Exception as e:
                 logger.warning(f"Error asignando sello: {e}")
 
-            # 4.3.5 Asignar permisos VIEW y EDIT a todos los sectores activos (excepto el principal)
-            # Esto permite que usuarios de prueba puedan VER y EDITAR expedientes/documentos de cualquier sector
             assign_view_query = """
                 INSERT INTO user_sector_permissions (user_id, sector_id, can_view, can_edit)
                 SELECT u.id, s.id, true, true
@@ -233,7 +212,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
             except Exception as e:
                 logger.warning(f"Error asignando permisos VIEW: {e}")
 
-            # 4.4 Invalidar cache y re-obtener tenants después de crear
             invalidate_user_cache(email)
             tenants_data = await get_user_tenants(email)
 
@@ -244,7 +222,6 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                     detail="Error creando usuario en tenant de pruebas"
                 )
 
-        # 5. Completar datos faltantes del usuario (auth_id y profile_picture_url)
         auth_id_from_jwt = jwt_payload.get("sub")
         if tenants_data and (auth_id_from_jwt or picture):
             for tenant in tenants_data:
@@ -261,11 +238,8 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
                 except Exception as e:
                     logger.warning(f"Error actualizando datos de usuario en {tenant['schema_name']}: {e}")
 
-        # 6. Construir respuesta
         tenants = [TenantAccess(**t) for t in tenants_data]
 
-        # SEC-31 (revertido por hotfix): default_tenant vuelve a ser schema_name,
-        # que es lo que el frontend usa como X-Tenant-Schema y el middleware valida.
         default_tenant = next(
             (t.schema_name for t in tenants if t.is_default),
             tenants[0].schema_name if tenants else None
@@ -281,11 +255,10 @@ async def get_onboarding(request: Request) -> OnboardingResponse:
             ),
             tenants=tenants,
             default_tenant=default_tenant,
-            default_profile=None  # Se puede popullar desde user profile en el servicio si se necesita
+            default_profile=None
         )
 
     except HTTPException:
-        # Re-lanzar excepciones HTTP (401, 403, etc.)
         raise
     except Exception as e:
         logger.error(f"Error inesperado en onboarding: {str(e)}", exc_info=True)

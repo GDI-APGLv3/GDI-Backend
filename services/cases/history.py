@@ -1,7 +1,3 @@
-"""
-Módulo de historial de expedientes.
-Contiene funciones para obtener y crear movimientos en expedientes.
-"""
 
 import uuid
 from typing import Dict, Any, List, Optional
@@ -13,17 +9,25 @@ from shared.logging import get_logger
 logger = get_logger(__name__)
 
 
-async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
-    """
-    Obtiene el historial de movimientos de un expediente.
-    """
+async def get_case_movements(
+    case_id: str,
+    *,
+    schema_name: str,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
     from services.case_queries import get_case_movements_query
     from config.constants import MOVEMENTS_ERROR
 
     try:
         logger.info(f"Fetching movements for case: {case_id}")
 
-        movements_result = await fetch_all(get_case_movements_query(), case_id, schema_name=schema_name)
+        if limit is not None:
+            movements_result = await fetch_all(
+                get_case_movements_query(paginated=True), case_id, limit, offset, schema_name=schema_name
+            )
+        else:
+            movements_result = await fetch_all(get_case_movements_query(), case_id, schema_name=schema_name)
 
         if not movements_result:
             logger.info(f"No movements found for case: {case_id}")
@@ -31,7 +35,6 @@ async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str
 
         movements = []
         for row in movements_result:
-            # Parsear full_name en name y lastname
             user_info = None
             if row['user_id']:
                 full_name = row['user_full_name'] or ""
@@ -44,6 +47,14 @@ async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str
                     "profile_picture_url": row['user_profile_picture_url']
                 }
 
+            citizen_info = None
+            if row.get('citizen_id'):
+                citizen_info = {
+                    "id": str(row['citizen_id']),
+                    "full_name": row.get('citizen_full_name'),
+                    "country_id": row.get('citizen_country_id'),
+                }
+
             movement = {
                 "id": str(row['id']),
                 "type": row['movement_type'],
@@ -53,6 +64,7 @@ async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str
                 "closed_at": row['closed_at'].isoformat() if row['closed_at'] else None,
                 "closing_reason": row['closing_reason'],
                 "user": user_info,
+                "citizen": citizen_info,
                 "creator_sector": {
                     "id": str(row['creator_sector_id']),
                     "name": row['creator_sector_name']
@@ -65,6 +77,12 @@ async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str
                     "id": str(row['assigned_sector_id']),
                     "name": row['assigned_sector_name']
                 } if row['assigned_sector_id'] else None,
+                "assigned_user": {
+                    "name": row['assigned_user_full_name'],
+                    "photo_url": row['assigned_user_profile_picture_url'],
+                    "sector_acronym": row.get('assigned_user_sector_name') or '',
+                    "sector_color": row.get('assigned_user_sector_color') or ''
+                } if row.get('assigned_user_id') else None,
                 "supporting_document_id": str(row['supporting_document_id']) if row.get('supporting_document_id') else None,
                 "supporting_document_number": row.get('supporting_document_number'),
                 "supporting_document_reference": row.get('supporting_document_reference'),
@@ -83,43 +101,42 @@ async def get_case_movements(case_id: str, *, schema_name: str) -> List[Dict[str
 async def create_movement(
     case_id: str,
     movement_type: str,
-    user_id: str,
-    creator_sector_id: str,
-    admin_sector_id: str,
-    reason: str,
+    user_id: Optional[str] = None,
+    creator_sector_id: str = None,
+    admin_sector_id: str = None,
+    reason: str = None,
     assigned_sector_id: Optional[str] = None,
     assigned_user_id: Optional[str] = None,
     supporting_document_id: Optional[str] = None,
+    is_active: bool = True,
+    citizen_id: Optional[str] = None,
     *,
     schema_name: str,
     auth_source: str = "jwt"
 ) -> str:
-    """
-    Crear nuevo movimiento en el expediente.
-    """
     try:
         movement_id = str(uuid.uuid4())
 
         movement_insert = """
             INSERT INTO case_movements (
-                id, case_id, type, user_id,
+                id, case_id, type, user_id, citizen_id,
                 creator_sector_id, admin_sector_id,
                 assigned_sector_id, assigned_user_id,
                 reason, is_active, supporting_document_id
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
             )
         """
 
         await execute(
             movement_insert,
-            movement_id, case_id, movement_type, user_id,
+            movement_id, case_id, movement_type, user_id, citizen_id,
             creator_sector_id, admin_sector_id,
             assigned_sector_id or None,
             assigned_user_id or None,
-            reason, True,
+            reason, is_active,
             supporting_document_id or None,
-            schema_name=schema_name, user_id=user_id, auth_source=auth_source
+            schema_name=schema_name, user_id=(citizen_id or user_id), auth_source=auth_source
         )
 
         logger.info(f"Movement created successfully: {movement_id}")
@@ -130,10 +147,13 @@ async def create_movement(
         raise BusinessLogicError(f"Error creando movimiento: {str(e)}")
 
 
-async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtener historial completo del expediente con mensajes formateados.
-    """
+async def get_case_history(
+    case_id: str,
+    *,
+    schema_name: str,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> Dict[str, Any]:
     from services.case_queries import get_case_number_query
     from config.constants import (
         CASE_HISTORY_ERROR, CASE_NOT_FOUND_ERROR,
@@ -147,7 +167,6 @@ async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
     try:
         logger.info(f"Fetching history for case: {case_id}")
 
-        # Obtener número del expediente
         case_result = await fetch_all(get_case_number_query(), case_id, schema_name=schema_name)
 
         if not case_result:
@@ -159,10 +178,8 @@ async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
         ai_summary_updated_at = case_result[0].get('ai_summary_updated_at')
         short_ai_summary = case_result[0].get('short_ai_summary')
 
-        # Obtener movimientos estructurados
-        movements = await get_case_movements(case_id, schema_name=schema_name)
+        movements = await get_case_movements(case_id, schema_name=schema_name, limit=limit, offset=offset)
 
-        # Calcular qué propuestas ya fueron resueltas
         resolved_proposal_doc_ids = {
             m.get('supporting_document_id')
             for m in movements
@@ -170,17 +187,14 @@ async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
             and m.get('supporting_document_id')
         }
 
-        # Formatear cada movimiento con mensaje legible
         formatted_movements = []
         for mov in movements:
-            # Saltar propuestas ya resueltas
             if (
                 mov.get('type') == MOVEMENT_TYPE_DOCUMENT_PROPOSAL
                 and mov.get('supporting_document_id') in resolved_proposal_doc_ids
             ):
                 continue
 
-            # Extraer datos del usuario
             user_data = mov.get('user')
             if user_data and isinstance(user_data, dict):
                 user_name = f"{user_data.get('name', '')} {user_data.get('lastname', '')}".strip() or "Usuario desconocido"
@@ -190,18 +204,15 @@ async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
             movement_type = mov.get('type', '')
             reason = mov.get('reason', '')
 
-            # Extraer sector del creador
             creator_sector_data = mov.get('creator_sector')
             creator_sector_name = creator_sector_data.get('name', '') if isinstance(creator_sector_data, dict) else ''
 
-            # Extraer sector asignado
             assigned_sector_data = mov.get('assigned_sector')
             assigned_sector_name = assigned_sector_data.get('name', '') if isinstance(assigned_sector_data, dict) else ''
 
-            # Variable para almacenar el resume del documento
             document_resume = None
+            target = None
 
-            # Construir mensaje según tipo de movimiento
             if movement_type == MOVEMENT_TYPE_CREATION:
                 message = "Creó el expediente"
             elif movement_type in [MOVEMENT_TYPE_TRANSFER, MOVEMENT_TYPE_ASSIGNMENT]:
@@ -219,18 +230,46 @@ async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
             elif movement_type in [MOVEMENT_TYPE_DOCUMENT_PROPOSAL, MOVEMENT_TYPE_DOCUMENT_PROPOSAL_REJECT]:
                 message = ""
             elif movement_type in ('responsible_add', 'responsible_remove'):
-                message = ""  # reason contiene el detalle completo
+                assigned_user_data = mov.get('assigned_user')
+                if assigned_user_data:
+                    reason_lower = (reason or '').lower()
+                    subtipo = 'adicional' if 'adicional' in reason_lower else ('administrador' if 'administrador' in reason_lower else '')
+                    target_name = assigned_user_data.get('name') or ''
+                    action = 'Asignó' if movement_type == 'responsible_add' else 'Removió'
+                    subtipo_txt = f" {subtipo}" if subtipo else ''
+                    if target_name:
+                        message = f"{action} a {target_name} como responsable{subtipo_txt}".strip()
+                    else:
+                        message = f"{action} como responsable{subtipo_txt}".strip()
+                    target = {
+                        "name": target_name,
+                        "sector_acronym": assigned_sector_name,
+                        "photo_url": assigned_user_data.get('photo_url') or ''
+                    }
+                    reason = ""
+                else:
+                    message = ""
+            elif movement_type in ('citizen_share', 'citizen_unshare', 'citizen_notify'):
+                message = ""
+            elif movement_type in ('comment', 'task'):
+                message = ""
+                assigned_user_data = mov.get('assigned_user')
+                if assigned_user_data:
+                    target = {
+                        "name": assigned_user_data.get('name') or '',
+                        "sector_acronym": assigned_user_data.get('sector_acronym') or '',
+                        "sector_color": assigned_user_data.get('sector_color') or '',
+                        "photo_url": assigned_user_data.get('photo_url') or ''
+                    }
             else:
                 message = f"Realizó acción: {movement_type}"
 
-            # Agregar reason al mensaje
             if reason:
                 if message:
                     message += f" - {reason}"
                 else:
                     message = reason[0].upper() + reason[1:] if len(reason) > 1 else reason.upper()
 
-            # Construir objeto de documento de soporte si existe
             supporting_document = None
             supporting_doc_number = mov.get('supporting_document_number')
             if supporting_doc_number:
@@ -252,6 +291,7 @@ async def get_case_history(case_id: str, *, schema_name: str) -> Dict[str, Any]:
                 "closed_at": mov.get('closed_at'),
                 "closing_reason": mov.get('closing_reason'),
                 "resume": document_resume,
+                "target": target,
                 "supporting_document": supporting_document
             })
 

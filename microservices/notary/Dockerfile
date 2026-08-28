@@ -32,14 +32,19 @@ COPY app/ ./app/
 # Copiar configuración de Gunicorn
 COPY gunicorn_conf.py .
 
-# Copiar certificados de prueba
-COPY certs/ ./certs/
+# NO se copian certificados a la imagen (GDI-240): los .p12 del repo son de PRUEBA
+# (autofirmados) y no deben viajar al servidor del municipio. El directorio /app/certs
+# ya se crea arriba; cada instalacion monta ahi su propio certificado por volumen.
 
 # Copiar fuentes
 COPY fonts/ ./fonts/
 
 # Variables de entorno por defecto (NO sensibles)
 ENV TZ=UTC
+
+# Version del commit deployado (inyectado por GitHub Actions)
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 
 # Exponer puerto
 EXPOSE 8080

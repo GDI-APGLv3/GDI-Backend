@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener estados visuales de documentos.
-Optimizado siguiendo principios de Clean Code.
-"""
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends, Request
 from models.documents.states import DocumentStatesResponse
@@ -12,7 +8,6 @@ from services.cache import get_cached
 from auth import get_current_user
 from shared.dependencies import get_tenant_schema
 
-# === CONFIGURACIÓN ===
 logger = get_logger("get_states")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
@@ -60,7 +55,7 @@ async def get_document_states(
         states = await get_cached(
             cache_key=f"document_states:all:{schema_name}",
             fetch_func=lambda: get_all_display_states(schema_name=schema_name),
-            ttl=3600  # 1 hora - los estados raramente cambian
+            ttl=3600
         )
 
         logger.info(f"Estados de documentos obtenidos: {len(states)} estados")

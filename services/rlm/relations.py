@@ -1,6 +1,3 @@
-"""
-Servicio para relaciones entre legajos.
-"""
 
 from shared.logging import get_logger
 from database import fetch_all, fetch_one, execute
@@ -27,11 +24,9 @@ async def get_relations(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
-    """Lista relaciones de un legajo con otros legajos con paginacion."""
     from services.rlm.permissions import verify_record_view_permission
     await verify_record_view_permission(record_id, user_id, schema_name=schema_name)
 
-    # Count
     count_result = await fetch_one(
         get_record_relations_count_query(),
         record_id, record_id,
@@ -39,7 +34,6 @@ async def get_relations(
     )
     total = count_result["total"] if count_result else 0
 
-    # List
     offset = (page - 1) * page_size
     results = await fetch_all(
         get_record_relations_query(),
@@ -86,11 +80,9 @@ async def create_relation(
     *,
     schema_name: str
 ) -> dict:
-    """Crea una relación entre dos legajos."""
     if record_id == target_record_id:
         raise ValidationError("No se puede crear una relación de un legajo consigo mismo")
 
-    # Verificar que ambos legajos existen
     source = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -107,7 +99,6 @@ async def create_relation(
     if not target:
         raise NotFoundError(f"Legajo destino con ID '{target_record_id}' no encontrado")
 
-    # Verificar permisos
     if not await check_permission(source["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para crear relaciones en este legajo")
 
@@ -141,7 +132,6 @@ async def create_relation(
 
 
 async def delete_relation(record_id: str, relation_id: str, user_id: str, *, schema_name: str) -> dict:
-    """Elimina una relación entre legajos."""
     source = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -153,7 +143,6 @@ async def delete_relation(record_id: str, relation_id: str, user_id: str, *, sch
     if not await check_permission(source["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para eliminar relaciones de este legajo")
 
-    # Fetch relation info BEFORE deleting for history
     rel_info = await fetch_one(
         """SELECT rr.relation_type,
                   CASE WHEN rr.source_record_id = $1 THEN r2.record_number ELSE r1.record_number END as related_number,

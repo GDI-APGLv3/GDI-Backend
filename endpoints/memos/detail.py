@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener el detalle de un memo.
-Registra la apertura automaticamente si el usuario es recipient.
-"""
 
 from uuid import UUID
 from fastapi import APIRouter, Depends, Path

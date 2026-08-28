@@ -1,31 +1,16 @@
-"""
-Test de firma en paralelo via REST API.
-
-Genera N documentos en 100_test, los pasa por todo el flujo (crear -> save ->
-start-signing -> super-sign) y mide tiempos. Sirve para validar el refactor
-de numeracion (FixNumber) bajo carga concurrente.
-
-Uso:
-    python tests/test_parallel_signing.py [N]
-
-Default N=10. Apunta a <your-backend-app> en TESTING_MODE.
-"""
 
 import asyncio
 import sys
 import time
-import uuid
 from collections import Counter
 
 import httpx
 
-# === CONFIGURACION ===
 BASE_URL = "https://<your-backend-app>.fly.dev"
-USER_ID = "a1000000-0000-0000-0000-000000000100"  # Castor (numerador con sello)
+USER_ID = "a1000000-0000-0000-0000-000000000100"
 SCHEMA_NAME = "100_test"
-DOCUMENT_TYPE_ACRONYM = "ANEXO"  # Tipo simple para testing
+DOCUMENT_TYPE_ACRONYM = "ANEXO"
 
-# Headers para TESTING_MODE
 HEADERS = {
     "X-User-ID": USER_ID,
     "X-Tenant-Schema": SCHEMA_NAME,
@@ -33,7 +18,6 @@ HEADERS = {
 }
 
 
-# Contenido HTML largo para asegurar que end-text quede en pagina con espacio
 HTML_CONTENT = """
 <p>Documento de prueba para test de firma en paralelo.</p>
 <p>Generado automaticamente.</p>
@@ -51,7 +35,6 @@ HTML_CONTENT = """
 
 
 async def create_document(client: httpx.AsyncClient, idx: int) -> dict:
-    """Paso 1: crear el documento (POST /documents)."""
     payload = {
         "document_type_acronym": DOCUMENT_TYPE_ACRONYM,
         "reference": f"TEST PARALELO #{idx} - {int(time.time())}",
@@ -62,7 +45,6 @@ async def create_document(client: httpx.AsyncClient, idx: int) -> dict:
 
 
 async def save_document(client: httpx.AsyncClient, document_id: str) -> dict:
-    """Paso 2: guardar contenido y firmantes (PATCH /documents/{id}/save)."""
     payload = {
         "content": HTML_CONTENT,
         "signers": [
@@ -84,7 +66,6 @@ async def save_document(client: httpx.AsyncClient, document_id: str) -> dict:
 
 
 async def start_signing(client: httpx.AsyncClient, document_id: str) -> dict:
-    """Paso 3: iniciar proceso de firma (POST /documents/{id}/start-signing-process)."""
     r = await client.post(
         f"{BASE_URL}/documents/{document_id}/start-signing-process",
         headers=HEADERS,
@@ -95,7 +76,6 @@ async def start_signing(client: httpx.AsyncClient, document_id: str) -> dict:
 
 
 async def super_sign(client: httpx.AsyncClient, document_id: str) -> tuple:
-    """Paso 4: firmar como numerador (POST /documents/{id}/super-sign)."""
     start = time.monotonic()
     try:
         r = await client.post(
@@ -132,7 +112,6 @@ async def super_sign(client: httpx.AsyncClient, document_id: str) -> tuple:
 
 
 async def prepare_document(client: httpx.AsyncClient, idx: int) -> str | None:
-    """Crear + save + start_signing en SECUENCIAL para tener N docs listos."""
     try:
         created = await create_document(client, idx)
         document_id = created.get("document_id") or created.get("id")
@@ -157,10 +136,8 @@ async def main(n: int = 10):
     print(f"Backend: {BASE_URL}")
     print(f"{'='*70}\n")
 
-    # Limit alto para asyncio + httpx con muchas requests concurrentes
     limits = httpx.Limits(max_connections=100, max_keepalive_connections=50)
     async with httpx.AsyncClient(limits=limits) as client:
-        # FASE 1: Preparar N documentos EN PARALELO
         print(f"FASE 1: Preparando {n} documentos en sent_to_sign EN PARALELO...")
         print("(create + save + start_signing concurrente - estresa PDFComposer)\n")
         t0 = time.monotonic()
@@ -175,7 +152,6 @@ async def main(n: int = 10):
             print("[ERR] No hay documentos para firmar. Abortando.")
             return
 
-        # FASE 2: Firmar N documentos en PARALELO
         print(f"FASE 2: Firmando {len(document_ids)} documentos EN PARALELO...")
         print("(esto es lo importante: medir si el lock se serializa o no)\n")
 
@@ -185,7 +161,6 @@ async def main(n: int = 10):
         )
         total_elapsed = time.monotonic() - t0
 
-        # === ANALISIS ===
         successes = [r for r in results if r["success"]]
         failures = [r for r in results if not r["success"]]
         times = [r["elapsed"] for r in results]

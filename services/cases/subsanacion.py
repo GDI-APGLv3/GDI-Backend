@@ -1,6 +1,3 @@
-"""
-Servicio de lógica de negocio para subsanación de documentos oficiales en expedientes.
-"""
 
 import uuid
 from typing import Dict, Any
@@ -16,33 +13,12 @@ async def subsanar_document_service(
     *,
     schema_name: str
 ) -> Dict[str, Any]:
-    """
-    Subsanar documento oficial en expediente.
 
-    Solo usuarios ADMIN del expediente pueden ejecutar esta acción.
-
-    Proceso:
-    1. Valida que el expediente existe
-    2. Valida que el usuario tiene permisos ADMIN sobre el expediente
-    3. Valida que el documento erróneo existe, está vinculado y activo
-    4. Valida que el documento que justifica existe
-    5. Valida que no hay duplicados
-    6. En transacción atómica:
-       a. Desactiva el documento erróneo
-       b. Vincula el documento que justifica
-    """
-
-    # =================================================================
-    # PASO 1: VALIDAR EXPEDIENTE EXISTE
-    # =================================================================
     case_result = await fetch_all("SELECT id FROM cases WHERE id = $1", case_id, schema_name=schema_name)
 
     if not case_result:
         raise NotFoundError(f"Expediente no encontrado: {case_id}")
 
-    # =================================================================
-    # PASO 2: VALIDAR PERMISOS ADMIN
-    # =================================================================
     user_sector_ids = await get_user_editable_sector_ids(user_id, schema_name=schema_name)
 
     if not user_sector_ids:
@@ -87,7 +63,6 @@ async def subsanar_document_service(
     if not admin_result:
         raise AuthorizationError("Solo el sector administrador puede subsanar documentos en este expediente")
 
-    # Obtener admin_sector_id para los movimientos
     admin_sector_query = """
         SELECT COALESCE(
             (SELECT cm.admin_sector_id FROM case_movements cm
@@ -100,9 +75,6 @@ async def subsanar_document_service(
     sector_result = await fetch_all(admin_sector_query, case_id, case_id, schema_name=schema_name)
     admin_sector_id = str(sector_result[0]['admin_sector_id'])
 
-    # =================================================================
-    # PASO 3: VALIDAR DOCUMENTO ERRÓNEO
-    # =================================================================
     doc_erroneo_query = """
         SELECT
             cod.id,
@@ -132,9 +104,6 @@ async def subsanar_document_service(
             f"El documento {doc_erroneo_data['official_number']} ya fue subsanado previamente"
         )
 
-    # =================================================================
-    # PASO 4: VALIDAR DOCUMENTO QUE JUSTIFICA EXISTE
-    # =================================================================
     doc_justifica_result = await fetch_all(
         "SELECT id, official_number, reference FROM official_documents WHERE id = $1 AND signed_at IS NOT NULL",
         official_document_id_justifica,
@@ -146,9 +115,6 @@ async def subsanar_document_service(
 
     doc_justifica_data = doc_justifica_result[0]
 
-    # =================================================================
-    # PASO 5: VALIDAR NO DUPLICADO
-    # =================================================================
     duplicate_result = await fetch_all(
         "SELECT 1 FROM case_official_documents WHERE case_id = $1 AND official_document_id = $2 AND is_active = true",
         case_id, official_document_id_justifica,
@@ -160,11 +126,7 @@ async def subsanar_document_service(
             f"El documento {doc_justifica_data['official_number']} ya está vinculado al expediente"
         )
 
-    # =================================================================
-    # PASO 6: TRANSACCIÓN ATÓMICA
-    # =================================================================
     async with transaction(schema_name=schema_name, user_id=user_id, auth_source="jwt") as conn:
-        # 6a. DESACTIVAR documento erróneo
         deactivate_row = await conn.fetchrow(
             """
             UPDATE case_official_documents
@@ -179,11 +141,8 @@ async def subsanar_document_service(
         )
         deactivated_at = deactivate_row['deactivated_at']
 
-        # 6b. VINCULAR documento que justifica
-        # Bloquear la fila del expediente para evitar race conditions
         await conn.execute("SELECT 1 FROM cases WHERE id = $1 FOR UPDATE", case_id)
 
-        # Calcular el siguiente order_number
         max_order_row = await conn.fetchrow(
             "SELECT COALESCE(MAX(order_number), 0) as max_order FROM case_official_documents WHERE case_id = $1",
             case_id
@@ -206,7 +165,6 @@ async def subsanar_document_service(
         )
         linking_date = linking_row['linking_date']
 
-        # 6c. Registrar movimiento de document_link
         movement_link_id = str(uuid.uuid4())
         await conn.execute(
             """
@@ -224,7 +182,6 @@ async def subsanar_document_service(
             f"Vinculó documento: {doc_justifica_data['official_number']} ({doc_justifica_data['reference']})"
         )
 
-        # 6d. Registrar movimiento de SUBSANACIÓN en historial
         subsanacion_movement_id = str(uuid.uuid4())
         subsanacion_reason = f"subsanó el documento {doc_erroneo_data['official_number']}, vinculando el documento {doc_justifica_data['official_number']}"
 
@@ -241,9 +198,6 @@ async def subsanar_document_service(
             subsanacion_movement_id, case_id, user_id, admin_sector_id, admin_sector_id, subsanacion_reason
         )
 
-    # =================================================================
-    # PASO 7: RETORNAR RESULTADO
-    # =================================================================
     return {
         "deactivated_document": {
             "id": str(doc_erroneo_data['id']),

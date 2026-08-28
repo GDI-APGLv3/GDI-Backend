@@ -1,6 +1,3 @@
-"""
-Endpoint para obtener memos ARCHIVADOS por el usuario.
-"""
 
 from fastapi import APIRouter, Depends, Query
 from shared.logging import get_logger

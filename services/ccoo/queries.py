@@ -1,28 +1,7 @@
-"""
-SQL queries para el modulo de CCOO (Comunicaciones Oficiales).
-Queries UNION ALL que combinan notas y memos en una sola consulta paginada.
 
-Nota sobre exclusividad: No puede haber duplicados entre subqueries porque
-document_type_id es exclusivo: un documento es NOTA o MEMO, nunca ambos.
-
-Parametros asyncpg (positionales):
-  No-search: ($1=sector_ids, $2=user_id, $3=limit, $4=offset)
-  Search:    ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
-  Count no-search: ($1=sector_ids, $2=user_id)
-  Count search:    ($1=sector_ids, $2=user_id, $3=search_pattern, $4=search_term)
-"""
-
-
-# ============================================================================
-# QUERIES RECEIVED (bandeja de entrada unificada)
-# ============================================================================
 
 
 def get_received_ccoo_query(date_where: str = "") -> str:
-    """
-    Obtiene CCOO recibidas (notas + memos) con paginacion, NO archivadas.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=limit, $4=offset)
-    """
     return f"""
         WITH ccoo AS (
             (
@@ -98,10 +77,6 @@ def get_received_ccoo_query(date_where: str = "") -> str:
 
 
 def get_received_ccoo_count_query(date_where: str = "") -> str:
-    """
-    Cuenta CCOO recibidas como suma de 2 counts separados.
-    Params: ($1=sector_ids::uuid[], $2=user_id)
-    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
@@ -122,10 +97,6 @@ def get_received_ccoo_count_query(date_where: str = "") -> str:
 
 
 def get_received_ccoo_search_query(date_where: str = "") -> str:
-    """
-    Obtiene CCOO recibidas con filtro de busqueda ILIKE, NO archivadas.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
-    """
     return f"""
         WITH ccoo AS (
             (
@@ -215,10 +186,6 @@ def get_received_ccoo_search_query(date_where: str = "") -> str:
 
 
 def get_received_ccoo_search_count_query(date_where: str = "") -> str:
-    """
-    Cuenta CCOO recibidas con filtro de busqueda ILIKE.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term)
-    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
@@ -252,16 +219,7 @@ def get_received_ccoo_search_count_query(date_where: str = "") -> str:
     """
 
 
-# ============================================================================
-# QUERIES SENT (bandeja de enviados unificada)
-# ============================================================================
-
-
 def get_sent_ccoo_query(date_where: str = "") -> str:
-    """
-    Obtiene CCOO enviadas (notas + memos) con paginacion.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=limit, $4=offset)
-    """
     return f"""
         WITH ccoo AS (
             (
@@ -345,10 +303,6 @@ def get_sent_ccoo_query(date_where: str = "") -> str:
 
 
 def get_sent_ccoo_count_query(date_where: str = "") -> str:
-    """
-    Cuenta CCOO enviadas como suma de 2 counts separados.
-    Params: ($1=sector_ids::uuid[], $2=user_id)
-    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
@@ -367,10 +321,6 @@ def get_sent_ccoo_count_query(date_where: str = "") -> str:
 
 
 def get_sent_ccoo_search_query(date_where: str = "") -> str:
-    """
-    Obtiene CCOO enviadas con filtro de busqueda ILIKE.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
-    """
     return f"""
         WITH ccoo AS (
             (
@@ -466,10 +416,6 @@ def get_sent_ccoo_search_query(date_where: str = "") -> str:
 
 
 def get_sent_ccoo_search_count_query(date_where: str = "") -> str:
-    """
-    Cuenta CCOO enviadas con filtro de busqueda ILIKE.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term)
-    """
     return f"""
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
@@ -499,16 +445,7 @@ def get_sent_ccoo_search_count_query(date_where: str = "") -> str:
     """
 
 
-# ============================================================================
-# QUERIES ARCHIVED (bandeja de archivados unificada)
-# ============================================================================
-
-
 def get_archived_ccoo_query() -> str:
-    """
-    Obtiene CCOO archivadas (notas + memos) con paginacion.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=limit, $4=offset)
-    """
     return """
         WITH ccoo AS (
             (
@@ -586,10 +523,6 @@ def get_archived_ccoo_query() -> str:
 
 
 def get_archived_ccoo_count_query() -> str:
-    """
-    Cuenta CCOO archivadas como suma de 2 counts separados.
-    Params: ($1=sector_ids::uuid[], $2=user_id)
-    """
     return """
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od
@@ -608,10 +541,6 @@ def get_archived_ccoo_count_query() -> str:
 
 
 def get_archived_ccoo_search_query() -> str:
-    """
-    Obtiene CCOO archivadas con filtro de busqueda ILIKE.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term, $5=limit, $6=offset)
-    """
     return """
         WITH ccoo AS (
             (
@@ -701,10 +630,6 @@ def get_archived_ccoo_search_query() -> str:
 
 
 def get_archived_ccoo_search_count_query() -> str:
-    """
-    Cuenta CCOO archivadas con filtro de busqueda ILIKE.
-    Params: ($1=sector_ids::uuid[], $2=user_id, $3=search_pattern, $4=search_term)
-    """
     return """
         SELECT (
             (SELECT COUNT(DISTINCT od.id) FROM official_documents od

@@ -1,9 +1,3 @@
-"""
-Endpoints para manejar expedientes favoritos del usuario.
-
-POST /{case_id}/favorite  -> Marcar como favorito
-DELETE /{case_id}/favorite -> Quitar de favoritos
-"""
 
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, Field
@@ -23,18 +17,9 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["expedientes"])
 
 
-# ============================================================================
-# RESPONSE MODELS
-# ============================================================================
-
 class FavoriteResponse(BaseModel):
-    """Respuesta de toggle favorito"""
     is_favorite: bool = Field(..., example=True)
 
-
-# ============================================================================
-# ENDPOINTS
-# ============================================================================
 
 @router.post("/{case_id}/favorite", response_model=FavoriteResponse)
 async def add_favorite(
@@ -57,7 +42,6 @@ async def add_favorite(
 
         logger.info(f"Add favorite: case={case_id[:8]}, user={db_user_id[:8]}")
 
-        # Verificar permisos de visualización (404 para no revelar existencia)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for add_favorite: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
@@ -100,7 +84,6 @@ async def remove_favorite(
 
         logger.info(f"Remove favorite: case={case_id[:8]}, user={db_user_id[:8]}")
 
-        # Verificar permisos de visualización (404 para no revelar existencia)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for remove_favorite: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)

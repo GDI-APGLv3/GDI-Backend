@@ -1,8 +1,3 @@
-"""
-Endpoint para obtener el detalle de una nota.
-Registra la apertura si el usuario es recipient (no sender) Y tiene can_edit.
-Usuarios con solo can_view pueden ver pero NO registran apertura.
-"""
 
 from fastapi import APIRouter, Depends, Path
 from shared.logging import get_logger

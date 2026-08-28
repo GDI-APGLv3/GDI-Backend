@@ -1,24 +1,28 @@
-"""
-Modelos Pydantic para firma unificada de documentos.
-Define el esquema de response para el endpoint super-sign que unifica
-la firma de firmantes comunes y numeradores.
-"""
 
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
+
+
+class AutoLinkResult(BaseModel):
+
+    case_id: str = Field(..., description="UUID del expediente propuesto")
+    case_number: Optional[str] = Field(
+        None,
+        description="Número legible del expediente (ej. EE-2025-00001-MUN-SEC). "
+                    "Disponible incluso cuando linked=False gracias al JOIN en la query.",
+    )
+    linked: bool = Field(..., description="True si el vínculo se concretó")
+    reason: Optional[str] = Field(
+        None,
+        description=(
+            "Código de fallo opaco (sin_permiso | sector_no_encontrado | "
+            "duplicado | expediente_inactivo | error_interno). "
+            "None cuando linked=True."
+        ),
+    )
 
 
 class SuperSignRequest(BaseModel):
-    """
-    Body opcional para el endpoint POST /documents/{document_id}/super-sign.
-
-    Permite al frontend indicar explicitamente el proveedor de firma,
-    sobreescribiendo la politica del tipo de documento (signature_policy).
-
-    Si no se envia body (o se envia `{}`), el backend usa la logica
-    automatica basada en `signature_policy` de la BD.
-    """
 
     provider_name: Optional[str] = Field(
         None,
@@ -36,55 +40,6 @@ class SuperSignRequest(BaseModel):
 
 
 class SuperSignResponse(BaseModel):
-    """
-    Respuesta unificada para firma de documentos.
-    Sirve tanto para firmantes comunes como para numeradores.
-
-    ## Campos Comunes (siempre presentes):
-    - success: Indica si la operación fue exitosa
-    - message: Mensaje descriptivo del resultado
-    - document_id: UUID del documento firmado
-    - signature_id: UUID de la firma/numerador
-    - document_status: Estado del documento después de firmar
-    - signed_at: Timestamp de la firma
-    - is_numerator: Indica si quien firmó es numerador
-
-    ## Campos Solo para Numerador (opcionales):
-    - official_number: Número oficial asignado al documento
-    - signed_pdf_url: URL del PDF firmado y numerado
-
-    ## Ejemplos:
-
-    ### Firmante Común:
-    ```json
-    {
-        "success": true,
-        "message": "Documento firmado exitosamente",
-        "document_id": "uuid-del-documento",
-        "signature_id": "uuid-de-la-firma",
-        "document_status": "sent_to_sign",
-        "signed_at": "2025-01-15T10:30:00",
-        "is_numerator": false,
-        "official_number": null,
-        "signed_pdf_url": null
-    }
-    ```
-
-    ### Numerador:
-    ```json
-    {
-        "success": true,
-        "message": "Documento firmado y numerado exitosamente por el numerador",
-        "document_id": "uuid-del-documento",
-        "signature_id": "uuid-del-numerador",
-        "document_status": "signed",
-        "signed_at": "2025-01-15T10:35:00",
-        "is_numerator": true,
-        "official_number": "ANEXO-2025-00000002-SMG-ADGEN",
-        "signed_pdf_url": "https://cloudflare-r2.../ANEXO-2025-00000002-SMG-ADGEN.pdf"
-    }
-    ```
-    """
 
     success: bool = Field(
         ...,
@@ -121,7 +76,6 @@ class SuperSignResponse(BaseModel):
         description="Indica si quien firmó es numerador (true) o firmante común (false)"
     )
 
-    # Campos opcionales solo para numerador
     official_number: Optional[str] = Field(
         None,
         description="Número oficial asignado al documento (solo presente si is_numerator=true)"
@@ -132,7 +86,6 @@ class SuperSignResponse(BaseModel):
         description="URL del PDF firmado y numerado desde Legal Orchestrator (solo presente si is_numerator=true)"
     )
 
-    # Campos opcionales para flujo de firma digital (Fase 2)
     flow: str = Field(
         "electronic",
         description="Flujo de firma: 'electronic' (Fase 1) o 'digital' (Fase 2 AutoFirma)"
@@ -156,4 +109,13 @@ class SuperSignResponse(BaseModel):
     expires_at: Optional[str] = Field(
         None,
         description="Timestamp ISO de expiración de la sesión de firma digital"
+    )
+
+    auto_link_results: list[AutoLinkResult] = Field(
+        default_factory=list,
+        description=(
+            "Resultado del auto-vínculo por expediente al numerar (vacío si no hubo "
+            "propuestas auto_link o si el flujo es digital — en ese caso los resultados "
+            "llegan por el endpoint /digital-signature/poll)."
+        ),
     )

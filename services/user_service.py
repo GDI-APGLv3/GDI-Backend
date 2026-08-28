@@ -1,33 +1,15 @@
-"""
-Servicios para la gestión de usuarios que contienen la lógica de negocio.
-Estos servicios implementan las consultas a la base de datos y la manipulación de datos de usuarios.
-"""
 
 import asyncpg
 from typing import List, Dict, Any, Optional
-from database import fetch_all, fetch_one, fetch_val, execute
-from datetime import datetime
+from database import fetch_all, fetch_one, execute
 from shared.logging import get_logger
+from shared.exceptions import reraise_if_transient
 
 logger = get_logger(__name__)
 
 async def create_user(auth_id: str, full_name: str, email: str,
                 country_id: Optional[str] = None, profile_picture_url: Optional[str] = None,
                 sector_id: Optional[str] = None, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Crea un nuevo usuario usando la función stored procedure de PostgreSQL.
-
-    Args:
-        auth_id: ID de Auth0 del usuario
-        full_name: Nombre completo del usuario
-        email: Email del usuario
-        country_id: Identificador nacional del usuario (columna CountryID en BD). En Argentina es el CUIT (opcional)
-        profile_picture_url: URL de la foto de perfil (opcional)
-        sector_id: UUID del sector (opcional)
-
-    Returns:
-        Diccionario con la información del usuario creado o error
-    """
     try:
         user_data = await fetch_one(
             """
@@ -82,16 +64,6 @@ async def create_user(auth_id: str, full_name: str, email: str,
         }
 
 async def get_user_by_auth_id(auth_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Obtiene un usuario por su auth_id de Auth0.
-
-    Args:
-        auth_id: ID de Auth0 del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con los datos del usuario o None si no existe
-    """
     try:
         user_data = await fetch_one(
             """
@@ -110,13 +82,14 @@ async def get_user_by_auth_id(auth_id: str, *, schema_name: str) -> Optional[Dic
             LEFT JOIN user_seals us ON u.id = us.user_id
             LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
             WHERE u.auth_id = $1 AND u.estado = 1
+            ORDER BY u.id
+            LIMIT 1
             """,
             auth_id,
             schema_name=schema_name
         )
 
         if user_data:
-            # Actualizar last_access (pasando schema_name para multi-tenant)
             await update_last_access(auth_id, schema_name=schema_name)
             return dict(user_data)
 
@@ -127,16 +100,6 @@ async def get_user_by_auth_id(auth_id: str, *, schema_name: str) -> Optional[Dic
         return None
 
 async def get_user_by_id(user_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Obtiene un usuario por su UUID con información de sector y departamento.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con los datos del usuario o None si no existe
-    """
     from services.users.queries import get_user_by_id_query
 
     try:
@@ -158,20 +121,6 @@ async def get_user_by_id(user_id: str, *, schema_name: str) -> Optional[Dict[str
 async def update_user_profile(user_id: str, full_name: Optional[str] = None,
                        country_id: Optional[str] = None, profile_picture_url: Optional[str] = None,
                        sector_id: Optional[str] = None, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Actualiza el perfil de un usuario.
-
-    Args:
-        user_id: UUID del usuario
-        full_name: Nuevo nombre completo (opcional)
-        country_id: Nuevo identificador nacional (columna CountryID en BD). En Argentina es el CUIT (opcional)
-        profile_picture_url: Nueva URL de foto de perfil (opcional)
-        sector_id: Nuevo sector (opcional)
-
-    Returns:
-        Diccionario con el resultado de la operación
-    """
-    import logging
     from services.users.queries import get_updated_user_profile_query
     from config.constants import (
         PROFILE_NO_FIELDS_TO_UPDATE_ERROR,
@@ -180,7 +129,6 @@ async def update_user_profile(user_id: str, full_name: Optional[str] = None,
     )
 
     try:
-        # Construir la consulta dinámicamente según los campos proporcionados
         update_fields = []
         update_values = []
 
@@ -189,7 +137,6 @@ async def update_user_profile(user_id: str, full_name: Optional[str] = None,
             update_values.append(full_name)
 
         if country_id is not None:
-            # CountryID es el nombre de la columna en BD (multi-país: CUIT en Argentina)
             update_fields.append(f'"CountryID" = ${len(update_values) + 1}')
             update_values.append(country_id)
 
@@ -208,7 +155,6 @@ async def update_user_profile(user_id: str, full_name: Optional[str] = None,
                 "message": PROFILE_NO_FIELDS_TO_UPDATE_ERROR
             }
 
-        # Agregar user_id al final para la cláusula WHERE
         update_values.append(user_id)
         where_placeholder = f"${len(update_values)}"
 
@@ -219,7 +165,6 @@ async def update_user_profile(user_id: str, full_name: Optional[str] = None,
             RETURNING id as user_id
         """
 
-        # Primero hacer el UPDATE
         result = await fetch_one(update_query, *update_values, schema_name=schema_name)
 
         if not result:
@@ -229,7 +174,6 @@ async def update_user_profile(user_id: str, full_name: Optional[str] = None,
                 "message": PROFILE_UPDATE_FAILED_ERROR
             }
 
-        # Luego obtener los datos completos con JOIN
         updated_user = await fetch_one(
             get_updated_user_profile_query(),
             user_id,
@@ -259,16 +203,6 @@ async def update_user_profile(user_id: str, full_name: Optional[str] = None,
         }
 
 async def update_last_access(auth_id: str, *, schema_name: str) -> bool:
-    """
-    Actualiza la fecha de último acceso de un usuario.
-
-    Args:
-        auth_id: ID de Auth0 del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        True si se actualizó correctamente, False en caso contrario
-    """
     try:
         status = await execute(
             """
@@ -287,16 +221,6 @@ async def update_last_access(auth_id: str, *, schema_name: str) -> bool:
         return False
 
 async def get_user_by_email(email: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Obtiene un usuario por su email.
-
-    Args:
-        email: Email del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con los datos del usuario o None si no existe
-    """
     try:
         user_data = await fetch_one(
             """
@@ -311,8 +235,7 @@ async def get_user_by_email(email: str, *, schema_name: str) -> Optional[Dict[st
                 u.created_at,
                 u.estado,
                 us.city_seal_id as default_seal_id,
-                cs.name as default_seal_name,
-                cs.acronym as default_seal_acronym
+                cs.name as default_seal_name
             FROM users u
             LEFT JOIN user_seals us ON u.id = us.user_id
             LEFT JOIN city_seals cs ON us.city_seal_id = cs.id
@@ -332,16 +255,6 @@ async def get_user_by_email(email: str, *, schema_name: str) -> Optional[Dict[st
         return None
 
 async def get_first_active_user(*, schema_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Obtiene el primer usuario activo del sistema.
-    Usado para autenticación con API key en modo testing.
-
-    Args:
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con los datos del usuario o None si no existe
-    """
     try:
         user_data = await fetch_one(
             """
@@ -370,38 +283,9 @@ async def get_first_active_user(*, schema_name: str) -> Optional[Dict[str, Any]]
         return None
 
 async def get_user_sector_permissions(user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
-    """
-    Obtiene todos los sectores a los que el usuario tiene acceso con sus permisos.
-
-    Incluye:
-    - Sector principal del usuario (siempre con can_view=true, can_edit=true)
-    - Sectores adicionales de user_sector_permissions (con permisos configurados)
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Lista de diccionarios con información de sectores y permisos.
-        Ejemplo:
-        [
-            {
-                "sector_id": "uuid",
-                "sector_acronym": "SECOBRA",
-                "department_id": "uuid",
-                "department_name": "Secretaría de Obras",
-                "department_acronym": "SECOBR",
-                "can_view": True,
-                "can_edit": True,
-                "is_primary": True
-            },
-            ...
-        ]
-    """
     from services.users.queries import get_user_sector_permissions_query
 
     try:
-        # Query necesita user_id dos veces (para UNION de sector principal y adicionales)
         results = await fetch_all(
             get_user_sector_permissions_query(),
             user_id, user_id,
@@ -414,5 +298,6 @@ async def get_user_sector_permissions(user_id: str, *, schema_name: str) -> List
         return []
 
     except Exception as e:
+        reraise_if_transient(e, context=f"permisos de sector de user_id {user_id}")
         logger.error(f"Error al obtener permisos de sectores para user_id {user_id}: {str(e)}", exc_info=True)
         return []

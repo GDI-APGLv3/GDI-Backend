@@ -1,12 +1,3 @@
-"""
-Endpoint para listar documentos pendientes de firma del usuario autenticado.
-
-URL canónica `GET /api/v1/documents/pending-signatures`, equivalente al endpoint
-REST del Gateway (SET B) `documents.get_pending_signatures`. Endpoint THIN: delega
-toda la lógica al service `get_pending_signatures_for_user`.
-
-Accesible por JWT y por API Key (auth pluggable, Fase 1 S8-001).
-"""
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field

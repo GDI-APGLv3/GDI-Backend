@@ -1,7 +1,3 @@
-"""
-Endpoint para obtener tipos de documentos.
-Optimizado siguiendo principios de Clean Code.
-"""
 from shared.logging import get_logger
 from fastapi import APIRouter, Request, Depends
 from models.documents.types import DocumentTypesResponse
@@ -11,7 +7,6 @@ from models.tags import Tags
 from services.cache import get_cached
 from shared.dependencies import get_tenant_schema
 
-# === CONFIGURACIÓN ===
 logger = get_logger("get_types")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
@@ -53,7 +48,6 @@ async def get_document_types(
     try:
         logger.info(f"Obteniendo tipos de documentos para schema: {schema_name}")
 
-        # Cache key incluye schema para multi-tenant
         cache_key = f"document_types:{schema_name or 'default'}"
 
         document_types = await get_cached(

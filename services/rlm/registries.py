@@ -1,6 +1,3 @@
-"""
-Servicio para operaciones sobre registros (registry_families).
-"""
 
 from shared.logging import get_logger
 from database import fetch_all, fetch_one
@@ -16,23 +13,12 @@ logger = get_logger(__name__)
 
 
 async def list_registries(user_id: str, *, schema_name: str) -> dict:
-    """
-    Lista todos los registros disponibles con conteo de legajos.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con lista de registros
-    """
     try:
         results = await fetch_all(
             get_registries_query(),
             schema_name=schema_name,
         )
 
-        # Bulk: obtener permisos de TODAS las familias en 2 queries (no N+1)
         default_perms = {
             "can_create": False,
             "can_edit": False,
@@ -65,20 +51,6 @@ async def list_registries(user_id: str, *, schema_name: str) -> dict:
 
 
 async def get_registry_detail(registry_id: str, user_id: str, *, schema_name: str) -> dict:
-    """
-    Obtiene el detalle de un registro incluyendo su data_schema.
-
-    Args:
-        registry_id: UUID del registro
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con detalle del registro
-
-    Raises:
-        NotFoundError: Si el registro no existe
-    """
     try:
         result = await fetch_one(
             get_registry_detail_query(),
@@ -110,19 +82,6 @@ async def get_registry_detail(registry_id: str, user_id: str, *, schema_name: st
 
 
 async def get_registry_by_code(code: str, *, schema_name: str) -> dict:
-    """
-    Obtiene un registro por su código.
-
-    Args:
-        code: Código del registro (ARQ, LUM, ORD)
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con datos del registro
-
-    Raises:
-        NotFoundError: Si el registro no existe
-    """
     result = await fetch_one(
         get_registry_by_code_query(),
         code.upper(),

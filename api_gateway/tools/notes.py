@@ -1,15 +1,11 @@
-"""
-Tools MCP para notas (lectura).
-Reutiliza servicios existentes de notas.
-"""
-import logging
+from shared.logging import get_logger
 from typing import Dict, Any, Optional, List
 from api_gateway.context import MCPContext
 from services.notes.retrieval import get_received_notes_multi_sector, get_sent_notes_multi_sector, get_archived_notes_multi_sector
 from services.shared.sector_utils import get_user_sector_ids
-from shared.exceptions import ValidationError, AuthorizationError, NotFoundError
+from shared.exceptions import AuthorizationError, NotFoundError, GDIBaseException
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def get_notes(
@@ -20,27 +16,12 @@ async def get_notes(
     unread_only: bool = False,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Obtener notas recibidas del usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Numero de pagina (default 1)
-        page_size: Tamano de pagina (default 20)
-        unread_only: Si True, solo notas no leidas
-        search: Termino de busqueda (opcional)
-
-    Returns:
-        Dict con notes y pagination
-    """
     logger.info(f"[MCP] get_notes - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     if not user_id:
         raise ValueError("user_id es requerido")
 
     try:
-        # Resolver sector_ids del usuario
         sector_ids = await get_user_sector_ids(user_id, schema_name=ctx.schema_name)
 
         if not sector_ids:
@@ -64,9 +45,11 @@ async def get_notes(
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_notes - error: {e}")
-        raise RuntimeError(f"Error obteniendo notas: {str(e)}")
+        raise RuntimeError("Error obteniendo notas")
 
 
 async def get_sent_notes(
@@ -76,26 +59,12 @@ async def get_sent_notes(
     page_size: int = 20,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Obtener notas enviadas por el usuario.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Numero de pagina (default 1)
-        page_size: Tamano de pagina (default 20)
-        search: Termino de busqueda (opcional)
-
-    Returns:
-        Dict con notes y pagination
-    """
     logger.info(f"[MCP] get_sent_notes - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     if not user_id:
         raise ValueError("user_id es requerido")
 
     try:
-        # Resolver sector_ids del usuario (mismo patron que get_notes)
         sector_ids = await get_user_sector_ids(user_id, schema_name=ctx.schema_name)
 
         if not sector_ids:
@@ -118,9 +87,11 @@ async def get_sent_notes(
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_sent_notes - error: {e}")
-        raise RuntimeError(f"Error obteniendo notas enviadas: {str(e)}")
+        raise RuntimeError("Error obteniendo notas enviadas")
 
 
 async def get_archived_notes(
@@ -130,26 +101,12 @@ async def get_archived_notes(
     page_size: int = 20,
     search: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Obtener notas archivadas.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        user_id: UUID del usuario
-        page: Numero de pagina (default 1)
-        page_size: Tamano de pagina (default 20)
-        search: Termino de busqueda (opcional)
-
-    Returns:
-        Dict con notes y pagination
-    """
     logger.info(f"[MCP] get_archived_notes - user_id={user_id}, schema={ctx.schema_name}, page={page}")
 
     if not user_id:
         raise ValueError("user_id es requerido")
 
     try:
-        # Resolver sector_ids del usuario (mismo patron que get_notes)
         sector_ids = await get_user_sector_ids(user_id, schema_name=ctx.schema_name)
 
         if not sector_ids:
@@ -172,26 +129,16 @@ async def get_archived_notes(
 
         return result
 
+    except (ValueError, GDIBaseException):
+        raise
     except Exception as e:
         logger.error(f"[MCP] get_archived_notes - error: {e}")
-        raise RuntimeError(f"Error obteniendo notas archivadas: {str(e)}")
+        raise RuntimeError("Error obteniendo notas archivadas")
 
 
 async def _get_user_permissions_for_notes(user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
-    """
-    Construye la lista de permisos del usuario para notas desde la BD.
-    Replica la logica de endpoints/notes/helpers.py pero sin depender de AuthenticatedUser.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (keyword-only)
-
-    Returns:
-        Lista de dicts con {sector_id, can_view, can_edit, is_primary}
-    """
     from database import fetch_all
 
-    # Obtener sector principal + sectores adicionales con permisos
     query = """
         -- Sector principal (siempre can_view=true, can_edit=true)
         SELECT
@@ -236,22 +183,6 @@ async def get_note_detail(
     note_id: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """
-    Obtener detalle de una nota especifica.
-
-    Args:
-        ctx: Contexto MCP con schema_name
-        note_id: UUID del documento (nota oficial)
-        user_id: UUID del usuario solicitante
-
-    Returns:
-        Dict con detalle completo de la nota
-
-    Raises:
-        ValueError: Si faltan parametros requeridos
-        AuthorizationError: Si el usuario no tiene acceso a la nota
-        RuntimeError: Si hay error
-    """
     logger.info(f"[MCP] get_note_detail - note_id={note_id}, user_id={user_id}, schema={ctx.schema_name}")
 
     if not note_id:
@@ -262,7 +193,6 @@ async def get_note_detail(
     try:
         from services.notes import get_note_detail_multi_sector
 
-        # Construir user_permissions desde la BD (replica logica de endpoint)
         user_permissions = await _get_user_permissions_for_notes(user_id, schema_name=ctx.schema_name)
 
         if not user_permissions:
@@ -283,8 +213,8 @@ async def get_note_detail(
 
         return result
 
-    except (AuthorizationError, NotFoundError, ValueError):
+    except (ValueError, GDIBaseException):
         raise
     except Exception as e:
         logger.error(f"[MCP] get_note_detail - error: {e}")
-        raise RuntimeError(f"Error obteniendo detalle de nota: {str(e)}")
+        raise RuntimeError("Error obteniendo detalle de nota")

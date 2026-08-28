@@ -1,12 +1,3 @@
-"""
-Validaciones para el modulo de MEMOS.
-Funciones para validar tipos de documento y destinatarios.
-
-Diferencias clave con NOTAS:
-- Valida user_ids en vez de sector_ids
-- El sender (user_id) no puede estar en la lista de recipients
-- Verifica que usuarios esten activos (estado = 1)
-"""
 
 from typing import Dict, List, Any
 from uuid import UUID
@@ -23,7 +14,6 @@ logger = get_logger(__name__)
 
 
 async def is_memo_document_type(document_type_id: int, *, schema_name: str) -> bool:
-    """Verifica si un document_type_id corresponde al tipo MEMO."""
     result = await fetch_one(
         check_memo_document_type_query(), document_type_id,
         schema_name=schema_name
@@ -32,27 +22,21 @@ async def is_memo_document_type(document_type_id: int, *, schema_name: str) -> b
 
 
 async def is_memo_document_type_by_id(document_id: str, conn, *, schema_name: str) -> bool:
-    """
-    Verifica si un documento es tipo MEMO usando su UUID.
-    Firma consistente con is_nota_document_type_by_id.
-    """
     query = """
-        SELECT dt.acronym
+        SELECT dt.type
         FROM document_draft dd
         JOIN document_types dt ON dt.id = dd.document_type_id
         WHERE dd.id = $1
     """
     result = await conn.fetchrow(query, document_id)
-    return result is not None and result["acronym"].upper() == "MEMO"
+    return result is not None and (result["type"] or "").upper() == "MEMO"
 
 
 def is_memo_document_type_by_acronym(acronym: str, *, schema_name: str) -> bool:
-    """Verifica si un acronym corresponde al tipo MEMO."""
     return acronym.upper() == 'MEMO'
 
 
 async def get_memo_document_type_id(*, schema_name: str) -> int | None:
-    """Obtiene el ID del tipo de documento MEMO."""
     result = await fetch_one(
         check_memo_by_acronym_query(),
         schema_name=schema_name
@@ -66,18 +50,6 @@ async def validate_memo_recipients_exist(
     sender_user_id: str,
     *, schema_name: str
 ) -> None:
-    """
-    Valida que los recipients sean validos.
-
-    Args:
-        conn: Conexión asyncpg activa (de transaction())
-        recipients: Dict con {to: [], cc: [], bcc: []}
-        sender_user_id: UUID del usuario emisor
-        schema_name: Schema del tenant (keyword-only)
-
-    Raises:
-        ValidationError: Si alguna validacion falla
-    """
     to_list = recipients.get('to', [])
     if not to_list:
         raise ValidationError("Un MEMO requiere al menos un destinatario TO")
@@ -119,12 +91,6 @@ async def validate_memo_recipients_exist(
 
 
 def validate_memo_recipients_input(recipients: Dict[str, Any]) -> Dict[str, List[str]]:
-    """
-    Normaliza, valida y deduplica la estructura del input de recipients.
-
-    Raises:
-        ValidationError: Si la estructura es invalida
-    """
     if not isinstance(recipients, dict):
         raise ValidationError("Recipients debe ser un objeto con claves 'to', 'cc', 'bcc'")
 
@@ -160,12 +126,6 @@ def validate_memo_recipients_input(recipients: Dict[str, Any]) -> Dict[str, List
 
 
 async def validate_memo_recipients_for_signing(document_id: str, *, schema_name: str) -> None:
-    """
-    Valida recipients de MEMO antes de iniciar firma.
-
-    Raises:
-        ValidationError: Si falla alguna validacion
-    """
     query = """
         SELECT mr.recipient_user_id, mr.recipient_type,
                (u.estado = 1) as is_active, u.full_name as recipient_name,

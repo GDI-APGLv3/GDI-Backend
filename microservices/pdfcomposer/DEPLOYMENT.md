@@ -75,7 +75,7 @@ LOG_LEVEL = "info"
 ### Setup Local
 ```bash
 # 1. Clonar repositorio
-git clone https://github.com/GDI-APGLv3/GDI-Backend
+git clone https://github.com/GDI-AGPLv3/GDI-Backend
 cd PDFCOMPOSER
 
 # 2. Instalar dependencias (incluye WeasyPrint)
@@ -152,4 +152,4 @@ API_KEY=your-api-key-here
 ---
 
 **Documentación**: `/docs` endpoint  
-**Repositorio**: https://github.com/GDI-APGLv3/GDI-Backend
+**Repositorio**: https://github.com/GDI-AGPLv3/GDI-Backend

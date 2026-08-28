@@ -1,7 +1,3 @@
-"""
-Endpoint para guardar cambios en un documento editable.
-Optimizado siguiendo principios de Clean Code.
-"""
 from typing import Optional
 from uuid import UUID
 from shared.logging import get_logger
@@ -18,7 +14,6 @@ from shared.exceptions import (
 
 
 def _get_primary_sector_id(user: AuthenticatedUser) -> Optional[str]:
-    """Obtiene el sector primario del usuario para notas."""
     if user.permissions:
         primary = next((p for p in user.permissions if p.is_primary), None)
         if primary:
@@ -26,7 +21,6 @@ def _get_primary_sector_id(user: AuthenticatedUser) -> Optional[str]:
         return user.permissions[0].sector_id if user.permissions else None
     return None
 
-# === CONFIGURACIÓN ===
 logger = get_logger("save_document")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
@@ -126,7 +120,6 @@ async def save_document_changes_endpoint(
     try:
         logger.info(f"Usuario {request.state.tenant_user_id} guardando cambios en documento {document_id}")
 
-        # Transformar signers a formato dict si existen
         signers_list = None
         if body.signers:
             signers_list = [
@@ -139,7 +132,6 @@ async def save_document_changes_endpoint(
             ]
             logger.debug(f"Actualizando {len(signers_list)} firmantes")
 
-        # Transformar recipients a formato dict si existen (NOTA o MEMO)
         recipients_dict = None
         sender_sector_id = None
         if body.recipients is not None:
@@ -151,10 +143,11 @@ async def save_document_changes_endpoint(
             sender_sector_id = _get_primary_sector_id(current_user)
             logger.debug(f"Actualizando recipients MEMO: TO={len(recipients_dict.get('to', []))}, CC={len(recipients_dict.get('cc', []))}")
 
-        # Obtener user_id del request state
+        if recipients_dict is not None and not sender_sector_id:
+            raise ValidationError("No se pudo determinar el sector del usuario para enviar la nota")
+
         user_id = str(request.state.tenant_user_id)
 
-        # Log de proposed_case_ids si existen
         if body.proposed_case_ids is not None:
             logger.debug(f"Proponiendo vinculación a {len(body.proposed_case_ids)} expedientes")
 
@@ -167,6 +160,7 @@ async def save_document_changes_endpoint(
             sender_sector_id=sender_sector_id,
             proposed_case_ids=body.proposed_case_ids,
             user_id=user_id,
+            auto_link_on_sign=body.auto_link_on_sign or False,
             schema_name=schema_name
         )
         

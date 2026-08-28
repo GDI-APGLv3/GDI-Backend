@@ -1,8 +1,3 @@
-"""
-Endpoint para reemplazar el PDF de un documento importado.
-
-Solo permitido en documentos en estado draft y tipo Importado.
-"""
 
 from shared.logging import get_logger
 from uuid import UUID
@@ -76,7 +71,6 @@ async def replace_imported_pdf_endpoint(
             f"en schema '{schema_name}'"
         )
 
-        # Validar content-type
         if not pdf_file.content_type or pdf_file.content_type != 'application/pdf':
             raise HTTPException(
                 status_code=400,

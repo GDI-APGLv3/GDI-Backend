@@ -1,12 +1,6 @@
-"""
-Servicios para integración con APIs externas.
-Maneja todas las llamadas a servicios externos y su integración con el sistema.
-"""
 
 from typing import Dict, Any, List, Optional
 from shared.exceptions import ExternalServiceError, ValidationError
-from shared.validation import validate_document_id, validate_user_id
-from shared.utils import generate_uuid
 from shared.context import get_correlation_id
 from fastapi.concurrency import run_in_threadpool
 import uuid
@@ -14,41 +8,27 @@ import os
 import asyncio
 import httpx
 
-from config.constants import DEFAULT_LOGO_URL
+from config.constants import DEFAULT_LOGO_URL, MAX_SIGNABLE_PDF_SIZE
 from shared.logging import get_logger
+from services.shared.micro_retry import post_micro_with_coldstart_retry
 
-# Configurar logger para este módulo (usa el formatter con correlation_id)
 logger = get_logger(__name__)
 
-async def generate_final_document_pdf(document_id: str, document_data: Dict[str, Any], signers: List[Dict[str, Any]], *, schema_name: str) -> Dict[str, Any]:
-    """
-    Genera el PDF final del documento para iniciar firma.
+async def generate_final_document_pdf(
+    document_id: str,
+    document_data: Dict[str, Any],
+    signers: List[Dict[str, Any]],
+    *,
+    schema_name: str,
+    embedded_files: Optional[List[tuple]] = None,
+) -> Dict[str, Any]:
+    embedded_files = embedded_files or []
 
-    Para documentos HTML: Llama a PDFComposer y sube a R2.
-    Para documentos IMPORTADOS: El PDF ya existe en R2, solo verifica y genera URL.
-
-    Args:
-        document_id: UUID del documento
-        document_data: Datos del documento (referencia, contenido, etc.)
-        signers: Lista de firmantes del documento
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Diccionario con el document_id y metadata del documento generado
-
-    Raises:
-        ExternalServiceError: Si hay error en la API externa
-    """
-    # NOTA: document_id ya fue validado por el servicio llamador (signing.py)
-    # No re-validamos aquí para evitar llamadas duplicadas a BD
-
-    # Agregar document_id a document_data si no está
     if 'document_id' not in document_data:
         document_data['document_id'] = document_id
 
     logger.info(f"Generando PDF para documento {document_id[:8]}, tipo={document_data.get('type_name', 'N/A')}, firmantes={len(signers)}")
 
-    # Detectar si es documento importado (content=NULL o vacío)
     content = document_data.get('content')
     is_imported = content is None or content == '' or content == {}
 
@@ -58,10 +38,6 @@ async def generate_final_document_pdf(document_id: str, document_data: Dict[str,
 
     try:
         if is_imported:
-            # ============================================================
-            # DOCUMENTO IMPORTADO: El PDF ya existe en R2, solo verificar
-            # ============================================================
-            # Verificar que el archivo existe en R2
             exists = await run_in_threadpool(r2_client.exists_tosign, filename)
 
             if not exists:
@@ -72,7 +48,6 @@ async def generate_final_document_pdf(document_id: str, document_data: Dict[str,
 
             logger.debug(f"PDF importado verificado en R2: {filename}")
 
-            # Generar URL firmada temporal
             document_url = await run_in_threadpool(r2_client.get_tosign_url, filename)
 
             if not document_url:
@@ -84,47 +59,66 @@ async def generate_final_document_pdf(document_id: str, document_data: Dict[str,
                 "status": "success",
                 "document_generate_id": document_id,
                 "document_url": document_url,
-                "api_mode": "imported_r2",  # Indica documento importado
+                "api_mode": "imported_r2",
                 "upload_info": {"filename": filename, "already_existed": True},
-                "file_size": 0  # No conocemos el tamaño sin descargarlo
+                "file_size": 0
             }
 
         else:
-            # ============================================================
-            # DOCUMENTO HTML: Generar PDF con PDFComposer y subir a R2
-            # ============================================================
-            # Detectar si es NOTA para usar endpoint específico con recipients
-            type_acronym = document_data.get('type_acronym') or document_data.get('document_type_acronym')
+            _content_raw = document_data.get('content')
+            if isinstance(_content_raw, dict) and 'html' in _content_raw:
+                from services.documents.lifecycle.images import inline_document_images_as_base64
+                _content_raw['html'] = await inline_document_images_as_base64(
+                    _content_raw['html'], document_id, schema_name=schema_name
+                )
+            elif isinstance(_content_raw, str) and _content_raw:
+                from services.documents.lifecycle.images import inline_document_images_as_base64
+                document_data['content'] = await inline_document_images_as_base64(
+                    _content_raw, document_id, schema_name=schema_name
+                )
 
-            if type_acronym in ('NOTA', 'MEMO'):
-                # NOTA y MEMO usan /note/ con header de recipients
-                logger.debug(f"Generando {type_acronym} con recipients")
+            _base_type = (
+                document_data.get('base_type')
+                or document_data.get('type_acronym')
+                or document_data.get('document_type_acronym')
+                or ''
+            ).upper()
+
+            if _base_type in ('NOTA', 'MEMO'):
+                logger.debug(f"Generando documento base_type={_base_type} con recipients")
                 from services.shared.pdfcomposer_api import call_pdfcomposer_note_final
 
-                if type_acronym == 'NOTA':
+                if _base_type == 'NOTA':
                     from services.notes.recipients import format_recipients_for_pdf
                     recipients = await format_recipients_for_pdf(document_id, schema_name=schema_name)
                 else:
                     from services.memos.recipients import format_memo_recipients_for_pdf
                     recipients = await format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
 
+                if embedded_files:
+                    raise ValidationError(
+                        f"El documento es de tipo {_base_type} y tiene {len(embedded_files)} "
+                        "adjunto(s) embebido(s) cargado(s), pero los documentos NOTA/MEMO no "
+                        "soportan adjuntos embebidos en esta versión. Quite los adjuntos antes "
+                        "de firmar, o contacte a soporte si el tipo de documento no debería "
+                        "tener habilitado 'Permite adjuntar archivos embebidos'."
+                    )
                 pdf_bytes = await call_pdfcomposer_note_final(
                     document_data,
                     para=recipients['para'],
                     cc=recipients.get('cc'),
-                    schema_name=schema_name
+                    schema_name=schema_name,
                 )
             else:
-                # Otros tipos usan /generate-pdf/ genérico
-                pdf_bytes = await call_pdfcomposer_generate_pdf(document_data, signers, schema_name=schema_name)
+                pdf_bytes = await call_pdfcomposer_generate_pdf(
+                    document_data, signers, schema_name=schema_name, embedded_files=embedded_files
+                )
 
             logger.debug(f"PDF generado: {len(pdf_bytes)} bytes")
 
-            # Subir PDF a Cloudflare R2 tosign
             upload_result = await run_in_threadpool(r2_client.upload_tosign, pdf_bytes, filename)
             logger.debug(f"PDF subido a R2: {filename}")
 
-            # Generar URL firmada temporal
             document_url = await run_in_threadpool(r2_client.get_tosign_url, filename)
 
             if not document_url:
@@ -136,48 +130,26 @@ async def generate_final_document_pdf(document_id: str, document_data: Dict[str,
                 "status": "success",
                 "document_generate_id": document_id,
                 "document_url": document_url,
-                "api_mode": "direct_r2",  # Indica documento HTML
+                "api_mode": "direct_r2",
                 "upload_info": upload_result,
                 "file_size": len(pdf_bytes)
             }
 
     except ValidationError:
-        # Re-raise validaciones sin modificar
         raise
     except ExternalServiceError:
-        # Re-raise errores de servicios externos sin modificar
         raise
     except Exception as e:
-        # Cualquier otro error, wrap en ExternalServiceError
         logger.error(f"Error generando PDF: {type(e).__name__} - {str(e)}")
         raise ExternalServiceError(f"Error generando PDF: {str(e)}")
 
 async def call_signature_stamping_api(document_id: str, user_id: str, current_pdf_id: str = None) -> Dict[str, Any]:
-    """
-    Llama a la API externa para estampar una firma en el documento.
-    
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del usuario que firma
-        current_pdf_id: ID del PDF actual (opcional)
-        
-    Returns:
-        Dict con el resultado de la operación
-        
-    Raises:
-        ExternalServiceError: Si hay error en la API externa
-    """
-    # NOTA: document_id y user_id ya fueron validados por el servicio llamador
-    # No re-validamos aquí para evitar llamadas duplicadas a BD
 
-    # URL de la API de estampado de firmas
     signature_api_url = os.getenv('SIGNATURE_STAMPING_API_URL')
     
     if not signature_api_url:
-        # Modo MOCK
         logger.warning(f"MODO MOCK: Simulando estampado de firma para documento {document_id}")
 
-        # Simular tiempo de procesamiento de firma
         await asyncio.sleep(1.0)
         
         mock_signed_pdf_id = str(uuid.uuid4())
@@ -195,7 +167,6 @@ async def call_signature_stamping_api(document_id: str, user_id: str, current_pd
         }
     
     else:
-        # Modo REAL
         try:
             import httpx
             
@@ -210,7 +181,7 @@ async def call_signature_stamping_api(document_id: str, user_id: str, current_pd
                 }
             }
             
-            async with httpx.AsyncClient(timeout=90.0) as client:  # Más tiempo para firmas
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 response = await client.post(
                     f"{signature_api_url}/stamp-signature",
                     json=payload,
@@ -251,28 +222,12 @@ async def call_signature_stamping_api(document_id: str, user_id: str, current_pd
                 raise ExternalServiceError(f"Error inesperado en API de estampado: {str(e)}")
 
 async def call_external_signing_api_for_numerator(document_id: str, user_id: str, official_number: str) -> Dict[str, Any]:
-    """
-    Llama a la API externa para el proceso de firma del numerador.
-    
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del numerador
-        official_number: Número oficial del documento
-        
-    Returns:
-        Dict con el resultado de la operación
-    """
-    # NOTA: document_id y user_id ya fueron validados por el servicio llamador
-    # No re-validamos aquí para evitar llamadas duplicadas a BD
 
-    # URL de la API de firma de numerador
     numerator_api_url = os.getenv('NUMERATOR_SIGNING_API_URL')
     
     if not numerator_api_url:
-        # Modo MOCK
         logger.warning(f"MODO MOCK: Simulando firma de numerador para documento {document_id} con número {official_number}")
 
-        # Simular proceso de numeración y firma
         await asyncio.sleep(1.5)
         
         mock_final_pdf_id = str(uuid.uuid4())
@@ -293,7 +248,6 @@ async def call_external_signing_api_for_numerator(document_id: str, user_id: str
         }
     
     else:
-        # Modo REAL
         try:
             import httpx
             
@@ -308,7 +262,7 @@ async def call_external_signing_api_for_numerator(document_id: str, user_id: str
                 }
             }
             
-            async with httpx.AsyncClient(timeout=120.0) as client:  # Más tiempo para proceso completo
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{numerator_api_url}/complete-numeration",
                     json=payload,
@@ -350,21 +304,9 @@ async def call_external_signing_api_for_numerator(document_id: str, user_id: str
                 raise ExternalServiceError(f"Error inesperado en API de numeración: {str(e)}")
 
 async def validate_external_document(document_id: str, validation_type: str = "integrity") -> Dict[str, Any]:
-    """
-    Valida un documento usando servicios externos.
-    
-    Args:
-        document_id: UUID del documento
-        validation_type: Tipo de validación ('integrity', 'signatures', 'full')
-        
-    Returns:
-        Dict con resultado de validación
-    """
-    # URL de API de validación
     validation_api_url = os.getenv('DOCUMENT_VALIDATION_API_URL')
     
     if not validation_api_url:
-        # Modo MOCK
         logger.warning(f"MODO MOCK: Simulando validación de documento {document_id}, tipo={validation_type}")
 
         await asyncio.sleep(0.8)
@@ -381,7 +323,6 @@ async def validate_external_document(document_id: str, validation_type: str = "i
         }
     
     else:
-        # Modo REAL
         try:
             import httpx
             
@@ -423,12 +364,6 @@ async def validate_external_document(document_id: str, validation_type: str = "i
                 raise ExternalServiceError(f"Error en validación externa: {str(e)}")
 
 def get_external_services_status() -> Dict[str, Any]:
-    """
-    Verifica el estado de todos los servicios externos.
-    
-    Returns:
-        Dict con estado de servicios externos
-    """
     services = {
         "pdf_generation": {
             "url": os.getenv('PDF_GENERATION_API_URL'),
@@ -452,7 +387,6 @@ def get_external_services_status() -> Dict[str, Any]:
         }
     }
     
-    # Contar servicios configurados
     configured_count = sum(1 for service in services.values() if service['configured'])
     total_services = len(services)
     
@@ -468,31 +402,6 @@ def get_external_services_status() -> Dict[str, Any]:
 
 
 async def get_document_pdf_url(document_id: str, document_generate_id: str, document_status: str, *, schema_name: str) -> Optional[str]:
-    """
-    Obtiene URL del PDF desde Cloudflare R2 directamente según el estado del documento.
-
-    Esta función reemplaza las llamadas a Legal Orchestrator por acceso directo a R2 usando boto3.
-
-    Flujo por estado:
-    - sent_to_sign → bucket del tenant (tosign) con document_generate_id (sin guiones)
-    - signed → bucket del tenant (oficial) con official_number
-
-    Args:
-        document_id: UUID del documento (para buscar official_number si está signed)
-        document_generate_id: UUID del documento generado (para sent_to_sign)
-        document_status: Estado del documento ('sent_to_sign' o 'signed')
-        schema_name: Schema del tenant (para multi-tenant)
-
-    Returns:
-        URL firmada temporal (expira en 600 segundos) o None si falla
-
-    Ejemplos:
-        >>> # Para documento en firma
-        >>> url = get_document_pdf_url(doc_id, "214c5d16-95ea-4865-876d-e8e826ef3ece", "sent_to_sign", "tenant_schema")
-        >>>
-        >>> # Para documento firmado
-        >>> url = get_document_pdf_url(doc_id, generate_id, "signed", "tenant_schema")
-    """
     from services.storage.cloudflare import get_tenant_r2_client
 
     logger.debug(f"Obteniendo URL de PDF: doc={document_id}, status={document_status}")
@@ -500,21 +409,17 @@ async def get_document_pdf_url(document_id: str, document_generate_id: str, docu
     r2_client = await get_tenant_r2_client(schema_name=schema_name)
 
     if document_status == "sent_to_sign":
-        # Documentos en proceso de firma: bucket tosign
-        # El filename debe ser el UUID sin guiones + .pdf
         filename = document_generate_id.replace('-', '') + '.pdf'
         logger.debug(f"Obteniendo URL de tosign: {filename}")
         return await run_in_threadpool(r2_client.get_tosign_url, filename)
 
     elif document_status == "signed":
-        # Documentos firmados: bucket oficial
-        # Necesitamos buscar el official_number en la BD
         from database import fetch_one
 
         logger.debug(f"Buscando official_number en BD...")
 
         query = """
-            SELECT official_number
+            SELECT official_number, pdf_location
             FROM official_documents
             WHERE id = $1
               AND signed_at IS NOT NULL
@@ -525,7 +430,10 @@ async def get_document_pdf_url(document_id: str, document_generate_id: str, docu
         if result and result.get("official_number"):
             official_number = result["official_number"]
             logger.debug(f"Official number encontrado, obteniendo URL oficial")
-            return await run_in_threadpool(r2_client.get_oficial_url, official_number)
+            return await run_in_threadpool(
+                r2_client.get_oficial_url, official_number,
+                result.get("pdf_location") or "oficial",
+            )
         else:
             logger.error(f"No se encontró official_number para document_id {document_id}")
             return None
@@ -539,48 +447,23 @@ async def call_pdfcomposer_generate_pdf(
     document_data: Dict[str, Any],
     signers: List[Dict[str, Any]],
     *,
-    schema_name: str
+    schema_name: str,
+    embedded_files: Optional[List[tuple]] = None,
 ) -> bytes:
-    """
-    Llama directamente a PDFComposer para generar PDF.
-
-    PHASE 2: Reemplaza la llamada a Legal Orchestrator /start-signatures
-    manteniendo PDFComposer como servicio externo HTTP.
-
-    Args:
-        document_data: Dict con keys:
-            - document_id: UUID del documento
-            - reference: Referencia del documento
-            - content: Contenido HTML o dict {html: ...}
-            - type_name: Nombre del tipo de documento
-            - type_acronym: Acrónimo del tipo
-        signers: Lista de firmantes (no se envía a PDFComposer, solo para contexto)
-
-    Returns:
-        bytes: PDF generado por PDFComposer
-
-    Raises:
-        ValidationError: Si faltan campos requeridos
-        ExternalServiceError: Si PDFComposer falla o no responde
-    """
     import json
-    import asyncio
 
-    # Validar document_id (solo formato, no existencia en BD)
+    embedded_files = embedded_files or []
+
     document_id = document_data.get('document_id')
     if not document_id:
         raise ValidationError("document_id es requerido para generar PDF")
 
-    # NOTA: No validamos existencia en BD aquí porque ya fue validado
-    # por el servicio llamador (generate_final_document_pdf → signing.py)
 
-    # Extraer campos para PDFComposer
     type_acronym = document_data.get('type_acronym') or document_data.get('document_type_acronym')
     type_name = document_data.get('type_name') or document_data.get('document_type_name')
     reference = document_data.get('reference')
     content_raw = document_data.get('content', '')
 
-    # Validar campos requeridos
     if not type_acronym:
         raise ValidationError("type_acronym es requerido para generar PDF")
     if not type_name:
@@ -588,7 +471,6 @@ async def call_pdfcomposer_generate_pdf(
     if not reference:
         raise ValidationError("reference es requerido para generar PDF")
 
-    # Extraer HTML del contenido si es dict
     if isinstance(content_raw, dict) and 'html' in content_raw:
         content_html = content_raw['html']
     elif isinstance(content_raw, str):
@@ -596,11 +478,8 @@ async def call_pdfcomposer_generate_pdf(
     else:
         content_html = str(content_raw) if content_raw else ""
 
-    # Convertir contenido a formato JSON para PDFComposer
-    # PDFComposer espera Text como JSON string
     text_json = json.dumps({"html": content_html})
 
-    # Obtener credenciales desde .env
     pdfcomposer_url = os.getenv('PDFCOMPOSER_URL')
     if not pdfcomposer_url:
         raise RuntimeError("PDFCOMPOSER_URL no configurado en variables de entorno")
@@ -611,7 +490,6 @@ async def call_pdfcomposer_generate_pdf(
 
     logo_url = document_data.get('municipality_logo_url') or DEFAULT_LOGO_URL
 
-    # Preparar payload para PDFComposer (multipart/form-data)
     pdfcomposer_data = {
         "urlLogo": logo_url,
         "NameAcronyType": type_acronym,
@@ -620,7 +498,6 @@ async def call_pdfcomposer_generate_pdf(
         "Text": text_json
     }
 
-    # Inyectar frase_anual desde settings del tenant
     from services.shared.settings_utils import get_tenant_settings
     annual_slogan = (await get_tenant_settings(schema_name)).get("annual_slogan", "")
     if annual_slogan:
@@ -628,80 +505,67 @@ async def call_pdfcomposer_generate_pdf(
 
     logger.info(f"Generando PDF con PDFComposer: {reference}, tipo={type_name}")
 
-    # Llamar a PDFComposer con retry (igual que Legal Orchestrator)
-    timeout = httpx.Timeout(90.0)  # Timeout largo para generación de PDF
+    timeout = httpx.Timeout(90.0)
     headers = {
         "X-API-Key": pdfcomposer_api_key,
         "X-Correlation-ID": get_correlation_id()
     }
 
+    files_payload = [
+        ("embedded_files", (file_name, file_bytes, "application/octet-stream"))
+        for file_name, file_bytes in embedded_files
+    ] or None
+
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(2):  # 1 reintento
-            try:
-                logger.debug(f"Intento {attempt + 1}/2 de generación de PDF")
+        try:
+            response = await post_micro_with_coldstart_retry(
+                client,
+                f"{pdfcomposer_url}/generate-pdf/",
+                data=pdfcomposer_data,
+                files=files_payload,
+                headers=headers,
+                log_label="PDFComposer",
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError,
+                httpx.RemoteProtocolError, httpx.PoolTimeout) as e:
+            logger.error(f"PDFComposer inalcanzable tras reintentos de cold-start: {type(e).__name__}: {e}")
+            raise ExternalServiceError(f"PDFComposer inalcanzable (cold-start): {str(e)}")
+        except httpx.TimeoutException:
+            logger.warning("Timeout en PDFComposer (90s excedido)")
+            raise ExternalServiceError("PDFComposer timeout después de 90 segundos")
+        except httpx.RequestError as e:
+            logger.warning(f"Error de conexión con PDFComposer: {str(e)}")
+            raise ExternalServiceError(f"Error de conexión con PDFComposer: {str(e)}")
 
-                response = await client.post(
-                    f"{pdfcomposer_url}/generate-pdf/",
-                    data=pdfcomposer_data,
-                    headers=headers
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP Error {e.response.status_code} en PDFComposer")
+            raise ExternalServiceError(
+                f"PDFComposer error: HTTP {e.response.status_code}",
+                details={"response": e.response.text[:500]}
+            )
+
+        try:
+            pdf_bytes = await response.aread()
+            pdf_size = len(pdf_bytes)
+
+            logger.info(f"PDF generado exitosamente: {pdf_size} bytes ({pdf_size/1024:.2f} KB)")
+
+            if pdf_size == 0:
+                raise ExternalServiceError("PDFComposer retornó PDF vacío")
+
+            if not pdf_bytes.startswith(b'%PDF'):
+                logger.warning(f"Respuesta de PDFComposer no parece ser PDF válido")
+
+            if pdf_size > MAX_SIGNABLE_PDF_SIZE:
+                raise ExternalServiceError(
+                    f"PDF excede tamaño máximo ({pdf_size/1024/1024:.2f}MB > {MAX_SIGNABLE_PDF_SIZE/1024/1024:.0f}MB)"
                 )
+        except ExternalServiceError:
+            raise
+        except httpx.HTTPError as e:
+            logger.error(f"Error leyendo respuesta de PDFComposer post-200: {type(e).__name__}: {e}")
+            raise ExternalServiceError(f"Error leyendo respuesta de PDFComposer: {str(e)}")
 
-                response.raise_for_status()
-
-                # Leer contenido directo en memoria sin archivos temporales
-                pdf_bytes = await response.aread()
-                pdf_size = len(pdf_bytes)
-
-                logger.info(f"PDF generado exitosamente: {pdf_size} bytes ({pdf_size/1024:.2f} KB)")
-
-                # Validar que recibimos un PDF válido
-                if pdf_size == 0:
-                    raise ExternalServiceError("PDFComposer retornó PDF vacío")
-
-                # Validar magic bytes (opcional pero recomendado)
-                if not pdf_bytes.startswith(b'%PDF'):
-                    logger.warning(f"Respuesta de PDFComposer no parece ser PDF válido")
-
-                # Validar tamaño máximo (10MB como Legal Orchestrator)
-                MAX_PDF_SIZE = 10 * 1024 * 1024  # 10MB
-                if pdf_size > MAX_PDF_SIZE:
-                    raise ExternalServiceError(f"PDF excede tamaño máximo ({pdf_size/1024/1024:.2f}MB > 10MB)")
-
-                return pdf_bytes
-
-            except httpx.HTTPStatusError as e:
-                logger.warning(f"HTTP Error {e.response.status_code} en PDFComposer (intento {attempt + 1})")
-
-                if attempt == 1:  # Último intento
-                    raise ExternalServiceError(
-                        f"PDFComposer error: HTTP {e.response.status_code}",
-                        details={"response": e.response.text[:500]}
-                    )
-
-            except httpx.TimeoutException:
-                logger.warning(f"Timeout en PDFComposer (90s excedido) (intento {attempt + 1})")
-                if attempt == 1:
-                    raise ExternalServiceError("PDFComposer timeout después de 90 segundos")
-
-            except httpx.RequestError as e:
-                logger.warning(f"Error de conexión con PDFComposer (intento {attempt + 1}): {str(e)}")
-                if attempt == 1:
-                    raise ExternalServiceError(f"Error de conexión con PDFComposer: {str(e)}")
-
-            except ExternalServiceError:
-                # Re-raise ExternalServiceError sin modificar
-                if attempt == 1:
-                    raise
-
-            except Exception as e:
-                logger.warning(f"Error inesperado en PDFComposer (intento {attempt + 1}): {type(e).__name__}")
-                if attempt == 1:
-                    raise ExternalServiceError(f"Error inesperado en PDFComposer: {str(e)}")
-
-            # Si no es el último intento, esperar antes de retry
-            if attempt == 0:
-                logger.debug(f"Esperando 1s antes de reintentar PDFComposer...")
-                await asyncio.sleep(1)
-
-    # No debería llegar aquí, pero por si acaso
-    raise ExternalServiceError("PDFComposer: error desconocido después de reintentos")
+        return pdf_bytes

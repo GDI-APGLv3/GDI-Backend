@@ -1,35 +1,3 @@
-"""
-Validador único de permisos de numeración de documentos.
-
-REGLA DE NEGOCIO:
-  Un usuario puede numerar un tipo de documento si y solo si cumple DOS condiciones:
-
-  1. has_rank_permission (condicional):
-     - Si el tipo NO tiene filas en document_types_allowed_by_rank → pasa (sin restricción).
-     - Si SÍ tiene filas → el usuario debe ser head_user_id de algún departamento cuyo
-       rank_id esté entre los permitidos (document_types_allowed_by_rank).
-       El rango viene de la TITULARIDAD del departamento (departments.rank_id),
-       NO del sello del usuario (user_seals/city_seals).
-       Titular de depto sin rank_id → RECHAZADO.
-       Usuario sin titularidad → RECHAZADO.
-
-  2. has_sector_permission (condicional):
-     - Si el tipo NO tiene filas en enabled_document_types_by_sector → pasa (todos habilitados).
-     - Si SÍ tiene filas → el sector del usuario (users.sector_id) debe estar listado,
-       O el usuario debe tener un user_sector_permissions con can_edit=true apuntando a
-       alguno de los sectores habilitados.
-
-APLICA SOLO AL NUMERADOR. Los firmantes comunes no usan esta validación.
-
-FUENTE ÚNICA: Todos los paths que validan numeración llaman a esta función.
-  - services/documents/signing/numerator.py  (firma electrónica)
-  - services/documents/signing/dispatcher.py (firma digital)
-  - endpoints/documents/check_signer_permissions.py (validación preventiva frontend)
-  - api_gateway/tools/system.py              (tool MCP check_signer_permissions)
-
-DOCUMENTOS AUTOMÁTICOS (CAEX/PV vía _document_creator_base.py) quedan EXCLUIDOS
-a propósito — los genera el sistema, no un usuario numerador.
-"""
 
 from typing import Tuple
 from database import fetch_one
@@ -44,27 +12,6 @@ async def can_user_number_document_type(
     *,
     schema_name: str,
 ) -> Tuple[bool, bool, str]:
-    """
-    Verifica si un usuario puede numerar un tipo de documento dado.
-
-    UNA sola query SQL que evalúa ambas condiciones como columnas CASE/EXISTS.
-
-    Args:
-        user_id:          UUID del usuario numerador (como str).
-        document_type_id: ID entero del tipo de documento (document_types.id).
-        schema_name:      Schema del tenant (keyword-only, obligatorio).
-
-    Returns:
-        Tupla (has_rank_permission, has_sector_permission, reason).
-        - has_rank_permission: True si pasa la validación de titularidad/rango.
-        - has_sector_permission: True si pasa la validación de sector.
-        - reason: mensaje legible explicando el resultado. "OK" si ambas pasan.
-          Si alguna falla, describe la razón del rechazo. Si el tipo de documento
-          no existe, devuelve un mensaje de error y ambas flags en False.
-
-    Raises:
-        No lanza excepciones propias. Errores de BD se propagan al caller.
-    """
     logger.info(
         f"can_user_number_document_type: user={user_id[:8]}... "
         f"doc_type_id={document_type_id}"

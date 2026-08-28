@@ -169,5 +169,5 @@ LOG_LEVEL=info               # Nivel de logging (debug, info, warning, error)
 
 ---
 
-**Repositorio**: https://github.com/GDI-APGLv3/GDI-Backend  
+**Repositorio**: https://github.com/GDI-AGPLv3/GDI-Backend  
 **Documentación**: `/docs` endpoint para API interactiva

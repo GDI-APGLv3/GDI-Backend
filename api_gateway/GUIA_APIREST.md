@@ -5,7 +5,10 @@
 REST API para integraciones externas con el sistema GDI (Gestion Documental Inteligente).
 
 **Base URL**:
-- Produccion: `https://mcp.gdilatam.com/api/v1`
+- Produccion (PRD): `https://gateway.your-domain.com/api/v1`
+- Produccion (DEMO): `https://gateway.your-domain.com/api/v1`
+- Homologacion (HML): `https://gateway.your-domain.com/api/v1`
+- DEV: `https://<your-gateway-app>.fly.dev/api/v1`
 - Local: `http://localhost:8005/api/v1`
 
 **Autenticacion**: API Key via header `X-API-Key`
@@ -39,9 +42,9 @@ VALUES (
 ### Ejemplo de Request
 
 ```bash
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/search" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/search" \
   -H "X-API-Key: MI-API-KEY-SECRETA" \
-  -H "X-User-ID: 123e4567-e89b-12d3-a456-426614174000"
+  -H "X-User-ID: 00000000-0000-0000-0000-000000000001"
 ```
 
 ---
@@ -69,7 +72,7 @@ GET /api/v1/cases/search
 
 **Ejemplo**:
 ```bash
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/search?search=panaderia&status=active&page=1" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/search?search=panaderia&status=active&page=1" \
   -H "X-API-Key: MI-API-KEY" \
   -H "X-User-ID: uuid-usuario"
 ```
@@ -79,7 +82,7 @@ curl -X GET "https://mcp.gdilatam.com/api/v1/cases/search?search=panaderia&statu
 {
   "cases": [
     {
-      "id": "95a5f55d-2d68-49e8-8513-22996aa4fc7e",
+      "id": "00000000-0000-0000-0000-000000000001",
       "case_number": "EE-2026-000018-TXST-INTE",
       "reference": "Habilitacion Comercial - Panaderia La Estrella",
       "last_modified_at": "2026-01-20 13:40:37",
@@ -118,7 +121,7 @@ GET /api/v1/cases/number/{case_number}
 
 **Ejemplo**:
 ```bash
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/number/EE-2026-000018-TXST-INTE" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/number/EE-2026-000018-TXST-INTE" \
   -H "X-API-Key: MI-API-KEY"
 ```
 
@@ -146,7 +149,7 @@ GET /api/v1/cases/{case_id}
 
 **Ejemplo**:
 ```bash
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/95a5f55d-2d68-49e8-8513-22996aa4fc7e?include_documents=true" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/00000000-0000-0000-0000-000000000001?include_documents=true" \
   -H "X-API-Key: MI-API-KEY"
 ```
 
@@ -264,11 +267,18 @@ POST /api/v1/cases/{case_id}/assign
 {
   "success": true,
   "movement_id": "uuid-movimiento",
-  "case_number": "EE-2026-000018",
+  "assignment_id": "uuid-movimiento",
+  "task_id": "uuid-tarea",
   "action_type": "asignado",
-  "target_sector": "LEGAL#PRIV"
+  "sector_acronym": "LEGAL#PRIV",
+  "department_name": "Legal",
+  "is_new_assignment": true
 }
 ```
+
+> `movement_id` y `assignment_id` son el mismo valor (alias, GDI-119): es el
+> `case_movements.id` de la asignación. Usar cualquiera de los dos como
+> `movement_id` (o `assignment_id`) al llamar a 2.9 Cerrar Asignacion.
 
 ---
 
@@ -285,6 +295,22 @@ POST /api/v1/cases/{case_id}/close-assign
 {
   "movement_id": "uuid-movimiento-a-cerrar",
   "reason": "Tarea completada satisfactoriamente"
+}
+```
+
+> `assignment_id` es aceptado como alias de `movement_id` (GDI-119). Si el
+> cliente encadena la respuesta de 2.8 Asignar Expediente, puede mandar
+> directamente el `assignment_id` que recibió ahi.
+
+**Respuesta**:
+```json
+{
+  "success": true,
+  "movement_id": "uuid-movimiento-a-cerrar",
+  "assignment_id": "uuid-movimiento-a-cerrar",
+  "case_id": "uuid-expediente",
+  "movement_type": "assignment",
+  "closing_reason": "Tarea completada satisfactoriamente"
 }
 ```
 
@@ -313,7 +339,7 @@ GET /api/v1/documents/search
 
 **Ejemplo**:
 ```bash
-curl -X GET "https://mcp.gdilatam.com/api/v1/documents/search?status=signed&document_type=INF" \
+curl -X GET "https://gateway.your-domain.com/api/v1/documents/search?status=signed&document_type=INF" \
   -H "X-API-Key: MI-API-KEY" \
   -H "X-User-ID: uuid-usuario"
 ```
@@ -488,6 +514,87 @@ POST /api/v1/documents/{document_id}/start-signing
 
 ---
 
+### 3.9 Firmar Documento
+
+```
+POST /api/v1/documents/{document_id}/sign
+```
+
+**Headers**: `X-API-Key` (requerido), `X-User-ID` (requerido)
+
+Firma el documento como el usuario del header. Solo firma **electronica**: si el
+tipo exige token fisico (`digital_all`, o `digital_num` siendo numerador) responde
+422 y hay que firmar desde el portal web.
+
+La firma puede resolverse por dos carriles, y **la respuesta no tiene la misma
+forma en los dos**:
+
+**Carril sincronico** — el documento ya queda firmado y numerado:
+```json
+{
+  "success": true,
+  "document_status": "signed",
+  "official_number": "IF-2026-00002468-TXST-INNO",
+  "signed_pdf_url": "https://..."
+}
+```
+
+**Carril asincronico** (`flow: "electronic_async"`) — la firma queda **encolada**:
+```json
+{
+  "success": true,
+  "message": "Firma encolada — se procesará en instantes",
+  "document_status": "sent_to_sign",
+  "official_number": null,
+  "flow": "electronic_async",
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "poll_url": "/api/v1/signing/async-poll/00000000-0000-0000-0000-000000000001",
+  "expires_at": "2026-08-20T18:28:17Z"
+}
+```
+
+`official_number` llega en `null` a proposito: el numero recien existe cuando la
+firma termina. Para saber cuando pasa, hay que pollear `poll_url`.
+
+---
+
+### 3.10 Estado de Firma Asincronica (poll)
+
+```
+GET /api/v1/signing/async-poll/{session_id}
+```
+
+**Headers**: `X-API-Key` (requerido), `X-User-ID` (requerido — debe ser el dueño
+de la sesion; una sesion ajena responde 404, igual que una inexistente)
+
+Es la ruta que devuelve el `poll_url` del carril async. Pollear cada 2-3s hasta
+que `status` sea terminal.
+
+**Respuesta**:
+```json
+{
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "status": "signed",
+  "official_number": "IF-2026-00002468-TXST-INNO",
+  "auto_link_results": [],
+  "reason": null,
+  "failure_reason": null
+}
+```
+
+| `status` | Significado |
+|----------|-------------|
+| `queued` | encolada, el worker todavia no la tomo |
+| `processing` | firmandose |
+| `signed` | lista — `official_number` ya tiene el numero |
+| `failed` | fallo; el motivo viene en `reason` |
+| `expired` | la sesion vencio sin procesarse |
+
+Alternativa: `GET /api/v1/documents/{document_id}` tambien refleja el estado
+final del documento, pero el poll es mas barato y trae el motivo del fallo.
+
+---
+
 ## 4. Endpoints de Sistema
 
 ### 4.1 Tipos de Documentos
@@ -614,7 +721,7 @@ GET /api/v1/system/users/{user_id}
 import requests
 
 API_KEY = "mi-api-key"
-BASE_URL = "https://mcp.gdilatam.com/api/v1"
+BASE_URL = "https://gateway.your-domain.com/api/v1"
 USER_ID = "uuid-usuario"
 
 headers = {
@@ -643,7 +750,7 @@ history = response.json()
 
 ```javascript
 const API_KEY = "mi-api-key";
-const BASE_URL = "https://mcp.gdilatam.com/api/v1";
+const BASE_URL = "https://gateway.your-domain.com/api/v1";
 const USER_ID = "uuid-usuario";
 
 // Buscar documentos
@@ -663,12 +770,12 @@ const documents = await response.json();
 
 ```bash
 # Buscar expedientes
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/search?search=licitacion" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/search?search=licitacion" \
   -H "X-API-Key: mi-api-key" \
   -H "X-User-ID: uuid-usuario"
 
 # Crear documento
-curl -X POST "https://mcp.gdilatam.com/api/v1/documents/" \
+curl -X POST "https://gateway.your-domain.com/api/v1/documents/" \
   -H "X-API-Key: mi-api-key" \
   -H "X-User-ID: uuid-usuario" \
   -H "Content-Type: application/json" \

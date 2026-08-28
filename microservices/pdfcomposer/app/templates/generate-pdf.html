@@ -31,7 +31,8 @@
       right: 0;
       width: 50%;
       height: 85px;
-      object-fit: cover;
+      object-fit: contain;
+      object-position: right center;
       border-radius: 0 0px 0 0;
       z-index: 0;
       pointer-events: none;
@@ -107,6 +108,30 @@
     .content table th { background: var(--background-muted); font-weight: 600; }
     .content ul, .content ol { padding-left: 1.5em; margin: 0.5em 0; }
     .content h1, .content h2, .content h3, .content h4 { margin: 0.6em 0 0.3em; }
+    /* GDI-068: alineacion de parrafos/imagenes del editor (Quill).
+       Selector descendiente .content .ql-align-* (especificidad 0,2,0) le
+       gana al text-align: justify de .content (0,1,0) sin depender de
+       orden en cascada. */
+    .content .ql-align-left { text-align: left; }
+    .content .ql-align-center { text-align: center; }
+    .content .ql-align-right { text-align: right; }
+    .content .ql-align-justify { text-align: justify; }
+    /* Tipografia del editor (Quill): tamano de texto, fuente y titulos.
+       Mismo criterio que .ql-align-*: descendiente .content .ql-* para
+       ganarle al .content base sin depender del orden de cascada. Los
+       tamanos son em (relativos al font-size base de .content). */
+    .content .ql-size-small { font-size: 0.75em; }
+    .content .ql-size-large { font-size: 1.5em; }
+    .content .ql-size-huge { font-size: 2.5em; }
+    /* Serif/monospace via DejaVu (instaladas en el contenedor por el
+       Dockerfile). El default (sin clase) queda en Montserrat. */
+    .content .ql-font-serif { font-family: 'DejaVu Serif', Georgia, 'Times New Roman', serif; }
+    .content .ql-font-monospace { font-family: 'DejaVu Sans Mono', 'Courier New', monospace; }
+    /* Titulos h1/h2/h3 (Quill header): WeasyPrint aplica UA stylesheet, pero
+       fijamos tamanos explicitos para que coincidan con el editor. */
+    .content h1 { font-size: 2em; font-weight: 700; }
+    .content h2 { font-size: 1.5em; font-weight: 700; }
+    .content h3 { font-size: 1.17em; font-weight: 700; }
   </style>
 </head>
 <body>

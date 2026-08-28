@@ -1,27 +1,20 @@
-"""
-Modelos de respuesta para el modulo de CCOO (Comunicaciones Oficiales).
-Formato unificado que combina Notas y Memos.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 
 
 class CcooSender(BaseModel):
-    """Informacion del emisor (sector para NOTA, usuario para MEMO)"""
     label: str = Field(..., description="Nombre principal del emisor (acronym sector o full_name usuario)")
     detail: str = Field(..., description="Detalle adicional (department name o sector acronym)")
     type: str = Field(..., description="Tipo de emisor: 'sector' (NOTA) o 'user' (MEMO)")
 
 
 class CcooReadStatus(BaseModel):
-    """Estado de lectura de una comunicacion"""
     opened: bool = Field(..., description="Si fue abierta/leida")
     opened_at: Optional[str] = Field(None, description="Fecha de apertura (ISO format)")
 
 
 class CcooPagination(BaseModel):
-    """Informacion de paginacion"""
     page: int = Field(..., description="Pagina actual (1-indexed)")
     page_size: int = Field(..., description="Elementos por pagina")
     total: int = Field(..., description="Total de elementos")
@@ -40,7 +33,6 @@ class CcooPagination(BaseModel):
 
 
 class CcooReceivedItem(BaseModel):
-    """Item de CCOO recibida (bandeja de entrada unificada)"""
     document_id: str = Field(..., description="UUID del documento")
     official_number: str = Field(..., description="Numero oficial (ej: NOTA-2026-000001-MUNI)")
     reference: str = Field(..., description="Asunto de la comunicacion")
@@ -54,7 +46,6 @@ class CcooReceivedItem(BaseModel):
 
 
 class CcooSentItem(BaseModel):
-    """Item de CCOO enviada (bandeja de enviados unificada)"""
     document_id: str = Field(..., description="UUID del documento")
     official_number: str = Field(..., description="Numero oficial")
     reference: str = Field(..., description="Asunto de la comunicacion")
@@ -68,12 +59,10 @@ class CcooSentItem(BaseModel):
 
 
 class CcooArchivedItem(CcooReceivedItem):
-    """Item de CCOO archivada (incluye fecha de archivado)"""
     archived_at: Optional[str] = Field(None, description="Fecha de archivado (ISO format)")
 
 
 class CcooReceivedListResponse(BaseModel):
-    """Respuesta para lista de CCOO recibidas"""
     items: List[CcooReceivedItem] = Field(..., description="Lista de comunicaciones recibidas")
     pagination: CcooPagination = Field(..., description="Informacion de paginacion")
 
@@ -113,7 +102,6 @@ class CcooReceivedListResponse(BaseModel):
 
 
 class CcooSentListResponse(BaseModel):
-    """Respuesta para lista de CCOO enviadas"""
     items: List[CcooSentItem] = Field(..., description="Lista de comunicaciones enviadas")
     pagination: CcooPagination = Field(..., description="Informacion de paginacion")
 
@@ -141,7 +129,6 @@ class CcooSentListResponse(BaseModel):
 
 
 class CcooArchivedListResponse(BaseModel):
-    """Respuesta para lista de CCOO archivadas"""
     items: List[CcooArchivedItem] = Field(..., description="Lista de comunicaciones archivadas")
     pagination: CcooPagination = Field(..., description="Informacion de paginacion")
 

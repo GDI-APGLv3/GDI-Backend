@@ -1,35 +1,15 @@
-"""
-Helpers de bajo nivel para operaciones R2 (copy/delete/put/get/signed_url).
-
-Wrappea el CloudflareR2Client multi-tenant existente (services/storage/cloudflare.py)
-para exponer operaciones con paths de objeto explícitos.
-
-Todos los métodos usan schema_name como keyword-only para garantizar
-el patrón multi-tenant del proyecto.
-"""
-import logging
+from shared.logging import get_logger
 from botocore.exceptions import ClientError
 from fastapi.concurrency import run_in_threadpool
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 class R2KeyNotFound(Exception):
-    """Objeto no encontrado en R2 (NoSuchKey / 404)."""
     pass
 
 
 async def _get_boto_client_and_bucket(schema_name: str, bucket: str):
-    """
-    Devuelve el cliente boto3 interno del CloudflareR2Client para el tenant dado.
-
-    Args:
-        schema_name: Schema del tenant.
-        bucket: 'tosign' o 'oficial'.
-
-    Returns:
-        tuple(boto3_client, bucket_name)
-    """
     from services.storage.cloudflare import get_tenant_r2_client
 
     r2 = await get_tenant_r2_client(schema_name=schema_name)
@@ -44,31 +24,23 @@ async def _get_boto_client_and_bucket(schema_name: str, bucket: str):
         bucket_name = r2.bucket_tosign
     elif bucket == "oficial":
         bucket_name = r2.bucket_oficial
+    elif bucket == "preoficial":
+        bucket_name = r2.bucket_preoficial
+        if not bucket_name:
+            raise ValueError(f"Tenant '{schema_name}' no tiene bucket_preoficial configurado")
+    elif bucket == "publico":
+        bucket_name = r2.bucket_publico
+        if not bucket_name:
+            raise ValueError(f"Tenant '{schema_name}' no tiene bucket_publico configurado")
     else:
-        raise ValueError(f"bucket debe ser 'tosign' u 'oficial', recibido: {bucket!r}")
+        raise ValueError(
+            f"bucket debe ser 'tosign', 'oficial', 'preoficial' o 'publico', recibido: {bucket!r}"
+        )
 
     return r2._client, bucket_name
 
 
-# ---------------------------------------------------------------------------
-# API pública
-# ---------------------------------------------------------------------------
-
 async def r2_copy(*, schema_name: str, src: str, dst: str, src_bucket: str = "tosign", dst_bucket: str = "tosign") -> None:
-    """
-    Copia un objeto dentro de R2 (server-side copy).
-
-    Args:
-        schema_name: Schema del tenant (keyword-only).
-        src: Key origen.
-        dst: Key destino.
-        src_bucket: Bucket origen ('tosign' u 'oficial'). Default 'tosign'.
-        dst_bucket: Bucket destino ('tosign' u 'oficial'). Default 'tosign'.
-
-    Raises:
-        R2KeyNotFound: Si src no existe.
-        RuntimeError: Si el cliente no está inicializado.
-    """
     client, dst_bucket_name = await _get_boto_client_and_bucket(schema_name, dst_bucket)
     _, src_bucket_name = await _get_boto_client_and_bucket(schema_name, src_bucket)
 
@@ -88,33 +60,12 @@ async def r2_copy(*, schema_name: str, src: str, dst: str, src_bucket: str = "to
 
 
 async def r2_delete(*, schema_name: str, key: str, bucket: str = "tosign") -> None:
-    """
-    Elimina un objeto de R2.
-
-    Args:
-        schema_name: Schema del tenant (keyword-only).
-        key: Key del objeto a eliminar.
-        bucket: 'tosign' u 'oficial'. Default 'tosign'.
-
-    Note:
-        R2 delete_object es idempotente: no lanza error si la key no existe.
-    """
     client, bucket_name = await _get_boto_client_and_bucket(schema_name, bucket)
     await run_in_threadpool(client.delete_object, Bucket=bucket_name, Key=key)
     log.debug("r2_delete OK: %s/%s", bucket_name, key)
 
 
 async def r2_put(*, schema_name: str, key: str, body: bytes, content_type: str = "application/pdf", bucket: str = "tosign") -> None:
-    """
-    Sube bytes a R2.
-
-    Args:
-        schema_name: Schema del tenant (keyword-only).
-        key: Key destino.
-        body: Contenido binario.
-        content_type: MIME type. Default 'application/pdf'.
-        bucket: 'tosign' u 'oficial'. Default 'tosign'.
-    """
     client, bucket_name = await _get_boto_client_and_bucket(schema_name, bucket)
     await run_in_threadpool(
         client.put_object,
@@ -127,20 +78,6 @@ async def r2_put(*, schema_name: str, key: str, body: bytes, content_type: str =
 
 
 async def r2_get_object(*, schema_name: str, key: str, bucket: str = "tosign") -> bytes:
-    """
-    Descarga un objeto de R2 y retorna sus bytes.
-
-    Args:
-        schema_name: Schema del tenant (keyword-only).
-        key: Key del objeto.
-        bucket: 'tosign' u 'oficial'. Default 'tosign'.
-
-    Returns:
-        bytes del objeto.
-
-    Raises:
-        R2KeyNotFound: Si el objeto no existe.
-    """
     client, bucket_name = await _get_boto_client_and_bucket(schema_name, bucket)
     try:
         r = await run_in_threadpool(client.get_object, Bucket=bucket_name, Key=key)
@@ -155,20 +92,6 @@ async def r2_get_object(*, schema_name: str, key: str, bucket: str = "tosign") -
 
 
 async def r2_head(*, schema_name: str, key: str, bucket: str = "tosign") -> dict:
-    """
-    Verifica si un objeto existe en R2 (HEAD request).
-
-    Args:
-        schema_name: Schema del tenant (keyword-only).
-        key: Key del objeto.
-        bucket: 'tosign' u 'oficial'. Default 'tosign'.
-
-    Returns:
-        Dict con metadata del objeto (ETag, ContentLength, etc.).
-
-    Raises:
-        R2KeyNotFound: Si el objeto no existe.
-    """
     client, bucket_name = await _get_boto_client_and_bucket(schema_name, bucket)
     try:
         response = await run_in_threadpool(client.head_object, Bucket=bucket_name, Key=key)
@@ -181,19 +104,52 @@ async def r2_head(*, schema_name: str, key: str, bucket: str = "tosign") -> dict
         raise
 
 
-async def r2_signed_url(*, schema_name: str, key: str, ttl: int = 300, bucket: str = "tosign") -> str:
-    """
-    Genera una URL pre-firmada para acceso temporal a un objeto.
+async def r2_list(
+    *,
+    schema_name: str,
+    bucket: str = "oficial",
+    prefix: str = "",
+    max_keys: int | None = None,
+) -> tuple[list[dict], bool]:
+    client, bucket_name = await _get_boto_client_and_bucket(schema_name, bucket)
 
-    Args:
-        schema_name: Schema del tenant (keyword-only).
-        key: Key del objeto.
-        ttl: Segundos de vigencia. Default 300.
-        bucket: 'tosign' u 'oficial'. Default 'tosign'.
+    objetos: list[dict] = []
+    token: str | None = None
+    truncado = False
 
-    Returns:
-        URL pre-firmada como string.
-    """
+    while True:
+        kwargs = {"Bucket": bucket_name}
+        if prefix:
+            kwargs["Prefix"] = prefix
+        if token:
+            kwargs["ContinuationToken"] = token
+
+        page = await run_in_threadpool(client.list_objects_v2, **kwargs)
+
+        for obj in page.get("Contents", []):
+            objetos.append({
+                "key": obj["Key"],
+                "size": obj.get("Size", 0),
+                "last_modified": obj.get("LastModified"),
+            })
+            if max_keys is not None and len(objetos) >= max_keys:
+                truncado = page.get("IsTruncated", False) or True
+                log.warning(
+                    "r2_list truncado en %d objetos: %s/%s", max_keys, bucket_name, prefix,
+                )
+                return objetos, truncado
+
+        if not page.get("IsTruncated"):
+            break
+        token = page.get("NextContinuationToken")
+        if not token:
+            break
+
+    log.debug("r2_list %s/%s → %d objetos", bucket_name, prefix, len(objetos))
+    return objetos, truncado
+
+
+async def r2_signed_url(*, schema_name: str, key: str, ttl: int = 60, bucket: str = "tosign") -> str:
     client, bucket_name = await _get_boto_client_and_bucket(schema_name, bucket)
     url = await run_in_threadpool(
         client.generate_presigned_url,

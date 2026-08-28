@@ -1,21 +1,3 @@
-"""
-Endpoint para validar permisos de firmante numerador ANTES de firmar.
-Verifica si un usuario puede numerar un tipo de documento dado,
-sin necesidad de un draft existente.
-
-REGLA DE NEGOCIO (validador único):
-  Usa can_user_number_document_type de numbering_permissions.py,
-  la misma fuente de verdad que numerator.py, dispatcher.py y el tool MCP.
-  - Titularidad: el usuario debe ser head_user_id de un departamento
-    cuyo rank_id esté entre los habilitados para el tipo de documento.
-  - Sector: el sector del usuario (o permisos can_edit) debe estar habilitado.
-  Ambas condiciones son condicionales (sin configuración → pasa).
-
-NOTA sobre user_rank / required_rank:
-  Con la regla nueva el rango viene de la titularidad del departamento,
-  no del sello. Esos campos se devuelven como null para mantener
-  compatibilidad de contrato de API sin exponer información incorrecta.
-"""
 from shared.logging import get_logger
 from fastapi import APIRouter, Request, Depends, Query
 from shared.exceptions import exception_to_http_exception, DatabaseError
@@ -24,14 +6,12 @@ from shared.dependencies import get_tenant_schema
 from auth import get_current_user
 from database import fetch_one
 
-# === CONFIGURACION ===
 logger = get_logger("check_signer_permissions")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
 
 
 def _build_fail_closed_response(document_type_acronym: str, detail: str = "") -> dict:
-    """Respuesta fail-closed cuando no se encuentran datos o la validación falla."""
     msg = (
         detail
         or f"No se encontraron datos para el tipo de documento '{document_type_acronym}'. "
@@ -94,7 +74,6 @@ async def check_signer_permissions(
             f"doc_type={document_type_acronym}, schema={schema_name}"
         )
 
-        # Resolver acronym → document_type_id + nombre
         type_row = await fetch_one(
             "SELECT id, name FROM document_types WHERE acronym = $1",
             document_type_acronym,
@@ -111,7 +90,6 @@ async def check_signer_permissions(
         document_type_id: int = type_row["id"]
         document_type_name: str = type_row["name"]
 
-        # Llamar al validador único
         from services.documents.signing.numbering_permissions import (
             can_user_number_document_type,
         )
@@ -133,9 +111,6 @@ async def check_signer_permissions(
             "can_sign": can_sign,
             "has_rank_permission": has_rank,
             "has_sector_permission": has_sector,
-            # user_rank y required_rank quedan null: la nueva regla usa titularidad
-            # de departamento (departments.rank_id), no el sello del usuario.
-            # Mantener los campos para compatibilidad de contrato de API.
             "user_rank": None,
             "required_rank": None,
             "document_type": document_type_name,

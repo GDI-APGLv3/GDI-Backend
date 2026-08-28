@@ -1,6 +1,6 @@
 # Mapa de Puertas - GDI Backend
 
-> Ultima actualizacion: 2026-02-13
+> Ultima actualizacion: 2026-08-20
 >
 > **Frontend** = Backend :8000 (Auth0 JWT) | **MCP** = Gateway :8005 /mcp (OAuth RFC 9728) | **REST** = Gateway :8005 /api/v1/* (API Key)
 
@@ -54,6 +54,7 @@
 | 37 | Firmar documento | Firma digital (irreversible) | X | | X |
 | 38 | Rechazar documento | Rechazar doc en proceso de firma | X | X | X |
 | 39 | Eliminar borrador | Eliminar draft/rejected | X | | X |
+| 39b | Estado de firma async | Poll de la sesion encolada (`poll_url` del sign) | X | | X |
 
 ## SISTEMA / CATALOGOS
 

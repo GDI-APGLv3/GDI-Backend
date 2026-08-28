@@ -74,22 +74,22 @@ La API Key determina automáticamente la municipalidad y schema. No es necesario
 
 ```bash
 # Buscar expedientes activos
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/search?status=active&page=1" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/search?status=active&page=1" \
   -H "X-API-Key: sk_live_abc123..." \
-  -H "X-User-ID: ece4d900-0b8a-4ad8-8e60-c52df9d3f25d"
+  -H "X-User-ID: 00000000-0000-0000-0000-000000000001"
 
 # Obtener detalle de expediente con documentos
-curl -X GET "https://mcp.gdilatam.com/api/v1/cases/651022d7-dea1-4410-a072-7831ebbad089?include_documents=true" \
+curl -X GET "https://gateway.your-domain.com/api/v1/cases/00000000-0000-0000-0000-000000000001?include_documents=true" \
   -H "X-API-Key: sk_live_abc123..."
 
 # Listar tipos de documentos
-curl -X GET "https://mcp.gdilatam.com/api/v1/system/document-types" \
+curl -X GET "https://gateway.your-domain.com/api/v1/system/document-types" \
   -H "X-API-Key: sk_live_abc123..."
 
 # Buscar documentos de un expediente
-curl -X GET "https://mcp.gdilatam.com/api/v1/documents/search?case_id=651022d7-dea1-4410-a072-7831ebbad089" \
+curl -X GET "https://gateway.your-domain.com/api/v1/documents/search?case_id=00000000-0000-0000-0000-000000000001" \
   -H "X-API-Key: sk_live_abc123..." \
-  -H "X-User-ID: ece4d900-0b8a-4ad8-8e60-c52df9d3f25d"
+  -H "X-User-ID: 00000000-0000-0000-0000-000000000001"
 ```
 
 ### Códigos de Error
@@ -133,7 +133,7 @@ curl -X GET "https://mcp.gdilatam.com/api/v1/documents/search?case_id=651022d7-d
 ### Ejemplo MCP
 
 ```bash
-curl -X POST "https://mcp.gdilatam.com/mcp" \
+curl -X POST "https://gateway.your-domain.com/mcp" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -142,9 +142,9 @@ curl -X POST "https://mcp.gdilatam.com/mcp" \
     "params": {
       "name": "search_cases",
       "arguments": {
-        "api_key": "gdi-mcp-key-2025",
-        "municipality_id": "d729f774-8d63-4e99-a322-aebf9e7377a6",
-        "user_id": "ece4d900-0b8a-4ad8-8e60-c52df9d3f25d",
+        "api_key": "your-mcp-api-key",
+        "municipality_id": "00000000-0000-0000-0000-000000000001",
+        "user_id": "00000000-0000-0000-0000-000000000001",
         "status": "active"
       }
     }
@@ -203,7 +203,7 @@ DB_PASSWORD=...
 DB_NAME=...
 
 # MCP (para tools JSON-RPC)
-MCP_API_KEY=gdi-mcp-key-2025
+MCP_API_KEY=your-mcp-api-key
 
 # Puerto
 PORT=8005

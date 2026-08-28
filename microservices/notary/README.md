@@ -2,6 +2,15 @@
 
 ## Descripción
 
+> ⚠️ **Deuda de seguridad conocida (declarada).** Este servicio fija
+> `fastapi==0.104.1` y `python-multipart==0.0.6`, versiones afectadas por
+> **CVE-2024-24762 / GHSA-59g5-xgcq-4qw3** (denegación de servicio al parsear
+> multipart; corregido en `python-multipart` 0.0.7 y en `fastapi` 0.109.1).
+> El resto del proyecto ya usa `python-multipart>=0.0.18`. El pin se levanta
+> con la suite de firma corriendo, no a ciegas. Si desplegás este servicio,
+> considerá subir esas dos dependencias y validar el flujo PAdES.
+
+
 **Notario** es un microservicio desarrollado en FastAPI para la firma digital automática de documentos PDF. El sistema implementa un layout inteligente de 2 columnas que permite múltiples firmas visuales sin superposición, con estampado opcional de número de documento y nomenclatura inteligente de archivos.
 
 ## Características Principales
@@ -91,7 +100,7 @@ Página PDF (612x792 puntos)
 API_KEY=your-api-key-here
 
 # Configuración de archivos
-MAX_PDF_SIZE_MB=10
+MAX_SIGNABLE_PDF_SIZE_MB=64
 REQUEST_TIMEOUT=30
 ```
 

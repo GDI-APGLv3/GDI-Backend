@@ -1,13 +1,17 @@
-"""
-Utilidades compartidas para queries SQL.
-Funciones reutilizables por notas, memos, ccoo y otros modulos.
-"""
+
+from datetime import date, datetime
+
+
+def _parse_date(value) -> date | None:
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
 
 
 def escape_like(value: str) -> str:
-    """
-    Escapa caracteres especiales de ILIKE (%, _) para evitar wildcards inesperados.
-    """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -17,20 +21,6 @@ def build_date_filter(
     date_to: str | None = None,
     start: int = 1,
 ) -> tuple:
-    """
-    Construye clausula SQL de filtro de fecha.
-
-    Args:
-        date_filter: Filtro predefinido ('hoy', 'ayer', 'ultimos_7_dias', 'ultimos_30_dias').
-        date_from: Fecha desde (YYYY-MM-DD).
-        date_to: Fecha hasta (YYYY-MM-DD).
-        start: Número de parámetro $N a partir del cual numerar los placeholders
-               (solo aplica a date_from/date_to). Default=1 para compatibilidad psycopg2.
-               Pasar el índice del primer parámetro libre de la query padre.
-
-    Returns:
-        (clause: str con AND prefix o vacío, params: list)
-    """
     if date_filter:
         mapping = {
             "hoy": "AND DATE(od.signed_at) = CURRENT_DATE",
@@ -44,12 +34,14 @@ def build_date_filter(
     clauses = []
     params = []
     idx = start
-    if date_from:
+    date_from_parsed = _parse_date(date_from) if date_from else None
+    date_to_parsed = _parse_date(date_to) if date_to else None
+    if date_from_parsed:
         clauses.append(f"AND od.signed_at >= ${idx}")
-        params.append(date_from)
+        params.append(date_from_parsed)
         idx += 1
-    if date_to:
+    if date_to_parsed:
         clauses.append(f"AND od.signed_at < ${idx}::date + INTERVAL '1 day'")
-        params.append(date_to)
+        params.append(date_to_parsed)
 
     return " ".join(clauses), params

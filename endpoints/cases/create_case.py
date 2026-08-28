@@ -1,13 +1,11 @@
-"""Endpoint para crear nuevos expedientes"""
 
 from shared.logging import get_logger
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from auth import get_current_user
 from services.case_service import CaseService
 from services.cases.creation import create_case_with_cover_service
-from shared.validation import validate_uuid
 from shared.exceptions import (
     ValidationError,
     NotFoundError,
@@ -19,19 +17,15 @@ from shared.dependencies import get_tenant_schema
 from services.cache import get_cached
 from config.constants import (
     CASE_CREATED_SUCCESS_MESSAGE,
-    CASE_CREATION_ERROR,
     CASE_TEMPLATES_FOUND_MESSAGE,
-    CASE_TEMPLATES_ERROR,
     CACHE_TTL_TEMPLATES,
 )
 
 logger = get_logger(__name__)
 
-# Inicializar router
 router = APIRouter(tags=["expedientes"])
 
 class CaseTemplate(BaseModel):
-    """Modelo de plantilla de expediente"""
     id: str = Field(..., example="550e8400-e29b-41d4-a716-446655440000")
     name: str = Field(..., example="Expediente Administrativo")
     acronym: str = Field(..., example="EXP-ADM")
@@ -42,7 +36,6 @@ class CaseTemplate(BaseModel):
 
 
 class TemplatesData(BaseModel):
-    """Datos de respuesta de plantillas"""
     templates: List[CaseTemplate] = Field(..., example=[
         {
             "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -59,20 +52,27 @@ class TemplatesData(BaseModel):
 
 
 class TemplatesResponse(BaseModel):
-    """Respuesta para endpoint de plantillas"""
     success: bool = Field(..., example=True)
     data: TemplatesData
     message: str = Field(..., example="Se encontraron 2 plantillas")
 
 
 class CreateCaseRequest(BaseModel):
-    """Modelo para solicitud de creación de expediente"""
     case_template_id: str = Field(..., description="ID de la plantilla de expediente", example="eaeef535-0754-45d6-8b62-ee7803c62edf")
     reference: str = Field(..., min_length=5, max_length=250, description="Descripción/referencia del expediente", example="Referencia de Prueba")
     owner_sector_id: Optional[str] = Field(None, description="ID del sector propietario (opcional, usa sector del usuario por defecto)", example="")
+    initiator_citizen_id: Optional[str] = Field(
+        None,
+        description=(
+            "GDI-166: UUID del ciudadano INICIADOR (opcional). El expediente lo crea igual "
+            "el usuario interno -- su sector y su CAEX --; el ciudadano queda registrado como "
+            "iniciador y el expediente se le comparte automáticamente (lo ve en su TAD). "
+            "El ciudadano debe existir y no estar 'bloqueado'."
+        ),
+        example=None,
+    )
 
 class CreateCaseResponse(BaseModel):
-    """Modelo para respuesta de creación de expediente"""
     success: bool
     data: dict
     message: str
@@ -87,7 +87,6 @@ async def create_case(
     try:
         logger.info(f"Creating case - User: {current_user.user_id[:8]}, Template: {request.case_template_id[:8]}")
 
-        # Validar usuario autenticado
         db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
         result = await create_case_with_cover_service(
@@ -95,6 +94,7 @@ async def create_case(
             reference=request.reference,
             user_id=db_user_id,
             owner_sector_id=request.owner_sector_id,
+            initiator_citizen_id=request.initiator_citizen_id,
             schema_name=schema_name
         )
         
@@ -125,7 +125,6 @@ async def get_case_templates(
     try:
         logger.info(f"Fetching case templates for user: {current_user.user_id[:8]}")
 
-        # Validar usuario autenticado
         db_user_id = await get_authenticated_user(current_user.user_id, schema_name=schema_name)
 
         templates = await get_cached(

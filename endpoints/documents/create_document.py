@@ -1,11 +1,3 @@
-"""
-Endpoint para crear un nuevo documento en estado borrador (draft).
-Optimizado siguiendo principios de Clean Code.
-
-Para tipo NOTA:
-- Requiere campo 'recipients' con al menos un destinatario TO
-- El sender_sector_id se obtiene del sector primario del usuario
-"""
 from shared.logging import get_logger
 from fastapi import APIRouter, Depends
 from models.documents.creation import CreateDocumentRequest, CreateDocumentResponse
@@ -16,18 +8,15 @@ from models.tags import Tags
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
 
-# === CONFIGURACIÓN ===
 logger = get_logger("create_document")
 
 router = APIRouter(tags=[Tags.DOCUMENTOS])
 
 
 def _get_primary_sector_id(current_user: AuthenticatedUser) -> str | None:
-    """Obtiene el sector primario del usuario."""
     for perm in current_user.permissions:
         if perm.is_primary:
             return perm.sector_id
-    # Fallback: primer sector con can_edit
     for perm in current_user.permissions:
         if perm.can_edit:
             return perm.sector_id
@@ -104,12 +93,10 @@ async def create_document(
     try:
         logger.info(f"Usuario {current_user.user_id} creando documento tipo '{request.document_type_acronym}' en schema '{schema_name}'")
 
-        # Preparar parámetros para NOTA
         recipients = None
         sender_sector_id = None
 
         if request.recipients is not None:
-            # Es una NOTA con recipients
             recipients = request.recipients.model_dump()
             sender_sector_id = _get_primary_sector_id(current_user)
             if not sender_sector_id:

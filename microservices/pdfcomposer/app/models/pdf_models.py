@@ -1,13 +1,7 @@
-"""
-Modelos de datos Pydantic para la validación de solicitudes en la API de PDF Composer.
-"""
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
 class PDFRequest(BaseModel):
-    """
-    Modelo para validar los datos de entrada para la generación de un PDF.
-    """
     urlLogo: Optional[str] = Field(None, description="URL pública de la imagen del logo.")
     NameAcronyType: str = Field(..., description="Acrónimo del nombre del tipo (ej. 'GDI', 'ACME').")
     TypeDocument: str = Field(..., description="Tipo de documento (ej. 'INFORME DE PRUEBA').")
@@ -16,9 +10,6 @@ class PDFRequest(BaseModel):
     Text: Dict[str, Any] = Field(..., description="Contenido principal del documento en formato JSON.")
 
 class CaseRequest(BaseModel):
-    """
-    Modelo para validar los datos de entrada para la generación de una carátula de caso.
-    """
     urlLogo: Optional[str] = Field(None, description="URL pública de la imagen del logo.")
     NameAcronyType: str = Field(..., description="Acrónimo del nombre del tipo (ej. 'GDI', 'ACME').")
     document_type: str = Field(..., description="Tipo de documento para la carátula.")
@@ -32,9 +23,6 @@ class CaseRequest(BaseModel):
     creator: str = Field(..., description="Nombre del caratulador.")
 
 class MoveRequest(BaseModel):
-    """
-    Modelo para validar los datos de entrada para la generación de un movimiento.
-    """
     urlLogo: Optional[str] = Field(None, description="URL pública de la imagen del logo.")
     NameAcronyType: str = Field(..., description="Acrónimo del nombre del tipo (ej. 'GDI', 'ACME').")
     document_type: str = Field(..., description="Tipo de documento.")
@@ -46,9 +34,6 @@ class MoveRequest(BaseModel):
     motivo: str = Field(..., description="Motivo del movimiento.")
 
 class ImportRequest(BaseModel):
-    """
-    Modelo para validar los datos de entrada para la generación de un documento importado.
-    """
     urlLogo: Optional[str] = Field(None, description="URL pública de la imagen del logo.")
     NameAcronyType: str = Field(..., description="Acrónimo del nombre del tipo (ej. 'GDI', 'ACME').")
     document_type: str = Field(..., description="Tipo de documento.")
@@ -57,9 +42,6 @@ class ImportRequest(BaseModel):
     cantidad_paginas: int = Field(..., description="Cantidad de páginas del PDF importado.")
 
 class NoteRequest(BaseModel):
-    """
-    Modelo para validar los datos de entrada para la generación de una nota.
-    """
     urlLogo: Optional[str] = Field(None, description="URL pública de la imagen del logo.")
     NameAcronyType: str = Field(..., description="Acrónimo del nombre del tipo (ej. 'GDI').")
     document_type: str = Field(..., description="Tipo de documento (ej. 'NOTA').")
@@ -70,9 +52,6 @@ class NoteRequest(BaseModel):
     Text: Dict[str, Any] = Field(..., description="Contenido HTML del documento.")
 
 class IFRLMRequest(BaseModel):
-    """
-    Modelo para validar los datos de entrada para la generación de un informe de legajo (IFRLM).
-    """
     urlLogo: Optional[str] = Field(None, description="URL publica del logo.")
     NameAcronyType: str = Field(..., description="Acronimo del tipo.")
     document_type: str = Field(..., description="Tipo de documento.")

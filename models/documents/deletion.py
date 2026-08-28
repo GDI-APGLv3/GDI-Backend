@@ -1,13 +1,9 @@
-"""
-Modelos relacionados con la eliminación de documentos.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any
 
 
 class DeleteDocumentResponse(BaseModel):
-    """Respuesta al endpoint de eliminación de documento"""
     success: bool = Field(..., description="Indica si la eliminación fue procesada exitosamente")
     message: str = Field(..., description="Mensaje descriptivo del resultado")
     document_id: str = Field(..., description="UUID del documento eliminado")

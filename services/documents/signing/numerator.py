@@ -1,52 +1,22 @@
-"""
-Servicios para la numeración de documentos.
-Maneja la lógica de negocio para numerar documentos y completar el proceso.
-"""
 
 from typing import Dict, Any
 from database import fetch_one, fetch_all, execute, transaction
 from shared.exceptions import (
     DocumentNotFoundError, ValidationError, DocumentStateError,
-    AuthorizationError
+    AuthorizationError, StaleReservationError, NotaryBreakerOpenError,
+    DocumentRejectedWhileInQueueError, SignerTurnPendingError,
 )
 from shared.validation import validate_document_id, validate_user_id
 from fastapi.concurrency import run_in_threadpool
 from shared.logging import get_logger
 
-# Import de función centralizada de numeración
-from shared.numbering import generate_official_number, reserve_number, confirm_number, cancel_number
+from shared.numbering import reserve_number, confirm_number, finalize_number, cancel_number
 from services.shared.signer_data import get_signer_data
+from services.documents.signing.lookup_guard import confirm_document_missing
 
 logger = get_logger(__name__)
 
 async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Firma un documento como numerador (proceso final).
-
-    MOMENTO 1 (lock corto ~5ms): validaciones + reservar número + INSERT en official_documents.
-    MOMENTO 2 (sin lock, retry inteligente): firmar con Notary + subir R2 + UPDATE BD.
-
-    Bugs corregidos en este refactor:
-    1. signed_at ahora se pone cuando la firma ocurre realmente (no antes en el INSERT).
-    2. signers[].signed_at ahora se llena con la fecha real de firma.
-    3. signers[].status ahora pasa de 'pending' a 'signed' correctamente.
-    4. El advisory lock dura ~5ms (antes duraba ~3.8s incluyendo Notary + R2).
-    5. Retry inteligente: si Notary firmó pero R2 falló, no re-firma, solo reintenta R2.
-
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del numerador
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con el resultado de la operación
-
-    Raises:
-        DocumentNotFoundError: Si el documento no existe o numerador inválido
-        ValidationError: Si las validaciones fallan
-        DocumentStateError: Si el documento no está en estado correcto
-    """
-    # Validaciones básicas de formato
     doc_error = await validate_document_id(document_id, schema_name=schema_name)
     if doc_error:
         raise ValidationError(doc_error)
@@ -59,9 +29,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     logger.info(f"Document ID: {document_id[:8]}...")
     logger.info(f"User ID: {user_id[:8]}...")
 
-    # ================================================================
-    # MOMENTO 1: VALIDACIONES + RESERVAR NÚMERO
-    # ================================================================
 
     logger.info("MOMENTO 1: Validaciones y reserva de número...")
 
@@ -72,10 +39,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     signer_sector_ids = None
     current_year = None
 
-    # ============================================================
-    # FUSIÓN 1 (P1+P2+P6+P7): rol/estado + firmantes pendientes +
-    #   JSON de firmantes + array sector_ids — 1 sola query
-    # ============================================================
     logger.info("PASO 1/2 (M1): Validando numerador y estado del documento...")
 
     doc_info = await fetch_one(
@@ -129,10 +92,12 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     )
 
     if not doc_info:
-        logger.error("Documento no encontrado o numerador inválido")
+        logger.warning("Documento no encontrado o numerador inválido — confirmando")
+        await confirm_document_missing(
+            document_id, schema_name=schema_name, context="numerator.doc_info"
+        )
         raise DocumentNotFoundError("Documento no encontrado o numerador inválido")
 
-    # --- Guard clauses en el mismo orden que antes ---
     if not doc_info['is_numerator']:
         logger.error("Usuario no es numerador del documento")
         raise ValidationError("Usuario no es numerador del documento")
@@ -150,18 +115,11 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         )
 
     if doc_info['pending_count'] > 0:
-        logger.error(f"Hay {doc_info['pending_count']} firmantes pendientes")
-        raise ValidationError("Aún hay firmantes pendientes. El numerador debe firmar al final.")
+        logger.info(f"Firma fuera de turno: hay {doc_info['pending_count']} firmante(s) pendiente(s)")
+        raise SignerTurnPendingError(int(doc_info['pending_count']))
 
     logger.info("Validaciones OK")
 
-    # ============================================================
-    # QUERY 2a (M1): datos del documento
-    #   reference, content, document_type_id, acronym, source_type,
-    #   special_numbering, resume — todo de document_draft + document_types.
-    #   Separada de los permisos para que el validador único sea
-    #   reutilizable sin necesidad de un draft.
-    # ============================================================
     logger.info("PASO 2/2 (M1): Recopilando datos del documento...")
 
     doc_data_row = await fetch_one(
@@ -183,6 +141,9 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     )
 
     if not doc_data_row:
+        await confirm_document_missing(
+            document_id, schema_name=schema_name, context="numerator.doc_data"
+        )
         raise DocumentNotFoundError(f"Documento {document_id} no encontrado al leer datos del draft")
 
     document_type_acronym = doc_data_row['document_type_acronym'] or "DOC"
@@ -196,11 +157,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         'resume':           doc_data_row['resume'],
     }
 
-    # ============================================================
-    # QUERY 2b (M1): validador único de permisos de numeración
-    #   Usa numbering_permissions.can_user_number_document_type —
-    #   fuente única de verdad para TODOS los paths de numeración.
-    # ============================================================
     logger.info("PASO 1b (M1): Validando permisos de titular de repartición y sector...")
 
     from services.documents.signing.numbering_permissions import (
@@ -221,7 +177,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
     logger.info(f"Permisos OK")
 
-    # Datos de firmantes ya disponibles desde Fusión 1
     signers_data = doc_info['signers_json'] if doc_info['signers_json'] else []
     signer_sector_ids = doc_info['signer_sector_ids'] if doc_info else None
 
@@ -230,15 +185,36 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
     logger.info("Datos recopilados")
 
-    # ================================================================
-    # RESERVAR NÚMERO OFICIAL
-    # ================================================================
     logger.info("Reservando número oficial...")
 
     official_number = None
     department_id = None
 
-    official_number, department_id, sequence = await reserve_number(
+    field_defs_row = await fetch_one(
+        "SELECT field_definitions FROM document_type_fields WHERE document_type_id = $1",
+        doc_data['document_type_id'],
+        schema_name=schema_name,
+    )
+    if field_defs_row is not None and field_defs_row['field_definitions']:
+        field_defs = field_defs_row['field_definitions']
+        logger.info("Formulario controlado detectado — armando snapshot...")
+
+        from services.documents.ffcc_validator import validate_ffcc_content
+        validate_ffcc_content(
+            doc_data['content'] if isinstance(doc_data['content'], dict) else {},
+            field_defs,
+            schema_name=schema_name,
+            enforce_required=True,
+        )
+        logger.info("Validacion FFCC OK (enforce_required=True)")
+
+        doc_data['content'] = {
+            "schema": field_defs,
+            "data": doc_data['content'] if isinstance(doc_data['content'], dict) else {},
+        }
+        logger.info(f"Snapshot FFCC armado: {len(field_defs)} campos en schema")
+
+    official_number, department_id, sequence, reservation_id = await reserve_number(
         document_type_acronym=document_type_acronym,
         user_id=user_id,
         year=current_year,
@@ -251,9 +227,8 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         signers=signers_data,
         signer_sector_ids=signer_sector_ids,
     )
-    logger.info(f"Número reservado: {official_number} (seq={sequence})")
+    logger.info(f"Número reservado: {official_number} (seq={sequence}) ticket={reservation_id[:8]}...")
 
-    # Limpiar resume del draft (ya está copiado a official_documents por reserve_number)
     if doc_data.get('resume'):
         await execute(
             "UPDATE document_draft SET resume = NULL WHERE id = $1",
@@ -262,9 +237,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
         )
         logger.info("Resume copiado a official y limpiado del draft")
 
-    # ================================================================
-    # MOMENTO 2: FIRMAR + CONFIRMAR (sin lock, retry inteligente)
-    # ================================================================
     logger.info("MOMENTO 2: Firmando con Notary y confirmando en BD...")
 
     from services.storage.cloudflare import get_tenant_r2_client
@@ -273,14 +245,13 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
     r2_client = await get_tenant_r2_client(schema_name=schema_name)
     filename = document_id.replace('-', '') + '.pdf'
 
-    signed_pdf_bytes = None  # Cache para retry inteligente
+
+    signed_pdf_bytes = None
+    is_confirming = False
     last_error = None
 
     for attempt in range(2):
         try:
-            # ----------------------------------------------------------
-            # 2a. Descargar PDF de R2 tosign + firmar con Notary
-            # ----------------------------------------------------------
             if signed_pdf_bytes is None:
                 logger.info(f"Intento {attempt + 1}/2 - Descargando PDF de R2 tosign...")
 
@@ -295,7 +266,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
                 logger.info(f"PDF descargado: {len(pdf_bytes)} bytes ({len(pdf_bytes)/1024:.2f} KB)")
 
-                # 2b. Obtener datos del firmante numerador
                 logger.info("Obteniendo datos del numerador...")
                 try:
                     signer_data = await get_signer_data(user_id, schema_name=schema_name)
@@ -309,7 +279,6 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
                 logger.info(f"Firmante: {signer_name} | Depto: {signer_department} | Municipio: {signer_municipality}")
 
-                # 2c. Firmar con Notary
                 logger.info("Firmando con Notary...")
                 from services.shared.notary_api import call_notary_sign_pdf
                 from services.shared.settings_utils import get_city_from_settings
@@ -317,10 +286,10 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                 city = await get_city_from_settings(schema_name=schema_name)
                 logger.info(f"City desde settings: {city}")
 
-                # Documentos importados: firma en página final
                 stamp_position = "last" if source_type == 'Importado' else ""
                 if stamp_position:
                     logger.info(f"Documento importado detectado - stamp_position={stamp_position}")
+
 
                 signed_pdf_bytes = await call_notary_sign_pdf(
                     pdf_bytes=pdf_bytes,
@@ -332,32 +301,62 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                     city=city,
                     stamp_position=stamp_position,
                     tenant_id=schema_name,
-                    schema_name=schema_name
+                    schema_name=schema_name,
+                    defer_timestamp=True,
                 )
 
                 logger.info(f"PDF firmado: {len(signed_pdf_bytes)} bytes ({len(signed_pdf_bytes)/1024:.2f} KB)")
 
-            # ----------------------------------------------------------
-            # 2d. Subir PDF firmado a R2 oficial
-            # ----------------------------------------------------------
+            if not is_confirming:
+                logger.info(f"Intento {attempt + 1}/2 - CAS RESERVED→CONFIRMING...")
+                await confirm_number(document_id, reservation_id, schema_name=schema_name)
+                is_confirming = True
+                logger.info("CAS OK: reserva en CONFIRMING")
+
             logger.info(f"Intento {attempt + 1}/2 - Subiendo PDF a R2 oficial...")
 
+            from services.storage.pdf_location import (
+                target_pdf_location, persist_pdf_location, effective_pdf_location,
+            )
+            _target_loc = target_pdf_location()
             oficial_filename = f"{official_number}.pdf"
-            await run_in_threadpool(r2_client.upload_oficial, signed_pdf_bytes, oficial_filename)
+            _upload_res = await run_in_threadpool(
+                r2_client.upload_oficial, signed_pdf_bytes, oficial_filename, _target_loc
+            )
+            _effective_loc = effective_pdf_location(_upload_res, _target_loc)
+            await persist_pdf_location(document_id, _effective_loc, schema_name=schema_name)
 
-            logger.info(f"PDF publicado en R2 oficial: {oficial_filename}")
+            logger.info(f"PDF publicado en R2 {_effective_loc}: {oficial_filename}")
 
-            # Confirmar reserva en BD (reservation_status RESERVED -> CONFIRMED)
-            await confirm_number(document_id, schema_name=schema_name)
-            logger.info("Reserva confirmada en official_documents")
+            await finalize_number(document_id, reservation_id, schema_name=schema_name)
+            logger.info("Reserva CONFIRMED en official_documents")
 
-            # ----------------------------------------------------------
-            # 2e. Confirmar en BD: UPDATEs ATÓMICOS
-            # Los 4 UPDATEs de estado del documento van en UNA sola
-            # transacción para evitar estados inconsistentes (ej: signed_at
-            # seteado pero document_draft sin actualizar) si el worker crashea
-            # entre statements. No hay I/O externo aquí (R2/Notary ya completaron).
-            # ----------------------------------------------------------
+            import asyncio as _asyncio
+            from services.storage.publish_public import maybe_publish_official_pdf
+            from config.constants import PUBLISH_PUBLIC_MAX_RETRIES
+
+            for _attempt in range(1, PUBLISH_PUBLIC_MAX_RETRIES + 1):
+                _published = await maybe_publish_official_pdf(
+                    schema_name=schema_name,
+                    official_number=official_number,
+                    document_id=document_id,
+                    signed_pdf_bytes=signed_pdf_bytes,
+                )
+                if _published:
+                    break
+                logger.warning(
+                    f"numerator.publish_public_retry num={official_number} "
+                    f"attempt={_attempt}/{PUBLISH_PUBLIC_MAX_RETRIES}"
+                )
+                if _attempt < PUBLISH_PUBLIC_MAX_RETRIES:
+                    await _asyncio.sleep(1.0)
+            else:
+                logger.error(
+                    f"publish_public_failed document_id={document_id} "
+                    f"schema={schema_name} num={official_number} "
+                    f"attempts={PUBLISH_PUBLIC_MAX_RETRIES}"
+                )
+
             logger.info("Confirmando firma en BD (UPDATE atómico)...")
 
             async with transaction(
@@ -403,7 +402,7 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                     user_id,
                 )
 
-                await conn.execute(
+                _draft_rows = await conn.fetch(
                     """
                     UPDATE document_draft
                     SET status = 'signed',
@@ -412,26 +411,35 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
                         numbered_by = $2,
                         last_modified_at = CURRENT_TIMESTAMP
                     WHERE id = $3
+                      AND status = 'sent_to_sign'
+                    RETURNING id
                     """,
                     official_number,
                     user_id,
                     document_id,
                 )
+                if not _draft_rows:
+                    raise DocumentRejectedWhileInQueueError(document_id)
 
             logger.info("BD actualizada - firma confirmada (transacción atómica)")
 
-            # ----------------------------------------------------------
-            # 2f. Eliminar PDF de R2 tosign (soft-fail)
-            # ----------------------------------------------------------
             try:
                 await run_in_threadpool(r2_client.delete_tosign, filename)
                 logger.info("PDF eliminado de R2 tosign")
             except Exception as e:
                 logger.warning(f"No se pudo eliminar PDF de R2 tosign: {e} (soft-fail)")
 
+            try:
+                from services.documents.lifecycle.images import purge_document_images
+                await purge_document_images(document_id, schema_name=schema_name)
+            except Exception as e:
+                logger.warning(f"No se pudieron purgar imagenes de documento (soft-fail): {e}")
+
+            from services.documents.lifecycle.embedded_files import promote_embedded_files_to_official
+            await promote_embedded_files_to_official(document_id, document_id, schema_name=schema_name)
+
             logger.info(f"Documento firmado y numerado exitosamente: {official_number}")
 
-            # Audit log - firma electrónica numerador exitosa
             try:
                 from services.documents.signing.audit_logger import log_signature_event
                 await log_signature_event(
@@ -446,14 +454,79 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
             except Exception as _audit_err:
                 logger.warning(f"audit_log fallo (soft-fail): {_audit_err}")
 
+            auto_link_results: list = []
+            try:
+                from services.shared.auto_link_trigger import collect_auto_link_results
+                auto_link_results = await collect_auto_link_results(
+                    document_id, schema_name=schema_name
+                )
+            except Exception as _al_err:
+                logger.warning(f"collect_auto_link_results soft-fail (no bloquea firma): {_al_err}")
+
+
             return {
                 "success": True,
                 "message": "Documento firmado y numerado exitosamente por el numerador",
                 "document_id": document_id,
                 "numerator_id": user_id,
                 "official_number": official_number,
-                "document_status": "signed"
+                "document_status": "signed",
+                "auto_link_results": auto_link_results,
             }
+
+        except StaleReservationError as e:
+            logger.error(
+                f"FIRMA ABORTADA por reserva vencida: doc={document_id[:8]}... "
+                f"ticket={reservation_id[:8]}... error={e}"
+            )
+            raise ValidationError(
+                "Tu reserva de número expiró mientras se procesaba la firma. "
+                "Por favor, volvé a intentar la firma desde el documento."
+            )
+
+        except NotaryBreakerOpenError:
+            logger.critical(
+                f"NOTARY BREAKER OPEN: doc={document_id[:8]}... "
+                f"num={official_number} is_confirming={is_confirming} "
+                "— propagando NotaryBreakerOpenError sin reintentar"
+            )
+            if not is_confirming:
+                try:
+                    await cancel_number(
+                        document_id,
+                        schema_name=schema_name,
+                        reason="breaker_open_before_cas",
+                    )
+                    logger.info(f"Número {official_number} cancelado (breaker_open_path)")
+                except Exception as cancel_err:
+                    logger.error(f"cancel_number soft-fail (breaker_open): {cancel_err}")
+            raise
+
+        except DocumentRejectedWhileInQueueError:
+            logger.critical(
+                f"numerator.confirmed_and_rejected: doc={document_id[:8]}... "
+                f"num={official_number} schema={schema_name} — "
+                "draft rechazado tras CONFIRMED; PDF preservado, número NO cancelado. "
+                "Requiere revisión manual."
+            )
+            try:
+                from shared.alerts import send_alert_mail
+                await send_alert_mail(
+                    subject=f"[GDI Numerador] Conflicto CONFIRMED+rechazado — {official_number}",
+                    body=(
+                        f"doc={document_id}\nnum={official_number}\nschema={schema_name}\n\n"
+                        f"El documento fue numerado (CONFIRMED, PDF en oficial/) "
+                        f"pero también fue rechazado durante la ventana de firma síncrona. "
+                        f"El número NO fue cancelado y el PDF NO fue borrado. "
+                        f"Requiere revisión y resolución manual."
+                    ),
+                )
+            except Exception as _ae:
+                logger.error(f"numerator.confirmed_and_rejected.alert_err: {_ae}")
+            raise ValidationError(
+                "El documento fue rechazado mientras se procesaba la numeración. "
+                "El número ya fue emitido. Contacte a soporte para resolución manual."
+            )
 
         except Exception as e:
             last_error = e
@@ -462,32 +535,36 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
             if attempt == 0:
                 if signed_pdf_bytes is None:
                     logger.info("Notary falló - próximo intento reintentará desde descarga de PDF")
+                elif is_confirming:
+                    logger.info("R2/finalize falló en estado CONFIRMING - próximo intento reintenta upload/finalize")
                 else:
-                    logger.info("R2 falló después de firma exitosa - próximo intento solo reintentará R2")
+                    logger.info("Falló antes del CAS - próximo intento reintenta desde Notary")
                 continue
 
-    # ================================================================
-    # AMBOS INTENTOS FALLARON
-    # ================================================================
     logger.critical(
         f"FIRMA FALLIDA 2 VECES: doc={document_id}, num={official_number}, "
         f"schema={schema_name}, error={last_error}"
     )
-    logger.critical(
-        f"official_documents queda con signed_at=NULL para doc={document_id}. "
-        f"El número {official_number} será cancelado y quedará reciclable."
-    )
 
-    try:
-        await cancel_number(
-            document_id,
-            schema_name=schema_name,
-            reason=f"firma_fallida_2_intentos: {str(last_error)[:400]}",
+    if is_confirming:
+        logger.critical(
+            f"El número {official_number} queda en estado CONFIRMING para doc={document_id}. "
+            f"El sweeper lo resolverá al expirar la sesión."
         )
-    except Exception as cancel_err:
-        logger.error(f"cancel_number fallo (soft-fail): {cancel_err}")
+    else:
+        logger.critical(
+            f"official_documents queda con signed_at=NULL para doc={document_id}. "
+            f"El número {official_number} será cancelado y quedará reciclable."
+        )
+        try:
+            await cancel_number(
+                document_id,
+                schema_name=schema_name,
+                reason=f"firma_fallida_2_intentos: {str(last_error)[:400]}",
+            )
+        except Exception as cancel_err:
+            logger.error(f"cancel_number fallo (soft-fail): {cancel_err}")
 
-    # Audit log - firma electrónica numerador fallida
     try:
         from services.documents.signing.audit_logger import log_signature_event
         await log_signature_event(
@@ -506,23 +583,10 @@ async def sign_document_as_numerator(document_id: str, user_id: str, *, schema_n
 
 
 async def get_numerator_documents(numerator_user_id: str, status_filter: str = None, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtiene documentos asignados a un numerador.
-
-    Args:
-        numerator_user_id: UUID del numerador
-        status_filter: Filtro por estado (opcional)
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con documentos del numerador
-    """
-    # Validar usuario
     user_error = await validate_user_id(numerator_user_id, schema_name=schema_name)
     if user_error:
         raise ValidationError(user_error)
 
-    # Construir query con filtros
     where_conditions = ["ds.user_id = $1 AND ds.is_numerator = true"]
     params: list = [numerator_user_id]
 
@@ -554,17 +618,14 @@ async def get_numerator_documents(numerator_user_id: str, status_filter: str = N
 
     documents_data = await fetch_all(query, *params, schema_name=schema_name)
 
-    # Procesar documentos
     documents = []
     for doc in (documents_data or []):
-        # Determinar si puede ser numerado
         can_numerate = (
             doc['status'] in ['signed', 'pending_numeration'] and
             doc['completed_signatures'] >= doc['required_signatures'] and
             not doc['official_number']
         )
 
-        # Determinar si puede firmar como numerador
         can_sign_as_numerator = (
             doc['status'] == 'pending_numeration' and
             doc['official_number'] and

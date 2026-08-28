@@ -1,14 +1,9 @@
-"""
-PDF Composer API - Servicio de generacion de PDF con FastAPI
-
-Este modulo implementa una API REST para generar documentos PDF a partir de plantillas HTML,
-utilizando WeasyPrint como motor de renderizado.
-"""
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, Response, Form, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 from typing import Optional
+import asyncio
 import os
 import hmac
 import hashlib
@@ -20,7 +15,7 @@ from pydantic import ValidationError
 import logging
 from logtail import LogtailHandler
 import io
-import fitz  # PyMuPDF
+import fitz
 import pdfplumber
 
 from app.services.pdf_service import (
@@ -33,66 +28,136 @@ from app.services.pdf_service import (
     generate_note_preview_pdf,
     generate_ifrlm_pdf,
     merge_pdfs,
+    embed_files_in_pdf,
     get_logo_cache_stats,
 )
 from app.models.pdf_models import PDFRequest, CaseRequest, MoveRequest, ImportRequest, NoteRequest, IFRLMRequest
 from app.config import API_KEY, DEFAULT_TIMEOUT, ENV
+from app.version import VERSION, GIT_SHA
+from error_alerts import report_error
 
-# Cargar variables de entorno
 load_dotenv()
 
-# Logger del modulo
 logger = logging.getLogger(__name__)
 
-# Configurar Better Stack logging
 if os.getenv("BETTERSTACK_SOURCE_TOKEN"):
     handler = LogtailHandler(source_token=os.getenv("BETTERSTACK_SOURCE_TOKEN"))
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(handler)
 
-# Configuracion de la API
 API_KEY_NAME = "X-API-Key"
 
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-# Deshabilitar documentacion en produccion
 _docs_url = "/docs" if ENV != "production" else None
 _redoc_url = "/redoc" if ENV != "production" else None
 _openapi_url = "/openapi.json" if ENV != "production" else None
 
-# Inicializacion de la aplicacion FastAPI con documentacion
+
+_PDF_MAX_CONCURRENCY = int(os.getenv("PDF_MAX_CONCURRENCY", "2"))
+_pdf_semaphore = asyncio.Semaphore(_PDF_MAX_CONCURRENCY)
+
+_PDF_MAX_QUEUE = int(os.getenv("PDF_MAX_QUEUE", "30"))
+_pdf_in_flight = 0
+
+
+async def _run_pdf(func, *args, **kwargs):
+    global _pdf_in_flight
+    if _pdf_in_flight >= _PDF_MAX_QUEUE:
+        raise HTTPException(
+            status_code=503,
+            detail="Servicio de generacion de PDF saturado, reintente en unos segundos",
+        )
+    _pdf_in_flight += 1
+    try:
+        async with _pdf_semaphore:
+            return await asyncio.to_thread(func, *args, **kwargs)
+    finally:
+        _pdf_in_flight -= 1
+
+
 app = FastAPI(
     title="PDF Composer API",
     description="API para generar documentos PDF utilizando WeasyPrint.",
-    version="3.0.0",
+    version=VERSION,
     docs_url=_docs_url,
     redoc_url=_redoc_url,
     openapi_url=_openapi_url,
 )
 
-
 @app.exception_handler(TimeoutError)
 async def timeout_error_handler(request: Request, exc: TimeoutError):
-    """
-    S6-003: Handler global para TimeoutError lanzado por generate_pdf_from_html.
-    Retorna HTTP 504 Gateway Timeout en lugar de 500, para que el Backend
-    pueda distinguir entre un error de generacion y un timeout de WeasyPrint.
-    """
     logger.error(f"[S6-003] TimeoutError en {request.url.path}: {exc}")
+    report_error(request, exc, kind="TIMEOUT")
     return JSONResponse(
         status_code=504,
         content={"detail": "La generacion del PDF excedio el tiempo limite. Intente con un documento mas corto."},
     )
 
 
+@app.exception_handler(Exception)
+async def _global_error_handler(request, exc):
+    if isinstance(exc, HTTPException):
+        raise exc
+    logger.error("[UNHANDLED] %s en %s %s: %s", type(exc).__name__, request.method, request.url.path, exc, exc_info=True)
+    report_error(request, exc, kind="UNHANDLED")
+    return JSONResponse(status_code=500, content={"detail": "Error interno del servidor"})
+
+
 async def verify_api_key(api_key: Optional[str] = Header(None, alias=API_KEY_NAME)):
-    """
-    Middleware para verificar la API Key en las solicitudes.
-    """
     if api_key is None or not hmac.compare_digest(api_key, API_KEY):
         raise HTTPException(status_code=403, detail="API Key invalida o no proporcionada")
     return api_key
+
+
+if os.getenv("ENABLE_DEBUG_BOOM") == "1":
+    @app.get("/_debug/boom", include_in_schema=False)
+    async def _debug_boom(api_key: str = Depends(verify_api_key)):
+        raise RuntimeError("Error de prueba (DIY error-mail): validacion del pipeline de alertas")
+
+
+MAX_EMBEDDED_FILE_SIZE = 50 * 1024 * 1024
+MAX_TOTAL_EMBEDDED_SIZE = 60 * 1024 * 1024
+
+EMBEDDED_FILE_ALLOWED_EXTENSIONS = {
+    "pdf", "xls", "xlsx", "doc", "docx", "odt", "ods",
+    "csv", "txt", "png", "jpg", "jpeg", "dxf",
+}
+
+
+def _looks_like_allowed_embedded_file(filename: Optional[str], content: bytes) -> bool:
+    if not filename or not content:
+        return False
+
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in EMBEDDED_FILE_ALLOWED_EXTENSIONS:
+        return False
+
+    if ext == "pdf":
+        return content.startswith(b"%PDF")
+    if ext == "png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext in ("jpg", "jpeg"):
+        return content.startswith(b"\xff\xd8\xff")
+    if ext in ("xlsx", "docx", "odt", "ods"):
+        return content.startswith(b"PK\x03\x04")
+    if ext in ("xls", "doc"):
+        return content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    if ext == "dxf":
+        head_text = content[:256].decode("utf-8-sig", errors="ignore")
+        return "SECTION" in head_text or content[:2] == b"AC"
+    if ext in ("csv", "txt"):
+        try:
+            content.decode("utf-8")
+            return True
+        except UnicodeDecodeError:
+            try:
+                content.decode("latin-1")
+                return True
+            except Exception:
+                return False
+    return False
 
 @app.get("/")
 async def root():
@@ -102,14 +167,14 @@ async def root():
     return {
         "message": "Bienvenido al servicio de generacion de PDF",
         "documentation": "/docs",
-        "version": "3.0.0"
+        "version": VERSION
     }
 
 
 @app.get("/health")
 async def health():
     """Health check basico. No requiere API Key."""
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": VERSION, "commit": GIT_SHA}
 
 
 @app.get("/health/details")
@@ -119,7 +184,7 @@ async def health_details(api_key: str = Depends(verify_api_key)):
     try:
         from weasyprint import HTML
         test_html = "<html><body><p>health-check</p></body></html>"
-        pdf_bytes = HTML(string=test_html).write_pdf()
+        pdf_bytes = await _run_pdf(HTML(string=test_html).write_pdf)
         engine_status = "ok" if pdf_bytes and len(pdf_bytes) > 0 else "error"
     except Exception as e:
         logger.error(f"WeasyPrint health check failed: {e}")
@@ -128,7 +193,8 @@ async def health_details(api_key: str = Depends(verify_api_key)):
     return {
         "status": overall,
         "service": "pdfcomposer",
-        "version": "3.0.0",
+        "version": VERSION,
+        "commit": GIT_SHA,
         "pdf_engine": "weasyprint",
         "engine_status": engine_status,
     }
@@ -170,10 +236,8 @@ async def preview_pdf(
         HTTPException: Error 422 si los datos son invalidos, 500 si la generacion falla.
     """
     try:
-        # Parsear Text de JSON string a dict
         text_dict = json.loads(Text)
 
-        # Validar los datos de entrada usando el modelo Pydantic
         pdf_request_data = PDFRequest(
             urlLogo=urlLogo,
             NameAcronyType=NameAcronyType,
@@ -183,23 +247,21 @@ async def preview_pdf(
             Text=text_dict
         )
 
-        # Generar el contenido del PDF
-        pdf_bytes = generate_preview_pdf(request_data=pdf_request_data)
+        pdf_bytes = await _run_pdf(generate_preview_pdf, request_data=pdf_request_data)
 
-        # Generar un nombre de archivo unico
         file_name = f"{uuid.uuid4()}.pdf"
 
-        # Configurar las cabeceras de la respuesta
         headers = {
             "Content-Disposition": f"attachment; filename={file_name}"
         }
 
-        # Devolver la respuesta con el PDF y las cabeceras
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers=headers
         )
+    except HTTPException:
+        raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
@@ -215,11 +277,12 @@ async def generate_pdf(
     frase_anual: Optional[str] = Form(None),
     Text: str = Form(..., json_schema_extra={"example": '{"html": "<p>Por medio de la presente, informamos que el proyecto ha sido aprobado.</p>"}'}),
     attachment_file: Optional[UploadFile] = File(None, description="PDF adjunto a anexar al final (opcional)"),
+    embedded_files: list[UploadFile] = File(default=[], description="Archivos a embeber dentro del PDF (GDI-063, opcional, varios)"),
     api_key: str = Depends(verify_api_key)
 ):
     """
     Genera un PDF a partir de los datos proporcionados utilizando la plantilla generate-pdf.html.
-    Opcionalmente anexa paginas de un PDF adjunto al final.
+    Opcionalmente anexa paginas de un PDF adjunto al final y/o embebe archivos dentro del PDF.
 
     Args:
         urlLogo (str, optional): URL del logo a incluir. Defaults to None.
@@ -228,20 +291,21 @@ async def generate_pdf(
         Reference (str): Referencia del documento.
         Text (str): Contenido principal del documento en formato JSON string.
         attachment_file (UploadFile, optional): PDF adjunto a anexar al final del documento.
+        embedded_files (list[UploadFile], optional): Archivos a embeber dentro del PDF
+            (GDI-063, PDF /EmbeddedFiles). Campo multipart repetido, SEPARADO de attachment_file.
         api_key (str): API Key para autenticacion.
 
     Returns:
         Response: Archivo PDF para descargar.
 
     Raises:
-        HTTPException: Error 400 si el adjunto no es PDF valido, 413 si excede 25MB,
-                       422 si los datos son invalidos, 500 si la generacion falla.
+        HTTPException: Error 400 si el adjunto/embebido no es valido, 413 si excede
+                       los limites de tamano, 422 si los datos son invalidos,
+                       500 si la generacion falla.
     """
     try:
-        # Parsear Text de JSON string a dict
         text_dict = json.loads(Text)
 
-        # Validar los datos de entrada usando el modelo Pydantic
         pdf_request_data = PDFRequest(
             urlLogo=urlLogo,
             NameAcronyType=NameAcronyType,
@@ -251,38 +315,64 @@ async def generate_pdf(
             Text=text_dict
         )
 
-        # Generar el contenido del PDF usando la plantilla generate-pdf.html
-        pdf_bytes = generate_general_pdf(request_data=pdf_request_data)
+        pdf_bytes = await _run_pdf(generate_general_pdf, request_data=pdf_request_data)
 
-        # Si hay archivo adjunto, anexar sus paginas al final
         if attachment_file:
             attachment_bytes = await attachment_file.read()
 
-            # Validar tamano (maximo 25 MB)
             if len(attachment_bytes) > MAX_FILE_SIZE:
                 raise HTTPException(status_code=413, detail="Archivo adjunto excede 25MB")
 
-            # Validar que sea PDF (magic bytes)
             if not attachment_bytes.startswith(b'%PDF'):
                 raise HTTPException(status_code=400, detail="El archivo adjunto debe ser un PDF valido")
 
-            # Concatenar PDFs
             try:
-                pdf_bytes = merge_pdfs(pdf_bytes, attachment_bytes)
+                pdf_bytes = await _run_pdf(merge_pdfs, pdf_bytes, attachment_bytes)
             except Exception as e:
                 logger.error(f"Error al procesar PDF adjunto: {e}")
                 raise HTTPException(status_code=400, detail="Error al procesar el PDF adjunto")
 
-        # Generar un nombre de archivo unico
+        if embedded_files:
+            total_size = 0
+            embedded_payload = []
+
+            for uploaded in embedded_files:
+                content = await uploaded.read()
+                total_size += len(content)
+
+                if len(content) > MAX_EMBEDDED_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Adjunto embebido '{uploaded.filename}' excede 50MB",
+                    )
+                if total_size > MAX_TOTAL_EMBEDDED_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="La suma de adjuntos embebidos excede 60MB",
+                    )
+                if not _looks_like_allowed_embedded_file(uploaded.filename, content):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Adjunto embebido '{uploaded.filename}' no supera la validacion de contenido",
+                    )
+
+                embedded_payload.append((uploaded.filename or "adjunto", content))
+
+            try:
+                pdf_bytes = await _run_pdf(embed_files_in_pdf, pdf_bytes, embedded_payload)
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error al embeber archivos en PDF: {e}")
+                raise HTTPException(status_code=400, detail="Error al embeber los archivos adjuntos")
+
         file_name = f"{uuid.uuid4()}.pdf"
 
-        # Configurar las cabeceras de la respuesta
         headers = {
             "Content-Disposition": f"attachment; filename={file_name}",
             "X-PDF-SHA256": hashlib.sha256(pdf_bytes).hexdigest(),
         }
 
-        # Devolver la respuesta con el PDF y las cabeceras
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -347,7 +437,7 @@ async def create_case(
             creator=creator
         )
 
-        pdf_bytes = generate_case_pdf(request_data=case_request_data)
+        pdf_bytes = await _run_pdf(generate_case_pdf, request_data=case_request_data)
 
         file_name = f"{uuid.uuid4()}.pdf"
 
@@ -361,6 +451,8 @@ async def create_case(
             media_type="application/pdf",
             headers=headers
         )
+    except HTTPException:
+        raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
@@ -410,7 +502,7 @@ async def move(
             motivo=motivo
         )
 
-        pdf_bytes = generate_move_pdf(request_data=move_request_data)
+        pdf_bytes = await _run_pdf(generate_move_pdf, request_data=move_request_data)
 
         file_name = f"{uuid.uuid4()}.pdf"
 
@@ -424,13 +516,14 @@ async def move(
             media_type="application/pdf",
             headers=headers
         )
+    except HTTPException:
+        raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
         logger.error(f"Error en move: {e}")
         raise HTTPException(status_code=500, detail="Error interno al procesar la solicitud")
 
-# Limite de tamano para PDFs importados (25 MB)
 MAX_FILE_SIZE = 25 * 1024 * 1024
 
 @app.post("/import/", summary="Importa PDF externo con pagina informativa")
@@ -462,7 +555,6 @@ async def import_document(
         HTTPException: Error 400 si no es PDF, 413 si excede 25 MB, 500 si falla.
     """
     try:
-        # 1. Leer y validar PDF original
         pdf_original = await pdf_file.read()
 
         if len(pdf_original) > MAX_FILE_SIZE:
@@ -471,11 +563,9 @@ async def import_document(
         if not pdf_original[:5].startswith(b'%PDF-'):
             raise HTTPException(status_code=400, detail="El archivo no es un PDF valido")
 
-        # 2. Contar paginas con pdfplumber
         with pdfplumber.open(io.BytesIO(pdf_original)) as pdf:
             cantidad_paginas = len(pdf.pages)
 
-        # 3. Generar pagina informativa
         import_request = ImportRequest(
             urlLogo=urlLogo,
             NameAcronyType=NameAcronyType,
@@ -484,20 +574,18 @@ async def import_document(
             frase_anual=frase_anual,
             cantidad_paginas=cantidad_paginas
         )
-        pdf_info = generate_import_pdf(import_request)
+        pdf_info = await _run_pdf(generate_import_pdf, import_request)
 
-        # 4. Combinar con PyMuPDF: original + pagina info al final
         doc_original = fitz.open(stream=pdf_original, filetype="pdf")
         doc_info = fitz.open(stream=pdf_info, filetype="pdf")
 
-        doc_original.insert_pdf(doc_info)  # Agrega al final
+        doc_original.insert_pdf(doc_info)
 
         pdf_compilado = doc_original.tobytes()
 
         doc_original.close()
         doc_info.close()
 
-        # 5. Retornar PDF compilado
         file_name = f"{uuid.uuid4()}.pdf"
 
         headers = {
@@ -547,7 +635,6 @@ async def note_preview(
         Response: Archivo PDF para descargar con marca de agua.
     """
     try:
-        # Parsear Text de JSON string a dict
         text_dict = json.loads(Text)
 
         note_request_data = NoteRequest(
@@ -561,7 +648,7 @@ async def note_preview(
             Text=text_dict
         )
 
-        pdf_bytes = generate_note_preview_pdf(request_data=note_request_data)
+        pdf_bytes = await _run_pdf(generate_note_preview_pdf, request_data=note_request_data)
 
         file_name = f"{uuid.uuid4()}.pdf"
 
@@ -574,6 +661,8 @@ async def note_preview(
             media_type="application/pdf",
             headers=headers
         )
+    except HTTPException:
+        raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
@@ -610,7 +699,6 @@ async def note(
         Response: Archivo PDF para descargar.
     """
     try:
-        # Parsear Text de JSON string a dict
         text_dict = json.loads(Text)
 
         note_request_data = NoteRequest(
@@ -624,7 +712,7 @@ async def note(
             Text=text_dict
         )
 
-        pdf_bytes = generate_note_pdf(request_data=note_request_data)
+        pdf_bytes = await _run_pdf(generate_note_pdf, request_data=note_request_data)
 
         file_name = f"{uuid.uuid4()}.pdf"
 
@@ -638,6 +726,8 @@ async def note(
             media_type="application/pdf",
             headers=headers
         )
+    except HTTPException:
+        raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
@@ -691,7 +781,7 @@ async def create_ifrlm(
             snapshot_html=snapshot_html
         )
 
-        pdf_bytes = generate_ifrlm_pdf(request_data=ifrlm_request_data)
+        pdf_bytes = await _run_pdf(generate_ifrlm_pdf, request_data=ifrlm_request_data)
 
         file_name = f"{uuid.uuid4()}.pdf"
 
@@ -705,6 +795,8 @@ async def create_ifrlm(
             media_type="application/pdf",
             headers=headers
         )
+    except HTTPException:
+        raise
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
@@ -713,8 +805,6 @@ async def create_ifrlm(
 
 
 if __name__ == "__main__":
-    # Este bloque solo se ejecuta en desarrollo local con `python main.py`
-    # En produccion, usar: gunicorn main:app -c gunicorn_conf.py
     port = int(os.getenv("PORT", 8002))
     print(f"[DEV] Iniciando servidor en http://localhost:{port}")
     print(f"[DOCS] Documentacion disponible en: http://localhost:{port}/docs")

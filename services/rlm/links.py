@@ -1,10 +1,7 @@
-"""
-Servicio para vinculación de documentos y expedientes con legajos.
-"""
 
 import asyncpg
 from shared.logging import get_logger
-from database import fetch_all, fetch_one, execute, transaction, check_document_exists, check_case_exists
+from database import fetch_all, fetch_one, execute, check_document_exists, check_case_exists
 from shared.exceptions import NotFoundError, AuthorizationError, ConflictError
 from services.rlm.queries import (
     get_record_detail_query,
@@ -24,10 +21,6 @@ from services.rlm.history import record_action
 logger = get_logger(__name__)
 
 
-# ============================================================================
-# DOCUMENTOS
-# ============================================================================
-
 async def get_linked_documents(
     record_id: str,
     user_id: str,
@@ -36,11 +29,9 @@ async def get_linked_documents(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
-    """Lista documentos vinculados a un legajo con paginacion."""
     from services.rlm.permissions import verify_record_view_permission
     await verify_record_view_permission(record_id, user_id, schema_name=schema_name)
 
-    # Count
     count_result = await fetch_one(
         get_record_documents_count_query(),
         record_id,
@@ -48,7 +39,6 @@ async def get_linked_documents(
     )
     total = count_result["total"] if count_result else 0
 
-    # List
     offset = (page - 1) * page_size
     results = await fetch_all(
         get_record_documents_query(),
@@ -68,6 +58,8 @@ async def get_linked_documents(
             "document_type": row.get("document_type"),
             "is_auto": row.get("document_type") == "IFRLM",
             "resume": row.get("resume", ""),
+            "is_reserved": bool(row.get("is_reserved", False)),
+            "is_public": row.get("document_type_visibility") == "publico",
         }
         for row in (results or [])
     ]
@@ -92,7 +84,6 @@ async def link_document(
     *,
     schema_name: str
 ) -> dict:
-    """Vincula un documento oficial a un legajo."""
     record = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -101,7 +92,6 @@ async def link_document(
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
-    # Validar que el documento existe
     if not await check_document_exists(document_id, schema_name=schema_name):
         raise NotFoundError(f"Documento con ID '{document_id}' no encontrado")
 
@@ -127,7 +117,6 @@ async def link_document(
         schema_name=schema_name,
     )
 
-    # Fetch document info for enriched history
     doc_info = await fetch_one(
         """SELECT COALESCE(od.official_number, '') as official_number,
                   COALESCE(od.reference, dd.reference, '') as reference,
@@ -160,7 +149,6 @@ async def link_document(
 
 
 async def unlink_document(record_id: str, link_id: str, user_id: str, *, schema_name: str) -> dict:
-    """Desvincula un documento de un legajo."""
     record = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -172,7 +160,6 @@ async def unlink_document(record_id: str, link_id: str, user_id: str, *, schema_
     if not await check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para desvincular documentos de este legajo")
 
-    # Fetch document info BEFORE deleting for history
     doc_info = await fetch_one(
         """SELECT rdl.document_id, COALESCE(od.official_number, '') as official_number,
                   COALESCE(od.reference, dd.reference, '') as reference
@@ -190,7 +177,6 @@ async def unlink_document(record_id: str, link_id: str, user_id: str, *, schema_
         schema_name=schema_name,
     )
 
-    # asyncpg execute() returns e.g. "DELETE 1" or "DELETE 0"
     rows_affected = int(status.split()[-1]) if status else 0
     if rows_affected == 0:
         raise NotFoundError(f"Vinculo de documento con ID '{link_id}' no encontrado en legajo '{record_id}'")
@@ -211,10 +197,6 @@ async def unlink_document(record_id: str, link_id: str, user_id: str, *, schema_
     return {"removed": True}
 
 
-# ============================================================================
-# EXPEDIENTES (CASES)
-# ============================================================================
-
 async def get_linked_cases(
     record_id: str,
     user_id: str,
@@ -223,11 +205,9 @@ async def get_linked_cases(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
-    """Lista expedientes vinculados a un legajo con paginacion."""
     from services.rlm.permissions import verify_record_view_permission
     await verify_record_view_permission(record_id, user_id, schema_name=schema_name)
 
-    # Count
     count_result = await fetch_one(
         get_record_cases_count_query(),
         record_id,
@@ -235,7 +215,6 @@ async def get_linked_cases(
     )
     total = count_result["total"] if count_result else 0
 
-    # List
     offset = (page - 1) * page_size
     results = await fetch_all(
         get_record_cases_query(),
@@ -275,7 +254,6 @@ async def link_case(
     *,
     schema_name: str
 ) -> dict:
-    """Vincula un expediente a un legajo."""
     record = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -284,7 +262,6 @@ async def link_case(
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
-    # Validar que el expediente existe
     if not await check_case_exists(case_id, schema_name=schema_name):
         raise NotFoundError(f"Expediente con ID '{case_id}' no encontrado")
 
@@ -310,7 +287,6 @@ async def link_case(
         schema_name=schema_name,
     )
 
-    # Fetch case info for enriched history
     case_info = await fetch_one(
         """SELECT case_number, reference, COALESCE(short_ai_summary, '') as short_ai_summary
            FROM cases WHERE id = $1""",
@@ -337,7 +313,6 @@ async def link_case(
 
 
 async def unlink_case(record_id: str, link_id: str, user_id: str, *, schema_name: str) -> dict:
-    """Desvincula un expediente de un legajo."""
     record = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -349,7 +324,6 @@ async def unlink_case(record_id: str, link_id: str, user_id: str, *, schema_name
     if not await check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para desvincular expedientes de este legajo")
 
-    # Fetch case info BEFORE deleting for history
     case_info = await fetch_one(
         """SELECT rcl.case_id, c.case_number, c.reference
            FROM record_case_links rcl

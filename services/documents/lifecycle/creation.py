@@ -1,31 +1,23 @@
-"""
-Servicios para la creacion de documentos.
-Maneja la logica de negocio para crear nuevos documentos.
-
-Ubicacion real: services/documents/lifecycle/creation.py
-MIGRADO: Fase 6 asyncpg
-"""
 
 from typing import Dict, Any, Optional
 import uuid
 from shared.logging import get_logger
 from database import get_conn
 from shared.exceptions import ValidationError, DatabaseError
-from shared.audit_context import set_audit_context
 from shared.validation import validate_document_type_acronym, validate_required_string, validate_uuid
 from ..core.queries import (
     get_document_type_query,
     insert_document_draft_query,
-    insert_document_signer_query
+    insert_document_signer_query,
+    insert_document_draft_citizen_query,
+    insert_document_signer_citizen_query,
 )
 from services.notes.validation import (
-    is_nota_document_type_by_acronym,
     validate_recipients_exist,
     validate_recipients_input
 )
 from services.notes.save_recipients import save_recipients
 from services.memos.validation import (
-    is_memo_document_type_by_acronym,
     validate_memo_recipients_exist,
     validate_memo_recipients_input
 )
@@ -34,8 +26,9 @@ from services.memos.save_recipients import save_memo_recipients
 logger = get_logger(__name__)
 
 
-def _validate_creation_inputs(document_type_acronym: str, reference: str, creator_id: str) -> None:
-    """Valida los inputs para creacion de documento."""
+def _validate_creation_inputs(
+    document_type_acronym: str, reference: str, creator_id: Optional[str], citizen_id: Optional[str] = None
+) -> None:
     errors = []
 
     type_error = validate_document_type_acronym(document_type_acronym)
@@ -46,9 +39,12 @@ def _validate_creation_inputs(document_type_acronym: str, reference: str, creato
     if reference_error:
         errors.append(reference_error)
 
-    # Solo validar formato UUID, NO existencia (ya validado por TenantMiddleware)
-    if not validate_uuid(creator_id):
+    if bool(creator_id) == bool(citizen_id):
+        errors.append("Se requiere exactamente uno de creator_id o citizen_id")
+    elif creator_id is not None and not validate_uuid(creator_id):
         errors.append("creator_id debe ser un UUID valido")
+    elif citizen_id is not None and not validate_uuid(citizen_id):
+        errors.append("citizen_id debe ser un UUID valido")
 
     if errors:
         raise ValidationError("; ".join(errors))
@@ -57,105 +53,81 @@ def _validate_creation_inputs(document_type_acronym: str, reference: str, creato
 async def create_document(
     document_type_acronym: str,
     reference: str,
-    creator_id: str,
+    creator_id: Optional[str] = None,
     *,
     schema_name: str,
     recipients: Optional[Dict[str, Any]] = None,
     sender_sector_id: Optional[str] = None,
-    auth_source: Optional[str] = None
+    auth_source: Optional[str] = None,
+    citizen_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Crea un nuevo documento en estado draft.
+    actor_id = creator_id or citizen_id
+    logger.info(f"Creando documento tipo '{document_type_acronym}' para actor {actor_id} en schema '{schema_name}'")
 
-    Args:
-        document_type_acronym: Acronimo del tipo de documento
-        reference: Referencia del documento
-        creator_id: UUID del usuario creador
-        schema_name: Schema del tenant (municipalidad)
-        recipients: (Solo para NOTA) Dict con {to: [], cc: [], bcc: []}
-        sender_sector_id: (Solo para NOTA) UUID del sector emisor
-        auth_source: Origen de autenticación para trazabilidad (jwt, api_key, mcp_oauth, testing, system)
+    _validate_creation_inputs(document_type_acronym, reference, creator_id, citizen_id)
 
-    Returns:
-        Dict con document_id y datos del documento creado
-
-    Raises:
-        ValidationError: Si los datos son invalidos
-        DatabaseError: Si falla la operacion en BD
-    """
-    logger.info(f"Creando documento tipo '{document_type_acronym}' para usuario {creator_id} en schema '{schema_name}'")
-
-    _validate_creation_inputs(document_type_acronym, reference, creator_id)
-
-    # Detectar si es NOTA o MEMO
-    is_nota = is_nota_document_type_by_acronym(document_type_acronym, schema_name=schema_name)
-    is_memo = is_memo_document_type_by_acronym(document_type_acronym, schema_name=schema_name)
     normalized_recipients = None
 
-    # Validar recipients si es NOTA y se proporcionan
-    if is_nota and recipients:
-        # Si se proporcionan recipients al crear, validarlos
-        if not sender_sector_id:
-            raise ValidationError("Se requiere sender_sector_id para guardar recipients en NOTA")
-        # Normalizar y validar estructura (incluye deduplicación)
-        normalized_recipients = validate_recipients_input(recipients)
-    elif is_nota:
-        # NOTA sin recipients es válido - se pueden agregar después
-        logger.info(f"Creando NOTA sin recipients iniciales (se pueden agregar al guardar)")
-    elif is_memo and recipients:
-        # MEMO: validar recipients (user_ids en vez de sector_ids)
-        normalized_recipients = validate_memo_recipients_input(recipients)
-    elif is_memo:
-        # MEMO sin recipients es válido - se pueden agregar después
-        logger.info(f"Creando MEMO sin recipients iniciales (se pueden agregar al guardar)")
-    elif recipients:
-        # Si no es NOTA ni MEMO pero se enviaron recipients, ignorar con warning
-        logger.warning(f"Se enviaron recipients para documento tipo '{document_type_acronym}' que no es NOTA ni MEMO - ignorados")
-
     try:
-        async with get_conn(schema_name=schema_name, user_id=creator_id, auth_source=auth_source) as conn:
+        async with get_conn(schema_name=schema_name, user_id=actor_id, auth_source=auth_source) as conn:
             async with conn.transaction():
-                # Obtener tipo de documento
                 doc_type_row = await conn.fetchrow(get_document_type_query(), document_type_acronym)
                 if not doc_type_row:
                     raise ValidationError(f"Tipo de documento '{document_type_acronym}' no encontrado")
 
+                is_nota = (doc_type_row.get('base_type') or '').upper() == 'NOTA'
+                is_memo = (doc_type_row.get('base_type') or '').upper() == 'MEMO'
+
+                if is_nota and recipients:
+                    if not sender_sector_id:
+                        raise ValidationError("Se requiere sender_sector_id para guardar recipients en NOTA")
+                    normalized_recipients = validate_recipients_input(recipients)
+                elif is_nota:
+                    logger.info(f"Creando NOTA sin recipients iniciales (se pueden agregar al guardar)")
+                elif is_memo and recipients:
+                    normalized_recipients = validate_memo_recipients_input(recipients)
+                elif is_memo:
+                    logger.info(f"Creando MEMO sin recipients iniciales (se pueden agregar al guardar)")
+                elif recipients:
+                    logger.warning(f"Se enviaron recipients para documento tipo '{document_type_acronym}' que no es NOTA ni MEMO - ignorados")
+
                 document_id = str(uuid.uuid4())
 
-                # Insertar documento
-                result_row = await conn.fetchrow(
-                    insert_document_draft_query(),
-                    document_id, doc_type_row['document_type_id'], reference, creator_id
-                )
+                if citizen_id:
+                    result_row = await conn.fetchrow(
+                        insert_document_draft_citizen_query(),
+                        document_id, doc_type_row['document_type_id'], reference, citizen_id
+                    )
+                    await conn.execute(
+                        insert_document_signer_citizen_query(),
+                        document_id, citizen_id, 1, True
+                    )
+                else:
+                    result_row = await conn.fetchrow(
+                        insert_document_draft_query(),
+                        document_id, doc_type_row['document_type_id'], reference, creator_id
+                    )
+                    await conn.execute(
+                        insert_document_signer_query(),
+                        document_id, creator_id, 1, True
+                    )
 
-                # Asignar creador como firmante numerador
-                await conn.execute(
-                    insert_document_signer_query(),
-                    document_id, creator_id, 1, True
-                )
-
-                # Si es NOTA con recipients, guardarlos en la misma transacción
                 recipients_count = 0
                 if is_nota and normalized_recipients:
-                    # Validar que los sectors existan (usa el mismo conn)
                     await validate_recipients_exist(
                         conn, normalized_recipients, sender_sector_id,
                         schema_name=schema_name
                     )
-                    # Guardar recipients
                     recipients_count = await save_recipients(
                         conn, document_id, sender_sector_id, normalized_recipients,
                         schema_name=schema_name
                     )
 
-                # Si es MEMO con recipients, guardarlos en la misma transacción
                 if is_memo and normalized_recipients:
-                    # Validar que los users existan (usa el mismo conn)
                     await validate_memo_recipients_exist(
                         conn, normalized_recipients, creator_id,
                         schema_name=schema_name
                     )
-                    # Guardar recipients (sender_user_id = creator_id)
                     recipients_count = await save_memo_recipients(
                         conn, document_id, creator_id, normalized_recipients,
                         schema_name=schema_name
@@ -171,18 +143,17 @@ async def create_document(
             "document_type_acronym": document_type_acronym,
             "reference": reference,
             "creator_id": creator_id,
+            "citizen_id": citizen_id,
             "status": "draft",
             "created_at": None,
             "updated_at": result_row['last_modified_at'].isoformat() if result_row['last_modified_at'] else None,
             "message": "Documento creado exitosamente"
         }
 
-        # Agregar info de recipients si es NOTA
         if is_nota:
             response["is_nota"] = True
             response["recipients_count"] = recipients_count
 
-        # Agregar info de recipients si es MEMO
         if is_memo:
             response["is_memo"] = True
             response["recipients_count"] = recipients_count

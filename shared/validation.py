@@ -1,7 +1,3 @@
-"""
-Funciones de validación compartidas utilizadas por múltiples módulos.
-Centraliza las validaciones comunes para mantener consistencia.
-"""
 
 import re
 from uuid import UUID
@@ -10,15 +6,6 @@ import nh3
 from database import check_user_exists, check_document_exists
 
 def validate_uuid(uuid_string: str) -> bool:
-    """
-    Valida que un string sea un UUID válido.
-    
-    Args:
-        uuid_string: String a validar
-        
-    Returns:
-        True si es UUID válido, False en caso contrario
-    """
     try:
         UUID(uuid_string)
         return True
@@ -26,18 +13,6 @@ def validate_uuid(uuid_string: str) -> bool:
         return False
 
 def validate_required_string(value: Any, field_name: str, min_length: int = 1, max_length: Optional[int] = None) -> Optional[str]:
-    """
-    Valida que un campo sea string requerido con longitud específica.
-    
-    Args:
-        value: Valor a validar
-        field_name: Nombre del campo (para mensajes de error)
-        min_length: Longitud mínima requerida
-        max_length: Longitud máxima permitida (opcional)
-        
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
     if not value:
         return f"{field_name} es requerido"
     
@@ -55,88 +30,36 @@ def validate_required_string(value: Any, field_name: str, min_length: int = 1, m
     return None
 
 async def validate_user_id(user_id: str, *, schema_name: str) -> Optional[str]:
-    """
-    Valida que un user_id sea UUID válido y que el usuario exista.
-
-    Args:
-        user_id: UUID del usuario a validar
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
-    # Validar formato UUID
     if not validate_uuid(user_id):
         return "user_id debe ser un UUID válido"
 
-    # Validar que el usuario existe
     if not await check_user_exists(user_id, schema_name=schema_name):
         return f"Usuario con ID '{user_id}' no encontrado"
 
     return None
 
 async def validate_document_id(document_id: str, *, schema_name: str) -> Optional[str]:
-    """
-    Valida que un document_id sea UUID válido y que el documento exista.
-
-    Args:
-        document_id: UUID del documento a validar
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
-    # Validar formato UUID
     if not validate_uuid(document_id):
         return "document_id debe ser un UUID válido"
 
-    # Validar que el documento existe
     if not await check_document_exists(document_id, schema_name=schema_name):
         return f"Documento con ID '{document_id}' no encontrado"
 
     return None
 
 def validate_document_reference(reference: str) -> Optional[str]:
-    """
-    Valida que la referencia de un documento sea válida.
-    
-    Args:
-        reference: Referencia del documento
-        
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
     return validate_required_string(reference, "reference", min_length=1, max_length=250)
 
 def validate_rejection_reason(reason: str) -> Optional[str]:
-    """
-    Valida que el motivo de rechazo sea válido.
-    
-    Args:
-        reason: Motivo del rechazo
-        
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
     return validate_required_string(reason, "reason", min_length=10, max_length=500)
 
 def validate_document_type_acronym(acronym: str) -> Optional[str]:
-    """
-    Valida que el acrónimo de tipo de documento sea válido.
-    
-    Args:
-        acronym: Acrónimo del tipo de documento
-        
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
     if not acronym:
         return "document_type_acronym es requerido"
     
     if not isinstance(acronym, str):
         return "document_type_acronym debe ser un string"
     
-    # Validar formato básico (letras y números, sin espacios)
     if not re.match(r'^[A-Z0-9]+$', acronym.upper()):
         return "document_type_acronym debe contener solo letras y números"
     
@@ -146,15 +69,6 @@ def validate_document_type_acronym(acronym: str) -> Optional[str]:
     return None
 
 def validate_email(email: str) -> Optional[str]:
-    """
-    Valida que un email tenga formato válido.
-    
-    Args:
-        email: Email a validar
-        
-    Returns:
-        None si es válido, mensaje de error si no es válido
-    """
     if not email:
         return "Email es requerido"
     
@@ -165,16 +79,6 @@ def validate_email(email: str) -> Optional[str]:
     return None
 
 def validate_pagination_params(page: int, page_size: int) -> Optional[str]:
-    """
-    Valida parámetros de paginación.
-    
-    Args:
-        page: Número de página
-        page_size: Tamaño de página
-        
-    Returns:
-        None si son válidos, mensaje de error si no son válidos
-    """
     if page < 1:
         return "page debe ser mayor a 0"
     
@@ -186,55 +90,47 @@ def validate_pagination_params(page: int, page_size: int) -> Optional[str]:
     
     return None
 
-async def validate_document_signers(signers: List[Dict[str, Any]], *, schema_name: str) -> Optional[str]:
-    """
-    Valida una lista de firmantes de documento.
+async def validate_document_signers(
+    signers: List[Dict[str, Any]], *, schema_name: str, internal: bool = False
+) -> Optional[str]:
+    from config.constants import SYSTEM_TEST_USER_UUID
 
-    Args:
-        signers: Lista de firmantes con user_id e is_numerator
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        None si son válidos, mensaje de error si no son válidos
-    """
     if not signers:
         return "Debe especificar al menos un firmante"
-    
+
     numerator_count = 0
     user_ids_seen = set()
-    
+
     for i, signer in enumerate(signers):
-        # Validar estructura
         if not isinstance(signer, dict):
             return f"Firmante {i+1}: debe ser un objeto válido"
-        
+
         if "user_id" not in signer:
             return f"Firmante {i+1}: user_id es requerido"
-        
+
         if "is_numerator" not in signer:
             return f"Firmante {i+1}: is_numerator es requerido"
-        
+
         user_id = signer["user_id"]
         is_numerator = signer["is_numerator"]
-        
-        # Validar user_id
+
+        if not internal and str(user_id).lower() == SYSTEM_TEST_USER_UUID.lower():
+            return f"Firmante {i+1}: usuario no válido como firmante"
+
         user_error = await validate_user_id(user_id, schema_name=schema_name)
         if user_error:
             return f"Firmante {i+1}: {user_error}"
         
-        # Validar duplicados
         if user_id in user_ids_seen:
             return f"Firmante {i+1}: usuario duplicado"
         user_ids_seen.add(user_id)
         
-        # Validar is_numerator
         if not isinstance(is_numerator, bool):
             return f"Firmante {i+1}: is_numerator debe ser true o false"
         
         if is_numerator:
             numerator_count += 1
     
-    # Validar que hay exactamente un numerador
     if numerator_count == 0:
         return "Debe especificar exactamente un numerador (is_numerator: true)"
     
@@ -243,17 +139,25 @@ async def validate_document_signers(signers: List[Dict[str, Any]], *, schema_nam
     
     return None
 
-def sanitize_html(html_content: str) -> str:
-    """
-    Sanitiza contenido HTML usando nh3 con allowlist de tags seguros.
-    Previene XSS stored eliminando tags/atributos no permitidos.
+_DATA_IMAGE_OK = ("data:image/png", "data:image/jpeg", "data:image/webp", "data:image/gif")
 
-    Args:
-        html_content: Contenido HTML a sanitizar
+_STYLE_PROHIBIDO = ("url(", "@import", "expression(", "javascript:")
 
-    Returns:
-        Contenido HTML sanitizado
-    """
+
+def _filtro_formato_inline(tag: str, attr: str, value: str):
+    valor = (value or "").strip()
+    if attr == "style":
+        bajo = valor.lower()
+        return None if any(p in bajo for p in _STYLE_PROHIBIDO) else value
+    if valor[:5].lower() == "data:":
+        bajo = valor.lower()
+        if tag == "img" and attr == "src" and bajo.startswith(_DATA_IMAGE_OK):
+            return value
+        return None
+    return value
+
+
+def sanitize_html(html_content: str, *, permitir_formato_inline: bool = False) -> str:
     if not html_content:
         return ""
 
@@ -268,11 +172,8 @@ def sanitize_html(html_content: str) -> str:
     }
 
     allowed_attributes = {
-        # SEC-29: "id" removido — el atributo id en HTML de usuario habilita DOM clobbering
-        # (puede sobreescribir referencias window/document.getElementById en el frontend).
-        # El editor no depende de IDs en el contenido persistido.
         "*": {"class"},
-        "a": {"href", "title", "target"},  # rel lo maneja link_rel automaticamente
+        "a": {"href", "title", "target"},
         "img": {"src", "alt", "title", "width", "height"},
         "td": {"colspan", "rowspan"},
         "th": {"colspan", "rowspan"},
@@ -281,10 +182,43 @@ def sanitize_html(html_content: str) -> str:
         "table": {"border", "cellpadding", "cellspacing"},
     }
 
+    url_schemes = {"http", "https", "mailto"}
+    attribute_filter = None
+
+    if permitir_formato_inline:
+        allowed_attributes = {tag: set(attrs) for tag, attrs in allowed_attributes.items()}
+        allowed_attributes["*"].add("style")
+        url_schemes = url_schemes | {"data"}
+        attribute_filter = _filtro_formato_inline
+
     return nh3.clean(
         html_content,
         tags=allowed_tags,
         attributes=allowed_attributes,
-        url_schemes={"http", "https", "mailto"},
+        url_schemes=url_schemes,
+        attribute_filter=attribute_filter,
         link_rel="noopener noreferrer",
     )
+
+
+_IMAGE_MAGIC_BYTES = {
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/webp": (b"RIFF",),
+}
+
+
+def detect_image_mime(data: bytes) -> Optional[str]:
+    if not data:
+        return None
+
+    if data.startswith(_IMAGE_MAGIC_BYTES["image/png"][0]):
+        return "image/png"
+
+    if data.startswith(_IMAGE_MAGIC_BYTES["image/jpeg"][0]):
+        return "image/jpeg"
+
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+
+    return None

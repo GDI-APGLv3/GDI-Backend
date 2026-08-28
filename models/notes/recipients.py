@@ -1,13 +1,9 @@
-"""
-Modelos relacionados con recipients de NOTAS.
-"""
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 
 
 class RecipientInfo(BaseModel):
-    """Información de un recipient de NOTA"""
     sector_id: str = Field(..., description="UUID del sector destinatario")
     acronym: str = Field(..., description="Acrónimo del sector (ej: HAC, LEGAL)")
     department_name: str = Field(..., description="Nombre del departamento")
@@ -24,7 +20,6 @@ class RecipientInfo(BaseModel):
 
 
 class VisibleRecipientsResponse(BaseModel):
-    """Recipients visibles según permisos del usuario"""
     to: List[RecipientInfo] = Field(default_factory=list, description="Destinatarios principales")
     cc: List[RecipientInfo] = Field(default_factory=list, description="Destinatarios en copia")
     bcc: Optional[List[RecipientInfo]] = Field(

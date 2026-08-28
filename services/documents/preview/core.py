@@ -1,11 +1,3 @@
-"""Preview Core - Funcion principal del servicio de previsualizacion.
-Responsabilidad unica: Orquestar el proceso de generacion de preview.
-
-IMPORTANTE: Preview soporta tres tipos de documentos:
-- HTML: Genera PDF desde contenido con PDFComposer /preview-pdf/
-- NOTA: Genera PDF con header de recipients usando PDFComposer /note-preview/
-- Importado: Retorna URL del PDF ya procesado en R2
-"""
 
 from shared.logging import get_logger
 from typing import Dict, Any
@@ -23,44 +15,34 @@ logger = get_logger(__name__)
 
 
 async def generate_document_preview(document_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Genera una previsualización en PDF del documento.
-
-    Orquesta el proceso completo: auto-save, obtención de datos y generación de PDF.
-
-    Soporta dos tipos de documentos:
-    - HTML: Genera PDF desde contenido usando PDFComposer /preview-pdf/
-    - Importado: Retorna URL firmada del PDF ya procesado en R2 (bucket tosign)
-
-    Args:
-        document_id: UUID del documento a previsualizar
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con información de la previsualización generada
-
-    Raises:
-        DocumentNotFoundError: Si el documento no existe
-        DocumentStateError: Si el documento no está en estado válido
-    """
     logger.info(f"Iniciando generación de preview para documento {document_id}")
 
     try:
-        # 1. Aplicar auto-guardado si es necesario (solo para HTML)
         auto_save_handler = AutoSaveHandler(schema_name=schema_name)
         await auto_save_handler.handle_auto_save_if_needed(document_id)
 
-        # 2. Obtener datos completos del documento
         data_fetcher = PreviewDataFetcher(schema_name=schema_name)
-        document_data = await data_fetcher.get_complete_document_data(document_id)
-
-        # 3. Obtener datos RAW del documento para determinar tipo
         raw_document_data = await data_fetcher._fetch_document_basic_info(document_id)
 
-        # 4. Determinar tipo de documento y generar preview
+        document_data = await data_fetcher.get_complete_document_data(
+            document_id, document_info=raw_document_data,
+        )
+
+        _content_raw = raw_document_data.get('content')
+        if isinstance(_content_raw, dict) and 'html' in _content_raw:
+            from services.documents.lifecycle.images import inline_document_images_as_base64
+            _content_raw['html'] = await inline_document_images_as_base64(
+                _content_raw['html'], document_id, schema_name=schema_name
+            )
+        elif isinstance(_content_raw, str) and _content_raw:
+            from services.documents.lifecycle.images import inline_document_images_as_base64
+            raw_document_data['content'] = await inline_document_images_as_base64(
+                _content_raw, document_id, schema_name=schema_name
+            )
+
         source_type = raw_document_data.get('source_type', 'HTML')
 
         if source_type == 'Importado':
-            # Para documentos importados: retornar URL del PDF en R2
             logger.info(f"Documento {document_id} es tipo Importado, obteniendo URL de R2")
 
             document_id_no_hyphens = document_id.replace('-', '')
@@ -87,15 +69,12 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
             }
 
         else:
-            # Para documentos HTML: generar PDF con PDFComposer
             logger.info(f"Documento {document_id} es tipo HTML, generando PDF con PDFComposer")
 
-            # Detectar si es NOTA para usar endpoint específico
-            type_acronym = raw_document_data.get('type_acronym') or raw_document_data.get('document_type_acronym')
+            _base_type = (raw_document_data.get('source_type') or '').upper()
 
-            if type_acronym == 'NOTA':
-                # NOTA usa /note-preview/ con header de recipients
-                logger.info(f"Documento {document_id} es NOTA, usando /note-preview/")
+            if _base_type == 'NOTA':
+                logger.info(f"Documento {document_id} es NOTA (base_type={_base_type}), usando /note-preview/")
 
                 from services.notes.recipients import format_recipients_for_pdf
                 recipients = await format_recipients_for_pdf(document_id, schema_name=schema_name)
@@ -106,9 +85,8 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
                     cc=recipients.get('cc'),
                     schema_name=schema_name
                 )
-            elif type_acronym == 'MEMO':
-                # MEMO usa /note-preview/ con header de recipients (formato usuario)
-                logger.info(f"Documento {document_id} es MEMO, usando /note-preview/")
+            elif _base_type == 'MEMO':
+                logger.info(f"Documento {document_id} es MEMO (base_type={_base_type}), usando /note-preview/")
 
                 from services.memos.recipients import format_memo_recipients_for_pdf
                 recipients = await format_memo_recipients_for_pdf(document_id, schema_name=schema_name)
@@ -120,7 +98,6 @@ async def generate_document_preview(document_id: str, *, schema_name: str) -> Di
                     schema_name=schema_name
                 )
             else:
-                # Otros tipos usan /preview-pdf/ genérico
                 pdf_bytes = await call_pdfcomposer_preview_pdf(raw_document_data, schema_name=schema_name)
 
             if not pdf_bytes:

@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libglib2.0-0 \
     fontconfig \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar requirements.txt primero para aprovechar la cache de Docker
@@ -35,6 +36,10 @@ RUN mkdir -p /home/appuser/.cache/fontconfig && \
 
 # Cambiar el propietario de los archivos
 RUN chown -R appuser:appgroup /app
+
+# Version del commit deployado (inyectado por GitHub Actions)
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 
 # Cambiar al usuario no-root
 USER appuser

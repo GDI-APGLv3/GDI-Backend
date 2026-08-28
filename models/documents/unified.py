@@ -1,8 +1,3 @@
-"""
-Modelo de respuesta unificada para detalles de documentos.
-Permite obtener información de documentos en cualquier estado,
-delegando a la estructura apropiada según el estado del documento.
-"""
 from typing import Union, Literal
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -11,13 +6,6 @@ from .signing import DocumentSignatureDetailsResponse
 
 
 class UnifiedDocumentDetailsResponse(BaseModel):
-    """
-    Respuesta unificada que retorna detalles de un documento según su estado.
-
-    Usa discriminador para indicar qué tipo de estructura contiene:
-    - "editing": Para documentos en draft o rejected
-    - "signing": Para documentos en sent_to_sign o signed
-    """
 
     state_category: Literal["editing", "signing"] = Field(
         ...,

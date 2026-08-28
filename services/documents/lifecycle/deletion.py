@@ -1,15 +1,9 @@
-"""
-Servicio para eliminar documentos (soft delete).
-
-Ubicacion real: services/documents/lifecycle/deletion.py
-MIGRADO: Fase 6 asyncpg
-"""
 
 from shared.logging import get_logger
 from typing import Dict, Any
 from datetime import datetime
 from fastapi.concurrency import run_in_threadpool
-from database import fetch_one, execute, transaction
+from database import fetch_one, transaction
 from shared.exceptions import (
     DocumentNotFoundError,
     DocumentStateError,
@@ -37,25 +31,6 @@ logger = get_logger(__name__)
 
 
 async def delete_document(document_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Elimina un documento (soft delete).
-
-    Solo el creador puede eliminar documentos en estado 'draft' o 'rejected'.
-    Si el documento esta vinculado a expedientes, se desvincula automaticamente.
-
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del usuario que elimina (debe ser el creador)
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con resultado de la operacion
-
-    Raises:
-        DocumentNotFoundError: Documento no existe
-        ConflictError: Documento ya eliminado previamente
-        AuthorizationError: Usuario no es el creador
-        DocumentStateError: Estado no permite eliminacion
-    """
     logger.info(
         "Iniciando proceso de eliminacion de documento",
         extra={
@@ -65,25 +40,20 @@ async def delete_document(document_id: str, user_id: str, *, schema_name: str) -
         }
     )
 
-    # Validaciones de formato
     await validate_document_id(document_id, schema_name=schema_name)
     await validate_user_id(user_id, schema_name=schema_name)
 
-    # 1. Obtener documento
     document = await fetch_one(get_document_for_deletion_query(), document_id, schema_name=schema_name)
 
     if not document:
         raise DocumentNotFoundError(document_id)
 
-    # 2. Verificar si ya esta eliminado
     if document['is_deleted']:
         raise ConflictError(DELETION_ALREADY_DELETED_ERROR)
 
-    # 3. Verificar que el usuario sea el creador
     if str(document['created_by']) != str(user_id):
         raise AuthorizationError(DELETION_PERMISSION_DENIED)
 
-    # 4. Verificar estado permitido
     current_status = document['status']
     if current_status not in DELETABLE_DOCUMENT_STATES:
         raise DocumentStateError(
@@ -92,20 +62,27 @@ async def delete_document(document_id: str, user_id: str, *, schema_name: str) -
             required_state="draft o rejected"
         )
 
-    # 5. Limpiar PDF de R2 (soft-fail, antes de la transaccion)
     pdf_cleanup_info = await _cleanup_pdf_from_r2(document_id, schema_name=schema_name)
 
-    # 6. Ejecutar operaciones en transaccion
+    try:
+        from services.documents.lifecycle.images import purge_document_images
+        await purge_document_images(document_id, schema_name=schema_name)
+    except Exception as e:
+        logger.warning(f"Error purgando imagenes del documento (soft-fail): {e}")
+
+    try:
+        from services.documents.lifecycle.embedded_files import purge_document_embedded_files
+        await purge_document_embedded_files(document_id, schema_name=schema_name)
+    except Exception as e:
+        logger.warning(f"Error purgando adjuntos embebidos del documento (soft-fail): {e}")
+
     unlinked_count = 0
     async with transaction(schema_name=schema_name) as conn:
-        # Desvincular de expedientes
         status_str = await conn.execute(unlink_document_from_cases_query(), document_id)
         unlinked_count = int(status_str.split()[-1])
 
-        # Soft delete
         await conn.execute(soft_delete_document_query(), document_id)
 
-    # 7. Obtener info del usuario
     user_info = await fetch_one(get_user_info_for_deletion_query(), user_id, schema_name=schema_name)
 
     logger.info(
@@ -133,23 +110,12 @@ async def delete_document(document_id: str, user_id: str, *, schema_name: str) -
 
 
 async def _cleanup_pdf_from_r2(document_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Intenta eliminar PDF de R2 (soft-fail).
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con informacion del intento de limpieza
-    """
     try:
         from services.storage.cloudflare import get_tenant_r2_client
         r2_client = await get_tenant_r2_client(schema_name=schema_name)
 
-        # El filename es el UUID sin guiones + .pdf
         filename = document_id.replace('-', '') + '.pdf'
 
-        # Verificar si existe antes de intentar eliminar
         if not await run_in_threadpool(r2_client.exists_tosign, filename):
             return {
                 "attempted": False,
@@ -184,16 +150,6 @@ async def _cleanup_pdf_from_r2(document_id: str, *, schema_name: str) -> Dict[st
 
 
 async def can_user_delete_document(document_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Verifica si un usuario puede eliminar un documento especifico.
-
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con can_delete (bool) y reason (str)
-    """
     await validate_document_id(document_id, schema_name=schema_name)
     await validate_user_id(user_id, schema_name=schema_name)
 

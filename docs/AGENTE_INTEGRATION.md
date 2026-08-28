@@ -54,10 +54,10 @@ Múltiples llamadas con mismo document_id no duplican:
 ```bash
 # GDI-AgenteLANG URL
 AGENTE_URL=http://localhost:8004  # Local
-# AGENTE_URL=http://gdi-agente.railway.internal:8004  # Production
+# AGENTE_URL=http://<your-agent-app>.internal:8080  # Fly.io (private networking)
 
 # API Key interna (compartida con PDFComposer, Notary)
-INTERNAL_API_KEY=your-internal-api-key
+INTERNAL_API_KEY=<CHANGE-ME-random-32-chars>
 ```
 
 ### Variables de Entorno (AgenteLANG)
@@ -73,7 +73,7 @@ DATABASE_URL=postgresql://...
 GDI_BACKEND_URL=http://localhost:8000
 
 # Internal API Key (debe coincidir con Backend)
-INTERNAL_API_KEY=your-internal-api-key
+INTERNAL_API_KEY=<CHANGE-ME-random-32-chars>
 ```
 
 ## Contrato de API
@@ -85,7 +85,7 @@ INTERNAL_API_KEY=your-internal-api-key
 **Headers**:
 ```json
 {
-  "X-API-Key": "your-internal-api-key",
+  "X-API-Key": "<CHANGE-ME-random-32-chars>",
   "Content-Type": "application/json"
 }
 ```
@@ -167,7 +167,7 @@ uvicorn app.main:app --reload --port 8004
 2. **Simular notificación desde Backend**:
 ```bash
 curl -X POST http://localhost:8004/api/v1/index-document \
-  -H "X-API-Key: your-internal-api-key" \
+  -H "X-API-Key: <CHANGE-ME-random-32-chars>" \
   -H "Content-Type: application/json" \
   -d '{"document_id": "123e4567-e89b-12d3-a456-426614174000", "schema_name": "100_test"}'
 ```
@@ -175,7 +175,7 @@ curl -X POST http://localhost:8004/api/v1/index-document \
 3. **Verificar cola**:
 ```bash
 curl http://localhost:8004/api/v1/indexing/status \
-  -H "X-API-Key: your-internal-api-key"
+  -H "X-API-Key: <CHANGE-ME-random-32-chars>"
 ```
 
 ### Test End-to-End

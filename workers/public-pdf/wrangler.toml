@@ -1,0 +1,7 @@
+name = "gdi-public-pdf"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+account_id = "<YOUR_CF_ACCOUNT_ID>"
+
+[vars]
+CF_ACCOUNT_ID = "<YOUR_CF_ACCOUNT_ID>"

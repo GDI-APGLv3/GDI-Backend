@@ -1,27 +1,18 @@
-"""
-Servicio para obtener contenido de documentos oficiales.
-Usado por el MCP para que el agente IA pueda leer el contenido HTML de documentos firmados.
-"""
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from database import fetch_one
 from shared.exceptions import DocumentNotFoundError
 
 
+def extract_html_from_content(content: Optional[dict]) -> str:
+    if not isinstance(content, dict):
+        return ""
+    if 'schema' in content and 'data' in content:
+        from services.documents.ffcc_renderer import ffcc_to_html
+        return ffcc_to_html(content.get('schema') or [], content.get('data') or {})
+    return content.get('html') or content.get('detalle', '')
+
+
 async def get_official_document_content(document_id: str, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtiene el contenido HTML de un documento oficial.
-
-    Args:
-        document_id: UUID del documento oficial
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con document_id, official_number, reference, content (html),
-        document_type (name, acronym), signed_at
-
-    Raises:
-        DocumentNotFoundError: Si el documento no existe
-    """
     result = await fetch_one(
         """
         SELECT
@@ -44,10 +35,7 @@ async def get_official_document_content(document_id: str, schema_name: str) -> D
     if not result:
         raise DocumentNotFoundError(f"Documento oficial {document_id} no encontrado")
 
-    # Extraer HTML del JSON (soporta 'html' y 'detalle' para compatibilidad)
-    html_content = ""
-    if result['content']:
-        html_content = result['content'].get('html') or result['content'].get('detalle', '')
+    html_content = extract_html_from_content(result['content'])
 
     return {
         "document_id": str(result['id']),

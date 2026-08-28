@@ -1,6 +1,3 @@
-"""
-Endpoint unificado para obtener detalles de documentos en cualquier estado.
-"""
 from uuid import UUID
 from shared.logging import get_logger
 from fastapi import APIRouter, Path, Depends, Request

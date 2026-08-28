@@ -1,31 +1,11 @@
-"""
-Modelos Pydantic para sistema multi-tenant.
-Define estructuras de datos para acceso de usuarios a múltiples municipalidades.
-"""
 
 from typing import Optional, List
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 
 
 class TenantAccess(BaseModel):
-    """
-    Representa el acceso de un usuario a una municipalidad (tenant).
-
-    SEC-31 (REVERTIDO por hotfix 2026-05-31): la idea era no exponer schema_name al
-    cliente y usar municipality_id (UUID opaco) como identificador público. Se revirtió
-    porque el frontend y el middleware (X-Tenant-Schema) dependen de schema_name, y
-    ocultarlo rompía el login en DEV y PRD. Hoy schema_name SÍ se serializa.
-
-    municipality_id se sigue devolviendo (informativo) pero el identificador de tenant
-    en uso es schema_name.
-    TODO(S4-007/SEC-31): para volver a ocultar schema_name hay que primero migrar
-    frontend + middleware a municipality_id (endpoint de resolución). Ver VersionJUNIO.
-    """
     model_config = ConfigDict(populate_by_name=True)
 
-    # SEC-31 (revertido por hotfix): el frontend aún depende de schema_name para el
-    # header X-Tenant-Schema y el middleware lo valida contra whitelist. Re-exponemos
-    # schema_name hasta completar SEC-31 (endpoint de resolución municipality_id->schema).
     schema_name: str = Field(
         ...,
         description="Nombre del schema PostgreSQL (usado por el cliente como X-Tenant-Schema)",
@@ -68,9 +48,6 @@ class TenantAccess(BaseModel):
 
 
 class OnboardingUser(BaseModel):
-    """
-    Información básica del usuario para onboarding multi-tenant.
-    """
     email: EmailStr = Field(
         ...,
         description="Email del usuario autenticado",
@@ -91,9 +68,6 @@ class OnboardingUser(BaseModel):
 
 
 class UserProfile(BaseModel):
-    """
-    Perfil completo del usuario en una municipalidad específica.
-    """
     user_id: str = Field(
         ...,
         description="UUID del usuario en el sistema",
@@ -126,10 +100,6 @@ class UserProfile(BaseModel):
 
 
 class OnboardingResponse(BaseModel):
-    """
-    Response del endpoint /api/auth/onboarding para usuarios multi-tenant.
-    Retorna la lista de municipalidades a las que tiene acceso.
-    """
     user: OnboardingUser = Field(
         ...,
         description="Información básica del usuario"

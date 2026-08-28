@@ -1,19 +1,8 @@
-"""
-Constructor de respuestas de documentos - REFACTORIZADO
-Maneja el formateo de datos siguiendo Single Responsibility.
-
-UBICACION: services/documents/core/builder.py
-MIGRADO: Fase 2.2 del refactoring
-"""
 import json
 from typing import Dict, Any, List, Optional
 
 
 class DocumentBuilder:
-    """
-    Constructor de respuestas de documentos.
-    Aplica Single Responsibility: Solo formateo de datos.
-    """
 
     @staticmethod
     def build_complete_response(
@@ -21,7 +10,6 @@ class DocumentBuilder:
         signers: List[Dict[str, Any]],
         rejection_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Construye respuesta completa del documento."""
         return {
             "document_id": document['id'],
             "reference": document['reference'],
@@ -32,19 +20,12 @@ class DocumentBuilder:
             "creator_name": document['creator_name'],
             "signers": DocumentBuilder._format_signers(signers),
             "rejection_info": DocumentBuilder._format_rejection_info(rejection_info),
-            "created_at": None,  # No disponible en esta tabla
+            "created_at": None,
             "updated_at": document['last_modified_at'].isoformat() if document['last_modified_at'] else None
         }
 
     @staticmethod
     def _extract_content(content_json: Any) -> Optional[str]:
-        """
-        Extrae contenido HTML del JSON almacenado.
-        Soporta multiples formatos para migracion gradual:
-        - Nuevo estandar: {'html': 'content'}
-        - Formato legacy: {'detalle': 'content'}
-        - Formato mixto: {'body': 'content'}
-        """
         if content_json is None:
             return None
 
@@ -57,21 +38,16 @@ class DocumentBuilder:
             if not isinstance(parsed, dict):
                 return None
 
-            # PRIORIDAD 1: Nuevo formato estandar 'html'
             if 'html' in parsed:
                 return parsed['html']
 
-            # PRIORIDAD 2: Formato legacy 'detalle'
             if 'detalle' in parsed:
                 return parsed['detalle']
 
-            # PRIORIDAD 3: Formato alternativo 'body'
             if 'body' in parsed:
                 return parsed['body']
 
-            # PRIORIDAD 4: Para formato TipTap, devolver JSON como string
             if 'type' in parsed and 'content' in parsed:
-                # Es formato TipTap, mantenemos como esta por ahora
                 return json.dumps(parsed)
 
             return None
@@ -81,7 +57,6 @@ class DocumentBuilder:
 
     @staticmethod
     def _build_document_type(document: Dict[str, Any]) -> Dict[str, str]:
-        """Construye informacion del tipo de documento."""
         return {
             "name": document.get('document_type_name', 'N/A'),
             "acronym": document.get('document_type_acronym', 'N/A')
@@ -89,7 +64,6 @@ class DocumentBuilder:
 
     @staticmethod
     def _format_signers(signers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Formatea lista de firmantes para la respuesta incluyendo email y profile_picture_url."""
         return [
             {
                 "user_id": signer['user_id'],
@@ -104,7 +78,6 @@ class DocumentBuilder:
 
     @staticmethod
     def _format_rejection_info(rejection_info: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Formatea informacion de rechazo."""
         if rejection_info is None:
             return None
 

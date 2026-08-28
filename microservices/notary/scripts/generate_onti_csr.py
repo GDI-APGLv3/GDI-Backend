@@ -1,39 +1,4 @@
 #!/usr/bin/env python3
-"""
-PoC: Generador de KEY + CSR para solicitud de certificado ante AC ONTI.
-
-El municipio corre este script (o lo corremos nosotros desde BackOffice).
-Genera dos archivos:
-  - municipio.key  → clave privada RSA 2048 (GUARDAR, nunca compartir)
-  - municipio.csr  → solicitud de certificado (mandar a ONTI)
-
-Una vez que ONTI emite el .cer, el municipio vuelve y corre:
-  python generate_onti_csr.py --finalizar \
-    --key municipio.key --cer municipio.cer --password mipass
-
-Requisitos ONTI (PUC v4.0, pág. 54):
-  - RSA 2048 bits
-  - CN  = nombre de la aplicación (max 64 chars)
-  - serialNumber = "CUIT XXXXXXXXXX" (con espacio, sin guiones)
-  - O   = nombre del organismo (debe coincidir con CUIT)
-  - OU  = área responsable del certificado
-  - C   = AR
-
-Uso básico:
-    python generate_onti_csr.py \\
-      --cn "GDI Latam" \\
-      --cuit "30123456789" \\
-      --org "Municipalidad del Futuro" \\
-      --ou "Secretaria de Gobierno" \\
-      --output ./salida
-
-Uso finalizar (armar .p12 cuando llega el .cer de ONTI):
-    python generate_onti_csr.py --finalizar \\
-      --key ./salida/municipio.key \\
-      --cer ./salida/municipio.cer \\
-      --password mipassword \\
-      --output ./salida
-"""
 
 import argparse
 import sys
@@ -52,18 +17,12 @@ except ImportError:
 
 
 def generar_key_y_csr(cn: str, cuit: str, org: str, ou: str, output_dir: Path) -> tuple[Path, Path]:
-    """
-    Genera clave privada RSA 2048 + CSR con los campos que requiere ONTI.
-    Retorna (path_key, path_csr).
-    """
     _validar_campo("CN", cn)
     _validar_campo("O (organismo)", org)
     _validar_campo("OU (área)", ou)
 
-    # Clave privada RSA 2048
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
-    # Subject DN según PUC v4.0 AC ONTI
     subject = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, cn),
         x509.NameAttribute(NameOID.SERIAL_NUMBER, f"CUIT {cuit}"),
@@ -80,7 +39,6 @@ def generar_key_y_csr(cn: str, cuit: str, org: str, ou: str, output_dir: Path) -
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Guardar .key (PEM sin cifrar — el municipio la guarda segura)
     key_path = output_dir / "municipio.key"
     key_path.write_bytes(
         key.private_bytes(
@@ -90,7 +48,6 @@ def generar_key_y_csr(cn: str, cuit: str, org: str, ou: str, output_dir: Path) -
         )
     )
 
-    # Guardar .csr (PEM — este se manda a ONTI)
     csr_path = output_dir / "municipio.csr"
     csr_path.write_bytes(csr.public_bytes(serialization.Encoding.PEM))
 
@@ -98,9 +55,6 @@ def generar_key_y_csr(cn: str, cuit: str, org: str, ou: str, output_dir: Path) -
 
 
 def finalizar_p12(key_path: Path, cer_path: Path, password: str, output_dir: Path) -> Path:
-    """
-    Combina .key + .cer de ONTI en un .p12 listo para subir a GDI BackOffice.
-    """
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
     cert = x509.load_pem_x509_certificate(cer_path.read_bytes())
 
@@ -207,13 +161,11 @@ def main():
     parser.add_argument("--output", default="./salida",
                         help="Directorio de salida (default: ./salida)")
 
-    # Args para generar
     parser.add_argument("--cn", help="Nombre de la aplicación (CN, max 64 chars)")
     parser.add_argument("--cuit", help="CUIT del organismo (sin guiones)")
     parser.add_argument("--org", help="Nombre del organismo (O, max 64 chars)")
     parser.add_argument("--ou", help="Área responsable (OU, max 64 chars)")
 
-    # Args para finalizar
     parser.add_argument("--key", help="Path al archivo .key generado en el paso 1")
     parser.add_argument("--cer", help="Path al archivo .cer emitido por ONTI")
     parser.add_argument("--password", help="Contraseña para proteger el .p12")

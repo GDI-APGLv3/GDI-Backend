@@ -1,4 +1,3 @@
-"""Endpoint para obtener detalles de documento en proceso de firma."""
 
 from uuid import UUID
 from shared.logging import get_logger

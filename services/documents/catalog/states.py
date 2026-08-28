@@ -1,11 +1,7 @@
-"""Servicios para estados de documentos - REFACTORIZADO
-MIGRADO: Fase 6 asyncpg
-"""
 
 from shared.logging import get_logger
 from typing import List, Dict, Any
 from database import fetch_all, fetch_one
-from shared.exceptions import DatabaseError
 from ..core.queries import (
     get_display_state_by_code_query,
     get_all_state_mappings_query
@@ -35,12 +31,6 @@ STATE_CODE_MAPPING = {
 
 
 async def get_all_display_states(*, schema_name: str) -> List[Dict[str, Any]]:
-    """Obtiene todos los estados de visualizacion desde base de datos.
-
-    BACKEND-08: Reutiliza get_all_state_mappings_query (que ya trae code+name) en vez
-    de ejecutar una query separada con get_all_display_states_query (que solo traía name).
-    Una sola query a document_display_states para ambas funciones.
-    """
     logger.info("Obteniendo estados de visualizacion")
 
     try:
@@ -54,12 +44,14 @@ async def get_all_display_states(*, schema_name: str) -> List[Dict[str, Any]]:
         logger.warning(f"Usando estados por defecto ({len(DEFAULT_STATES)} estados)")
         return DEFAULT_STATES
 
-async def get_display_state_name(state_code: str, *, schema_name: str) -> str:
-    """Obtiene el nombre de visualizacion para un codigo de estado."""
+async def get_display_state_name(state_code: str, *, schema_name: str, conn=None) -> str:
     logger.info(f"Obteniendo nombre de estado para codigo: {state_code}")
 
     try:
-        result = await fetch_one(get_display_state_by_code_query(), state_code.upper(), schema_name=schema_name)
+        if conn is not None:
+            result = await conn.fetchrow(get_display_state_by_code_query(), state_code.upper())
+        else:
+            result = await fetch_one(get_display_state_by_code_query(), state_code.upper(), schema_name=schema_name)
 
         if result:
             return result['display_state_name']
@@ -75,7 +67,6 @@ async def get_display_state_name(state_code: str, *, schema_name: str) -> str:
     return fallback
 
 async def get_all_state_mappings(*, schema_name: str) -> Dict[str, str]:
-    """Obtiene todos los mapeos de codigos a nombres desde base de datos."""
     logger.info("Obteniendo mapeos de estados")
 
     try:

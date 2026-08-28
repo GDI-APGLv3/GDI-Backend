@@ -1,11 +1,8 @@
-"""
-Servicio CRUD para legajos (records).
-"""
 
 from datetime import datetime
 from typing import Optional
 from shared.logging import get_logger
-from database import fetch_all, fetch_one, execute, transaction
+from database import fetch_all, fetch_one, transaction
 from shared.exceptions import ValidationError, NotFoundError, AuthorizationError
 from services.rlm.queries import (
     get_record_detail_query,
@@ -23,7 +20,6 @@ from services.rlm.history import record_action
 
 logger = get_logger(__name__)
 
-# Advisory lock ID para numeración de legajos (diferente del 888888 de documentos)
 RLM_NUMBERING_LOCK_ID = 777777
 
 
@@ -35,31 +31,11 @@ async def create_record(
     *,
     schema_name: str
 ) -> dict:
-    """
-    Crea un nuevo legajo.
-
-    Args:
-        registry_code: Código del registro (ARQ, LUM, ORD)
-        data: Campos enriquecidos
-        user_id: UUID del usuario creador
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con datos del legajo creado
-
-    Raises:
-        ValidationError: Si los datos no son válidos
-        NotFoundError: Si el registro no existe
-        AuthorizationError: Si no tiene permisos
-    """
-    # 1. Obtener el registro
     registry = await get_registry_by_code(registry_code, schema_name=schema_name)
 
-    # 2. Verificar permiso can_create
     if not await check_permission(registry["id"], user_id, "can_create", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para crear legajos en este registro")
 
-    # 3. Obtener info del usuario
     user_info = await fetch_one(
         get_user_sector_info_query(),
         user_id,
@@ -68,29 +44,26 @@ async def create_record(
     if not user_info:
         raise ValidationError(f"Usuario {user_id} no encontrado")
 
-    # 4. Validar datos contra schema (skip_required en creación — campos se completan después)
     validated_data = await validate_record_data(data, registry.get("data_schema") or {}, skip_required=True, schema_name=schema_name)
 
-    # 5. Calcular next_expiration
     next_exp = calculate_next_expiration(validated_data, registry.get("data_schema") or {})
 
-    # 6. Generar número + insertar en una sola transacción atómica
     states = registry.get("states", [])
     default_state = states[0] if states else "Activo"
 
     async with transaction(schema_name=schema_name, user_id=user_id) as conn:
-        # 6a. Obtener acrónimo del municipio
         muni_result = await conn.fetchrow(
             "SELECT acronym FROM public.municipalities WHERE schema_name = $1",
             schema_name,
         )
         muni_acronym = muni_result["acronym"] if muni_result else "UNK"
 
-        # 6b. Advisory lock (se libera al commit/rollback)
         await conn.execute("SET LOCAL lock_timeout = '10s'")
-        await conn.execute(f"SELECT pg_advisory_xact_lock({RLM_NUMBERING_LOCK_ID})")
+        await conn.execute(
+            f"SELECT pg_advisory_xact_lock({RLM_NUMBERING_LOCK_ID}, hashtext($1))",
+            schema_name
+        )
 
-        # 6c. Obtener siguiente secuencia
         year = datetime.now().year
         pattern = f"RLM-{year}-%"
         seq_result = await conn.fetchrow(get_next_record_sequence_query(), pattern)
@@ -98,7 +71,6 @@ async def create_record(
 
         record_number = f"RLM-{year}-{next_seq:08d}-{muni_acronym}-{registry_code.upper()}"
 
-        # 6d. Insertar el legajo (misma transacción)
         result = await conn.fetchrow(
             insert_record_query(),
             registry["id"],
@@ -112,7 +84,6 @@ async def create_record(
         )
         record_id = result["id"]
 
-    # 7. Registrar en historial (fuera de la transacción principal)
     await record_action(
         record_id=record_id,
         action="created",
@@ -124,8 +95,6 @@ async def create_record(
 
     logger.info(f"Record created: {record_number} by user {user_id[:8]}")
 
-    # NOTA: IFRLM inicial se genera desde el endpoint (async) despues de create_record().
-    # Ya no se llama desde aqui porque generate_ifrlm() es async.
 
     return {
         "id": record_id,
@@ -139,20 +108,6 @@ async def create_record(
 
 
 async def get_record(record_id: str, user_id: str, *, schema_name: str) -> dict:
-    """
-    Obtiene el detalle completo de un legajo.
-
-    Args:
-        record_id: UUID del legajo
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-
-    Returns:
-        Dict con detalle del legajo + permisos
-
-    Raises:
-        NotFoundError: Si el legajo no existe
-    """
     result = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -162,10 +117,8 @@ async def get_record(record_id: str, user_id: str, *, schema_name: str) -> dict:
     if not result:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
-    # Obtener permisos del usuario
     perms = await get_user_permissions(result["registry_family_id"], user_id, schema_name=schema_name)
 
-    # Verificar can_view antes de devolver datos
     if not perms.get("can_view"):
         raise AuthorizationError("No tiene permiso para ver este legajo")
 
@@ -206,22 +159,6 @@ async def list_records(
     page: int = 1,
     page_size: int = 10,
 ) -> dict:
-    """
-    Lista legajos con filtros y paginación.
-
-    Args:
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-        registry_code: Filtrar por código de registro
-        state: Filtrar por estado
-        search: Búsqueda por número o datos
-        page: Página actual
-        page_size: Items por página
-
-    Returns:
-        Dict con lista paginada de legajos
-    """
-    # Filtrar por permisos: solo registros donde el usuario tiene can_view
     permissions_map = await get_bulk_permissions(user_id, schema_name=schema_name)
     viewable_family_ids = [
         fid for fid, perms in permissions_map.items() if perms.get("can_view")
@@ -237,7 +174,6 @@ async def list_records(
             "total_pages": 1,
         }
 
-    # Build dynamic WHERE with $N placeholders
     params: list = list(viewable_family_ids)
     param_idx = len(params) + 1
 
@@ -263,7 +199,6 @@ async def list_records(
         params.extend([search_pattern, search_pattern, search_pattern])
         param_idx += 3
 
-    # Count query
     where_sql = " AND ".join(where_clauses)
     count_sql = f"""
         SELECT COUNT(*) as total
@@ -274,7 +209,6 @@ async def list_records(
     count_result = await fetch_one(count_sql, *params, schema_name=schema_name)
     total = count_result["total"] if count_result else 0
 
-    # Paginated list query
     offset = (page - 1) * page_size
     list_params = params + [page_size, offset]
     limit_ph = f"${param_idx}"
@@ -329,7 +263,7 @@ async def list_records(
             },
         })
 
-    total_pages = max(1, -(-total // page_size))  # ceil division
+    total_pages = max(1, -(-total // page_size))
 
     logger.info(f"Listed {len(records)} records (page {page}/{total_pages})")
 
@@ -351,24 +285,6 @@ async def update_record(
     new_display_name: Optional[str] = None,
     reason: Optional[str] = None,
 ) -> dict:
-    """
-    Actualiza el estado y/o nombre de un legajo.
-
-    Args:
-        record_id: UUID del legajo
-        user_id: UUID del usuario
-        schema_name: Schema del tenant
-        new_state: Nuevo estado (opcional)
-        new_display_name: Nuevo nombre (opcional)
-        reason: Motivo del cambio
-
-    Returns:
-        Dict con datos actualizados
-
-    Raises:
-        NotFoundError, AuthorizationError, ValidationError
-    """
-    # Obtener legajo actual
     record = await fetch_one(
         get_record_detail_query(),
         record_id,
@@ -378,11 +294,9 @@ async def update_record(
     if not record:
         raise NotFoundError(f"Legajo con ID '{record_id}' no encontrado")
 
-    # Verificar permiso
     if not await check_permission(record["registry_family_id"], user_id, "can_edit", schema_name=schema_name):
         raise AuthorizationError("No tiene permisos para actualizar este legajo")
 
-    # Validar estado si viene
     if new_state is not None:
         allowed = record.get("states", [])
         if allowed and new_state not in allowed:
@@ -391,14 +305,12 @@ async def update_record(
     old_state = record["state"]
     old_display_name = record.get("display_name")
 
-    # Obtener info del usuario antes de la transacción
     user_info = await fetch_one(
         get_user_sector_info_query(),
         user_id,
         schema_name=schema_name,
     )
 
-    # Construir params dinámicos
     update_state = new_state is not None
     update_display_name = new_display_name is not None
     query_sql = update_record_query(update_state=update_state, update_display_name=update_display_name)
@@ -410,12 +322,9 @@ async def update_record(
         params.append(new_display_name)
     params.append(record_id)
 
-    # Actualizar + registrar historial en una sola transacción atómica
     async with transaction(schema_name=schema_name, user_id=user_id) as conn:
-        # 1. Actualizar registro
         result = await conn.fetchrow(query_sql, *params)
 
-        # 2. Registrar en historial (misma transacción)
         before_data = {}
         after_data = {}
         if update_state:
@@ -435,7 +344,7 @@ async def update_record(
             insert_history_query(),
             record_id,
             action,
-            None,  # field_name
+            None,
             before_data,
             after_data,
             user_id,
@@ -457,11 +366,6 @@ async def update_record(
     }
 
 
-# Nota: _generate_record_number() fue eliminado en Fase 2.1.
-# La generación de número ahora está integrada dentro de create_record()
-# usando transaction() para garantizar atomicidad.
-
-
 async def autocomplete_records(
     user_id: str,
     query: str,
@@ -469,7 +373,6 @@ async def autocomplete_records(
     schema_name: str,
     limit: int = 10,
 ) -> dict:
-    """Autocomplete de legajos por número."""
     from services.rlm.permissions import _get_user_sector_ids
 
     sector_ids = await _get_user_sector_ids(user_id, schema_name=schema_name)

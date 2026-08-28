@@ -1,12 +1,3 @@
-"""
-Endpoint para subsanar documentos oficiales en expedientes
-POST /cases/{case_id}/subsanar - Subsanar documento oficial erróneo
-
-ARQUITECTURA:
-- Endpoint DELGADO (solo validaciones básicas y llamadas a servicios)
-- Lógica de negocio en services/cases/subsanacion.py
-- Sigue Clean Architecture (Patrón A)
-"""
 
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, Field
@@ -24,18 +15,15 @@ from shared.utils import get_authenticated_user
 from shared.dependencies import get_tenant_schema
 from config.constants import (
     SUBSANAR_SUCCESS,
-    SUBSANAR_ERROR,
     SUBSANAR_SAME_DOCUMENT_ERROR
 )
 from shared.logging import get_logger
 logger = get_logger(__name__)
 
-# Inicializar router
 router = APIRouter(tags=["expedientes"])
 
 
 class SubsanarDocumentRequest(BaseModel):
-    """Modelo para solicitud de subsanación de documento"""
     official_document_id_erroneo: str = Field(
         ...,
         description="UUID del documento oficial erróneo que se desactivará"
@@ -47,7 +35,6 @@ class SubsanarDocumentRequest(BaseModel):
 
 
 class SubsanarDocumentResponse(BaseModel):
-    """Modelo para respuesta de subsanación de documento"""
     success: bool
     data: dict
     message: str
@@ -120,30 +107,21 @@ async def subsanar_document(
     Ver: services/cases/subsanacion.py para la lógica completa
     """
     try:
-        # =================================================================
-        # PASO 1: Validaciones básicas (solo UUIDs)
-        # =================================================================
         logger.info(f"Starting document subsanation for case {case_id[:8]}...")
         logger.info(f"User: {request.state.tenant_user_id[:8]}...")
         logger.info(f"Erroneous document: {body.official_document_id_erroneo[:8]}...")
         logger.info(f"Justifying document: {body.official_document_id_justifica[:8]}...")
 
-        # Validar usuario autenticado
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # Validar UUIDs básicos
         validate_uuid(case_id)
         validate_uuid(body.official_document_id_erroneo)
         validate_uuid(body.official_document_id_justifica)
 
-        # Validar que no sean el mismo documento
         if body.official_document_id_erroneo == body.official_document_id_justifica:
             logger.error("Same document provided as erroneous and justifying")
             raise ValidationError(SUBSANAR_SAME_DOCUMENT_ERROR)
 
-        # =================================================================
-        # PASO 2: Llamar servicio (TODA la lógica de negocio está ahí)
-        # =================================================================
         logger.info("Calling subsanar_document_service...")
 
         result = await subsanar_document_service(
@@ -158,9 +136,6 @@ async def subsanar_document(
         logger.info(f"Deactivated: {result['deactivated_document']['official_number']}")
         logger.info(f"Linked: {result['linked_document']['official_number']}")
 
-        # =================================================================
-        # PASO 3: Retornar respuesta HTTP
-        # =================================================================
         return SubsanarDocumentResponse(
             success=True,
             data=result,
@@ -168,11 +143,9 @@ async def subsanar_document(
         )
 
     except (ValidationError, NotFoundError, AuthorizationError) as e:
-        # Custom exceptions - log and re-raise
         logger.error(f"Error in subsanar_document: {type(e).__name__}: {str(e)}")
         raise exception_to_http_exception(e)
 
     except Exception as e:
-        # Error inesperado
         logger.error(f"Unexpected error in subsanar_document: {type(e).__name__}: {str(e)}")
         raise exception_to_http_exception(e)

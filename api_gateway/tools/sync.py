@@ -1,23 +1,10 @@
-"""
-Sync tools para backup incremental.
-
-Provee catálogo de tablas y datos incrementales por updated_at.
-"""
-import logging
+from shared.logging import get_logger
 from datetime import datetime, timedelta, timezone
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _parse_since(since: str) -> datetime:
-    """
-    Convierte el cursor ISO 8601 (string) a datetime aware.
-
-    asyncpg es estricto con tipos: para comparar contra una columna timestamptz
-    exige un objeto datetime, NO un string (un cast $1::timestamptz tampoco alcanza,
-    asyncpg infiere el tipo del placeholder y rechaza el str antes de enviarlo).
-    Acepta sufijo 'Z' y normaliza naive -> UTC.
-    """
     s = (since or "").strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -26,7 +13,6 @@ def _parse_since(since: str) -> datetime:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
-# 33 tablas sincronizables con su campo cursor
 SYNC_TABLES = {
     "departments": "updated_at",
     "sectors": "updated_at",
@@ -61,28 +47,18 @@ SYNC_TABLES = {
     "record_relations": "updated_at",
     "record_case_links": "updated_at",
     "record_document_links": "updated_at",
+    "citizens": "updated_at",
+    "case_user_views": "last_seen_at",
+    "notification_dismissals": "dismissed_at",
 }
 
-# users: solo columnas seguras (sin auth_id, password, tokens, etc)
 USERS_COLUMNS = "id, full_name, email, sector_id, updated_at"
-OFFICIAL_DOCUMENTS_COLUMNS = "id, document_type_id, reference, official_number, year, department_id, numerator_id, signed_at, signers, global_sequence, signer_sector_ids, resume, created_at, updated_at"
+OFFICIAL_DOCUMENTS_COLUMNS = "id, document_type_id, reference, official_number, year, department_id, numerator_id, numerator_citizen, signed_at, signers, global_sequence, signer_sector_ids, resume, reservation_status, created_at, updated_at"
 
 
 async def get_sync_catalog(*, schema_name: str) -> dict:
-    """
-    Catálogo de tablas sincronizables con count de filas.
-
-    Usa una sola query UNION ALL para obtener los 33 counts
-    en un solo roundtrip (evita bloquear el event loop).
-
-    Returns:
-        dict con server_time, schema_name, tables[]
-    """
     from database import fetch_all
 
-    # Una sola query: 33 counts via UNION ALL — identifiers validados contra SYNC_TABLES whitelist
-    # Comillas dobles obligatorias: los schemas tenant empiezan con dígito (ej: 100_test),
-    # identificador sin comillas -> syntax error en Postgres.
     unions = " UNION ALL ".join(
         f'SELECT \'{table}\' as name, COUNT(*) as total FROM "{schema_name}"."{table}"'
         for table in SYNC_TABLES
@@ -112,24 +88,6 @@ async def get_sync_catalog(*, schema_name: str) -> dict:
 
 
 async def get_sync_data(table: str, since: str, page: int, page_size: int, *, schema_name: str) -> dict:
-    """
-    Datos incrementales de una tabla desde `since`.
-
-    Usa LIMIT+1 pattern para has_more (sin COUNT extra).
-
-    Args:
-        table: Nombre de tabla (debe estar en SYNC_TABLES)
-        since: ISO 8601 timestamp
-        page: Página (1-based)
-        page_size: Filas por página (max 100)
-        schema_name: Schema del tenant
-
-    Returns:
-        dict con server_time, table, rows[], has_more, count
-
-    Raises:
-        ValueError: Si tabla no está en SYNC_TABLES
-    """
     from database import fetch_all
 
     if table not in SYNC_TABLES:
@@ -139,7 +97,6 @@ async def get_sync_data(table: str, since: str, page: int, page_size: int, *, sc
     page_size = min(max(page_size, 1), 100)
     offset = (max(page, 1) - 1) * page_size
 
-    # Columnas: users y official_documents tienen whitelist, el resto SELECT *
     if table == "users":
         cols_sql = USERS_COLUMNS
     elif table == "official_documents":
@@ -147,20 +104,11 @@ async def get_sync_data(table: str, since: str, page: int, page_size: int, *, sc
     else:
         cols_sql = "*"
 
-    # official_documents: excluir RESERVED (nunca firmados) y CANCELLED (pueden borrarse → datos fantasma)
-    # OR IS NULL mantiene backward compat con docs creados antes del refactor FixNumber v2
-    extra_filter = ""
-    if table == "official_documents":
-        extra_filter = "AND (reservation_status = 'CONFIRMED' OR reservation_status IS NULL)"
 
-    # LIMIT+1 para detectar has_more sin COUNT extra — identifiers validados contra SYNC_TABLES whitelist
-    # $1::timestamptz: asyncpg es estricto con tipos. Sin el cast infiere $1 como timestamptz
-    # y exige un datetime; el cast permite pasar el cursor como string ISO (text -> timestamptz).
     query = f"""
         SELECT {cols_sql}
         FROM "{schema_name}"."{table}"
         WHERE {cursor_field} >= $1
-        {extra_filter}
         ORDER BY {cursor_field} ASC
         LIMIT $2 OFFSET $3
     """
@@ -190,22 +138,6 @@ async def get_sync_data(table: str, since: str, page: int, page_size: int, *, sc
 
 
 async def get_sync_documents(since: str, page: int, page_size: int, *, schema_name: str) -> dict:
-    """
-    PDFs de documentos oficiales firmados desde `since`, con presigned URLs de R2.
-
-    Solo incluye documentos con signed_at IS NOT NULL y reservation_status CONFIRMED (o NULL
-    para docs pre-FixNumber). Las URLs expiran en 600 segundos — el cliente debe descargar
-    dentro de ese plazo; si expiran, repite el request para obtener URLs nuevas.
-
-    Args:
-        since: ISO 8601 timestamp cursor
-        page: Página (1-based)
-        page_size: Documentos por página (max 100)
-        schema_name: Schema del tenant
-
-    Returns:
-        dict con server_time, documents[], has_more, count
-    """
     from database import fetch_all
     from services.storage.cloudflare import get_tenant_r2_client
 
@@ -213,11 +145,10 @@ async def get_sync_documents(since: str, page: int, page_size: int, *, schema_na
     offset = (max(page, 1) - 1) * page_size
 
     query = f"""
-        SELECT id, official_number, signed_at
+        SELECT id, official_number, signed_at, pdf_location
         FROM "{schema_name}".official_documents
         WHERE updated_at >= $1
           AND signed_at IS NOT NULL
-          AND (reservation_status = 'CONFIRMED' OR reservation_status IS NULL)
         ORDER BY updated_at ASC
         LIMIT $2 OFFSET $3
     """
@@ -235,7 +166,7 @@ async def get_sync_documents(since: str, page: int, page_size: int, *, schema_na
 
     documents = []
     for row in rows:
-        pdf_url = r2.get_oficial_url(row["official_number"])
+        pdf_url = r2.get_oficial_url(row["official_number"], row.get("pdf_location") or "oficial")
         documents.append({
             "id": str(row["id"]),
             "official_number": row["official_number"],

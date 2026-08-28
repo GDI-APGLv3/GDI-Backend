@@ -1,17 +1,3 @@
-"""
-Test paralelo: crea N expedientes en paralelo y luego vincula 2 docs a cada uno.
-
-Valida:
-1. Creacion de expedientes en paralelo (incluye CAEX firma con Notary)
-2. Vinculacion de docs (con la nueva validacion signed_at IS NOT NULL)
-3. Paralelismo del lock 999999 (cases) post-refactor
-4. Flujo inactive -> active del expediente
-
-Uso:
-    python tests/test_parallel_cases.py [N]
-
-Default N=10. Apunta a <your-backend-app> en TESTING_MODE.
-"""
 
 import asyncio
 import sys
@@ -20,11 +6,10 @@ from collections import Counter
 
 import httpx
 
-# === CONFIGURACION ===
 BASE_URL = "https://<your-backend-app>.fly.dev"
 USER_ID = "a1000000-0000-0000-0000-000000000100"
 SCHEMA_NAME = "100_test"
-CASE_TEMPLATE_ID = "c1000000-0000-0000-0000-000000000001"  # TEST template
+CASE_TEMPLATE_ID = "c1000000-0000-0000-0000-000000000001"
 
 HEADERS = {
     "X-User-ID": USER_ID,
@@ -32,7 +17,6 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Pool de docs ya firmados para vincular (de tests previos)
 DOCS_TO_LINK = [
     "b59f59f4-13ee-45ef-b426-3f017ad93be2",
     "1f486233-d292-4218-bffa-bb078689af17",
@@ -138,9 +122,6 @@ async def main(n=10):
     limits = httpx.Limits(max_connections=100, max_keepalive_connections=50)
     async with httpx.AsyncClient(limits=limits) as client:
 
-        # ============================================
-        # FASE 1: Crear N expedientes en PARALELO
-        # ============================================
         print(f"FASE 1: Creando {n} expedientes EN PARALELO...")
         print("(estresa: lock 999999 cases + lock 888888 CAEX + Notary + R2)\n")
 
@@ -183,9 +164,6 @@ async def main(n=10):
             print("\n[ERR] No hay expedientes para vincular. Abortando.")
             return
 
-        # ============================================
-        # FASE 2: Vincular 2 docs a cada expediente EN PARALELO
-        # ============================================
         print(f"\n{'='*70}")
         print(f"FASE 2: Vinculando 2 docs a cada uno de los {len(case_successes)} expedientes")
         print(f"        (total: {len(case_successes)*2} vinculaciones EN PARALELO)")
@@ -222,9 +200,6 @@ async def main(n=10):
             for f in link_failures[:5]:
                 print(f"    [{f['label']}] {f['status']}: {f.get('error', '')[:120]}")
 
-        # ============================================
-        # RESUMEN
-        # ============================================
         print(f"\n{'='*70}")
         print("RESUMEN GENERAL")
         print(f"{'='*70}")

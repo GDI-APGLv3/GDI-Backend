@@ -1,27 +1,8 @@
-"""
-Tests Gateway "Cola S8" — Tickets S8-011 a S8-015.
-
-Verifica:
-1. Que los nuevos handlers están exportados desde api_gateway/rest_api.py.
-2. Que las nuevas rutas están registradas en el Starlette app (http_server).
-3. Que las nuevas tools MCP (responsables) están en la lista y dispatch.
-4. Que los handlers REST tienen la estructura correcta (auth, delegación a service).
-5. Fix M1: ValidationError en api_get_case_movements → 401 (no 500).
-6. Fix M2: sector_id validado contra sectores del expediente en add_case_responsible.
-
-Nota S8-015: import_document NO existe como tool MCP. La importación de PDFs
-es exclusivamente REST (api_import_document / api_replace_imported_pdf).
-
-NO requiere tunnel a Postgres: usa mocks en todos los casos.
-"""
 import inspect
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 
-# ---------------------------------------------------------------------------
-# Constantes de test
-# ---------------------------------------------------------------------------
 TEST_SCHEMA = "100_test"
 TEST_USER_ID = "a1000000-0000-0000-0000-000000000001"
 TEST_CASE_ID = "ef102207-86c4-415a-883b-088b51ee5d45"
@@ -29,12 +10,7 @@ TEST_DOC_ID  = "doc12300-86c4-415a-883b-088b51ee5d45"
 TEST_RESPONSIBLE_ID = "res12300-86c4-415a-883b-088b51ee5d45"
 
 
-# ===========================================================================
-# 1. Exportaciones desde rest_api.py
-# ===========================================================================
-
 class TestRestApiExports:
-    """Verifica que los nuevos handlers están definidos en rest_api.py."""
 
     def test_subsanar_handler_exported(self):
         from api_gateway.rest_api import api_subsanar_document
@@ -53,15 +29,9 @@ class TestRestApiExports:
         assert inspect.iscoroutinefunction(api_get_case_movements)
 
 
-# ===========================================================================
-# 2. Rutas registradas en el Starlette app (http_server routes)
-# ===========================================================================
-
 class TestGatewayRouteRegistration:
-    """Verifica que todas las nuevas rutas están registradas en el Gateway."""
 
     def _get_routes(self):
-        """Obtiene el dict {(path, method): handler} del Starlette app."""
         from api_gateway.http_server import routes as gateway_routes
         result = {}
         for route in gateway_routes:
@@ -70,21 +40,18 @@ class TestGatewayRouteRegistration:
                     result[(route.path, method)] = getattr(route, "endpoint", None)
         return result
 
-    # S8-011
     def test_subsanar_route_registered(self):
         routes = self._get_routes()
         assert ("/api/v1/cases/{case_id}/subsanar", "POST") in routes, (
             "Ruta POST /api/v1/cases/{case_id}/subsanar no registrada en el Gateway"
         )
 
-    # S8-012 (ya existía, verificamos que sigue ahí)
     def test_delete_document_route_registered(self):
         routes = self._get_routes()
         assert ("/api/v1/documents/{document_id}", "DELETE") in routes, (
             "Ruta DELETE /api/v1/documents/{document_id} no registrada en el Gateway"
         )
 
-    # S8-013
     def test_get_case_responsibles_route_registered(self):
         routes = self._get_routes()
         assert ("/api/v1/cases/{case_id}/responsibles", "GET") in routes
@@ -97,14 +64,12 @@ class TestGatewayRouteRegistration:
         routes = self._get_routes()
         assert ("/api/v1/cases/{case_id}/responsibles/{responsible_id}", "DELETE") in routes
 
-    # S8-014
     def test_get_case_movements_route_registered(self):
         routes = self._get_routes()
         assert ("/api/v1/cases/{case_id}/movements", "GET") in routes, (
             "Ruta GET /api/v1/cases/{case_id}/movements no registrada en el Gateway"
         )
 
-    # S8-015 (ya existían, verificamos)
     def test_import_document_route_registered(self):
         routes = self._get_routes()
         assert ("/api/v1/documents/import", "POST") in routes
@@ -114,17 +79,9 @@ class TestGatewayRouteRegistration:
         assert ("/api/v1/documents/{document_id}/imported-pdf", "PUT") in routes
 
 
-# ===========================================================================
-# 3. MCP tools: definición en tools list + dispatch
-# ===========================================================================
-
 class TestMcpToolsDefinition:
-    """Verifica que las nuevas tools MCP están en la lista de tools."""
 
     def _get_tool_names(self):
-        """Extrae los nombres de tools de handle_list_tools sin BD."""
-        # Llamamos directamente a la función que construye la lista,
-        # mockeando create_jsonrpc_response para capturar el payload.
         import asyncio
         from api_gateway import http_server
 
@@ -159,14 +116,12 @@ class TestMcpToolsDefinition:
         assert "remove_case_responsible" in names
 
     def test_import_document_not_in_tool_list(self):
-        """import_document NO debe existir como tool MCP (S8-015 revertido: solo REST)."""
         names = self._get_tool_names()
         assert "import_document" not in names, (
             "Tool 'import_document' no debe estar en MCP — la importación es solo REST"
         )
 
     def test_get_case_has_include_movements_param(self):
-        """get_case debe aceptar include_movements en su inputSchema."""
         from api_gateway import http_server
         import asyncio
 
@@ -190,12 +145,7 @@ class TestMcpToolsDefinition:
         )
 
 
-# ===========================================================================
-# 4. Firma de funciones en tools layer
-# ===========================================================================
-
 class TestToolsFunctionSignatures:
-    """Verifica la firma de las nuevas funciones en api_gateway/tools/."""
 
     def test_get_case_accepts_include_movements(self):
         from api_gateway.tools.cases import get_case
@@ -203,7 +153,6 @@ class TestToolsFunctionSignatures:
         assert "include_movements" in sig.parameters, (
             "get_case no acepta include_movements"
         )
-        # Debe tener default False
         assert sig.parameters["include_movements"].default is False
 
     def test_get_case_responsibles_list_signature(self):
@@ -228,16 +177,10 @@ class TestToolsFunctionSignatures:
         assert required.issubset(params)
 
 
-# ===========================================================================
-# 5. Handlers REST: estructura básica (sin BD)
-# ===========================================================================
-
 class TestRestHandlersStructure:
-    """Verifica que los handlers delegan a los services correctos."""
 
     @pytest.mark.asyncio
     async def test_subsanar_returns_401_without_api_key(self):
-        """Sin X-API-Key, debe retornar 401."""
         from api_gateway.rest_api import api_subsanar_document
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
@@ -261,7 +204,6 @@ class TestRestHandlersStructure:
 
     @pytest.mark.asyncio
     async def test_movements_returns_401_without_api_key(self):
-        """Sin X-API-Key, debe retornar 401."""
         from api_gateway.rest_api import api_get_case_movements
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
@@ -280,7 +222,6 @@ class TestRestHandlersStructure:
 
     @pytest.mark.asyncio
     async def test_subsanar_validates_same_document(self):
-        """Si ambos UUIDs son iguales, debe retornar 400 antes de llamar al servicio."""
         from api_gateway.rest_api import api_subsanar_document
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
@@ -298,8 +239,7 @@ class TestRestHandlersStructure:
             schema_name=TEST_SCHEMA,
             user_id=TEST_USER_ID,
         )
-        # Patchear en el módulo rest_api donde la función ya está importada
-        with patch("api_gateway.rest_api.validate_rest_api_key",
+        with patch("api_gateway.rest_common.validate_rest_api_key",
                    new=AsyncMock(return_value=mock_ctx)):
             same_id = "aabb1122-0000-0000-0000-000000000001"
             resp = client.post(
@@ -313,19 +253,10 @@ class TestRestHandlersStructure:
         assert "iguales" in resp.json()["error"].lower()
 
 
-# ===========================================================================
-# 7. Fix M1 — ValidationError en api_get_case_movements → 401, no 500
-# ===========================================================================
-
 class TestMovementsValidationError:
-    """Verifica que ValidationError en get_case_movements retorna 401 (no 500)."""
 
     @pytest.mark.asyncio
     async def test_movements_returns_401_on_validation_error(self):
-        """
-        Si get_authenticated_user lanza ValidationError (usuario inactivo/no existe en schema),
-        el handler debe retornar 401 en vez de caer en el except genérico (500).
-        """
         from api_gateway.rest_api import api_get_case_movements
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
@@ -345,7 +276,7 @@ class TestMovementsValidationError:
             user_id=TEST_USER_ID,
         )
 
-        with patch("api_gateway.rest_api.validate_rest_api_key", new=AsyncMock(return_value=mock_ctx)):
+        with patch("api_gateway.rest_common.validate_rest_api_key", new=AsyncMock(return_value=mock_ctx)):
             with patch(
                 "shared.utils.get_authenticated_user",
                 new=AsyncMock(side_effect=GDIValidationError("Usuario no existe en este schema")),
@@ -361,15 +292,7 @@ class TestMovementsValidationError:
         assert "Usuario" in resp.json()["error"] or resp.status_code == 401
 
 
-# ===========================================================================
-# 8. Fix M2 — Validación de sector_id en add_case_responsible (sin BD real)
-# ===========================================================================
-
 class TestAddCaseResponsibleSectorValidation:
-    """
-    Verifica que add_case_responsible (tools layer) valida sector_id
-    contra los sectores reales del expediente antes de llamar al servicio.
-    """
 
     def _make_ctx(self):
         from api_gateway.context import MCPContext
@@ -382,25 +305,19 @@ class TestAddCaseResponsibleSectorValidation:
 
     @pytest.mark.asyncio
     async def test_rejects_sector_not_in_case(self):
-        """
-        Si sector_id no figura entre admin_sector ni assigned_sectors del expediente,
-        add_case_responsible debe lanzar ValueError con mensaje claro.
-        """
         from api_gateway.tools.cases import add_case_responsible
 
         ctx = self._make_ctx()
         VALID_SECTOR = "sect0001-0000-0000-0000-000000000001"
         INVALID_SECTOR = "sect9999-0000-0000-0000-000000000099"
 
-        # fetch_all está importado a nivel de módulo en api_gateway.tools.cases,
-        # por eso patcheamos la referencia ahí (no en database).
         with patch("services.cases.permissions.can_user_view_case", new=AsyncMock(return_value=True)), \
              patch("services.cases.permissions.can_user_edit_case", new=AsyncMock(return_value=True)), \
              patch("api_gateway.tools.cases.fetch_all") as mock_fetch_all:
 
             mock_fetch_all.side_effect = [
-                [{"sector_id": VALID_SECTOR}],   # admin_sector
-                [],                               # assigned_sectors (ninguno)
+                [{"sector_id": VALID_SECTOR}],
+                [],
             ]
 
             with pytest.raises(ValueError, match="[Ss]ector|no participa"):
@@ -415,9 +332,6 @@ class TestAddCaseResponsibleSectorValidation:
 
     @pytest.mark.asyncio
     async def test_accepts_admin_sector(self):
-        """
-        Si sector_id coincide con el admin_sector del expediente, debe ser aceptado.
-        """
         from api_gateway.tools.cases import add_case_responsible
 
         ctx = self._make_ctx()
@@ -430,8 +344,8 @@ class TestAddCaseResponsibleSectorValidation:
              patch("services.cases.responsibles.add_responsible", new=AsyncMock(return_value=mock_add_result)):
 
             mock_fetch_all.side_effect = [
-                [{"sector_id": ADMIN_SECTOR}],  # admin_sector
-                [],                              # assigned_sectors
+                [{"sector_id": ADMIN_SECTOR}],
+                [],
             ]
 
             result = await add_case_responsible(
@@ -447,9 +361,6 @@ class TestAddCaseResponsibleSectorValidation:
 
     @pytest.mark.asyncio
     async def test_accepts_assigned_sector(self):
-        """
-        Si sector_id es uno de los assigned_sectors del expediente, debe ser aceptado.
-        """
         from api_gateway.tools.cases import add_case_responsible
 
         ctx = self._make_ctx()
@@ -463,8 +374,8 @@ class TestAddCaseResponsibleSectorValidation:
              patch("services.cases.responsibles.add_responsible", new=AsyncMock(return_value=mock_add_result)):
 
             mock_fetch_all.side_effect = [
-                [{"sector_id": ADMIN_SECTOR}],           # admin_sector
-                [{"sector_id": ASSIGNED_SECTOR}],        # assigned_sectors
+                [{"sector_id": ADMIN_SECTOR}],
+                [{"sector_id": ASSIGNED_SECTOR}],
             ]
 
             result = await add_case_responsible(

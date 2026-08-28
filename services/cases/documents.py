@@ -1,9 +1,5 @@
-"""
-Módulo de documentos para expedientes.
-Funciones para gestionar documentos dentro de expedientes.
-"""
 
-from typing import List, Dict, Any
+from typing import Dict, Any, Optional
 from shared.logging import get_logger
 import uuid
 
@@ -14,16 +10,14 @@ from shared.exceptions import (
     AuthorizationError,
     ValidationError,
     DatabaseError,
-    BusinessLogicError
+    BusinessLogicError,
+    TransientLookupError,
 )
 
 logger = get_logger(__name__)
 
 
 async def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """
-    Obtener documentos vinculados al expediente (oficiales y propuestos).
-    """
     from services.case_queries import get_official_documents_query, get_proposed_documents_query
     from config.constants import DOCUMENTS_ERROR
 
@@ -40,6 +34,7 @@ async def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any
                 "document_id": str(doc['document_id']),
                 "order": doc['order_number'],
                 "official_number": doc['official_number'],
+                "_pdf_location": doc.get('pdf_location') or "oficial",
                 "reference": doc['reference'],
                 "linked_date": doc['linking_date'].isoformat() if doc['linking_date'] else None,
                 "is_active": doc['is_active'],
@@ -47,6 +42,8 @@ async def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any
                 "short_resume": doc.get('short_resume'),
                 "linked_by": doc.get('linked_by'),
                 "linked_sector": doc.get('linked_sector'),
+                "is_reserved": bool(doc.get('is_reserved', False)),
+                "is_public": doc.get('document_type_visibility') == 'publico',
             })
 
         if official_list:
@@ -54,8 +51,11 @@ async def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any
             r2_client = await get_tenant_r2_client(schema_name=schema_name)
             for doc in official_list:
                 official_number = doc.get("official_number")
+                _loc = doc.pop("_pdf_location", "oficial")
                 if official_number:
-                    doc["pdf_url"] = await run_in_threadpool(r2_client.get_oficial_url, official_number)
+                    doc["pdf_url"] = await run_in_threadpool(
+                        r2_client.get_oficial_url, official_number, _loc
+                    )
 
         proposed_list = [
             {
@@ -66,6 +66,8 @@ async def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any
                 "document_number": doc.get('document_number'),
                 "document_type_name": doc.get('document_type_name'),
                 "document_type_acronym": doc.get('document_type_acronym'),
+                "is_reserved": bool(doc.get('is_reserved', False)),
+                "is_public": doc.get('document_type_visibility') == 'publico',
                 "can_link": bool(doc.get('can_link', False)),
                 "proposed_date": doc['proposing_date'].isoformat() if doc['proposing_date'] else None,
                 "proposed_by": doc['proposed_by'],
@@ -88,6 +90,73 @@ async def get_case_documents(case_id: str, *, schema_name: str) -> Dict[str, Any
         raise BusinessLogicError(DOCUMENTS_ERROR)
 
 
+async def _assert_can_link_documents(
+    case_id: str,
+    linking_user_id: str,
+    *,
+    schema_name: str
+) -> None:
+    from services.case_service import CaseService
+
+    user_sector_ids = await CaseService.get_user_editable_sector_ids(linking_user_id, schema_name=schema_name)
+    logger.debug(f"User {linking_user_id} editable sectors for linking: {user_sector_ids}")
+
+    if not user_sector_ids:
+        raise AuthorizationError("Usuario sin permisos de edicion en ningun sector")
+
+    permission_check = """
+        SELECT 1
+        FROM cases c
+        WHERE c.id = $1
+        AND (
+            EXISTS (
+                SELECT 1 FROM case_movements cm
+                WHERE cm.case_id = c.id
+                AND cm.assigned_sector_id = ANY($2::uuid[])
+                AND cm.is_active = true
+            )
+            OR
+            EXISTS (
+                SELECT 1 FROM case_movements cm
+                WHERE cm.case_id = c.id
+                AND cm.type = 'transfer'
+                AND cm.is_active = false
+                AND cm.admin_sector_id = ANY($3::uuid[])
+                AND cm.closed_at = (
+                    SELECT MAX(cm2.closed_at)
+                    FROM case_movements cm2
+                    WHERE cm2.case_id = c.id
+                    AND cm2.type = 'transfer'
+                    AND cm2.is_active = false
+                )
+            )
+            OR
+            (
+                EXISTS (
+                    SELECT 1 FROM case_movements cm
+                    WHERE cm.case_id = c.id
+                    AND cm.type = 'creation'
+                    AND cm.admin_sector_id = ANY($4::uuid[])
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM case_movements cm
+                    WHERE cm.case_id = c.id
+                    AND cm.type = 'transfer'
+                )
+            )
+        )
+    """
+
+    permission_result = await fetch_all(
+        permission_check,
+        case_id, user_sector_ids, user_sector_ids, user_sector_ids,
+        schema_name=schema_name
+    )
+
+    if not permission_result:
+        raise AuthorizationError("No tiene permisos para vincular documentos a este expediente")
+
+
 async def link_official_document(
     case_id: str,
     official_document_id: str,
@@ -96,15 +165,10 @@ async def link_official_document(
     *,
     schema_name: str,
     reason_override: str | None = None,
-    auth_source: str = "jwt"
+    auth_source: str = "jwt",
+    system_generated: bool = False
 ) -> Dict[str, Any]:
-    """
-    Vincular documento oficial a expediente.
-    """
-    from services.case_service import CaseService
-
     try:
-        # 1. Verificar que el expediente existe
         case_result = await fetch_all(
             "SELECT c.id, c.case_number FROM cases c WHERE c.id = $1",
             case_id,
@@ -116,66 +180,14 @@ async def link_official_document(
 
         case_number = case_result[0]['case_number']
 
-        # 2. Verificar permisos del usuario
-        user_sector_ids = await CaseService.get_user_editable_sector_ids(linking_user_id, schema_name=schema_name)
-        logger.debug(f"User {linking_user_id} editable sectors for linking: {user_sector_ids}")
-
-        if not user_sector_ids:
-            raise AuthorizationError("Usuario sin permisos de edicion en ningun sector")
-
-        permission_check = """
-            SELECT 1
-            FROM cases c
-            WHERE c.id = $1
-            AND (
-                EXISTS (
-                    SELECT 1 FROM case_movements cm
-                    WHERE cm.case_id = c.id
-                    AND cm.assigned_sector_id = ANY($2::uuid[])
-                    AND cm.is_active = true
-                )
-                OR
-                EXISTS (
-                    SELECT 1 FROM case_movements cm
-                    WHERE cm.case_id = c.id
-                    AND cm.type = 'transfer'
-                    AND cm.is_active = false
-                    AND cm.admin_sector_id = ANY($3::uuid[])
-                    AND cm.closed_at = (
-                        SELECT MAX(cm2.closed_at)
-                        FROM case_movements cm2
-                        WHERE cm2.case_id = c.id
-                        AND cm2.type = 'transfer'
-                        AND cm2.is_active = false
-                    )
-                )
-                OR
-                (
-                    EXISTS (
-                        SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = c.id
-                        AND cm.type = 'creation'
-                        AND cm.admin_sector_id = ANY($4::uuid[])
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1 FROM case_movements cm
-                        WHERE cm.case_id = c.id
-                        AND cm.type = 'transfer'
-                    )
-                )
+        if system_generated:
+            logger.info(
+                f"Linking system-generated document {official_document_id} to case {case_id} "
+                f"(permission check skipped)"
             )
-        """
+        else:
+            await _assert_can_link_documents(case_id, linking_user_id, schema_name=schema_name)
 
-        permission_result = await fetch_all(
-            permission_check,
-            case_id, user_sector_ids, user_sector_ids, user_sector_ids,
-            schema_name=schema_name
-        )
-
-        if not permission_result:
-            raise AuthorizationError("No tiene permisos para vincular documentos a este expediente")
-
-        # 3. Verificar que el documento oficial existe y está firmado
         doc_result = await fetch_all(
             "SELECT id, official_number, reference FROM official_documents WHERE id = $1 AND signed_at IS NOT NULL",
             official_document_id,
@@ -188,7 +200,6 @@ async def link_official_document(
         official_number = doc_result[0]['official_number']
         doc_reference = doc_result[0]['reference']
 
-        # 4. Verificar que no esté duplicado
         duplicate_result = await fetch_all(
             "SELECT 1 FROM case_official_documents WHERE case_id = $1 AND official_document_id = $2 AND is_active = true",
             case_id, official_document_id,
@@ -198,20 +209,43 @@ async def link_official_document(
         if duplicate_result:
             raise ValidationError(f"El documento {official_number} ya está vinculado a este expediente")
 
-        # 5. Transacción atómica
         try:
             async with transaction(schema_name=schema_name, user_id=linking_user_id, auth_source=auth_source) as conn:
-                # Bloquear la fila del expediente para evitar race conditions
                 await conn.execute("SELECT 1 FROM cases WHERE id = $1 FOR UPDATE", case_id)
 
-                # Calcular siguiente order_number
+                reserved_check = await conn.fetchrow(
+                    """
+                    SELECT dt.is_reserved AS doc_reserved, ct.is_reserved AS case_reserved
+                    FROM official_documents od
+                    JOIN document_types dt ON od.document_type_id = dt.id
+                    CROSS JOIN cases c
+                    JOIN case_templates ct ON ct.id = c.case_template_id
+                    WHERE od.id = $1 AND c.id = $2
+                    """,
+                    official_document_id, case_id
+                )
+                if reserved_check is None:
+                    logger.warning(
+                        "gdi287.reserved_check_phantom doc=%s case=%s — reserved_check "
+                        "volvió vacío al vincular un oficial; se responde 503 en vez de "
+                        "asumir 'no reservado'",
+                        official_document_id[:8], case_id[:8],
+                    )
+                    raise TransientLookupError(
+                        "No se pudo verificar la política de reserva del documento "
+                        "en este momento. Reintentá en unos segundos."
+                    )
+                if reserved_check['doc_reserved'] and not reserved_check['case_reserved']:
+                    raise ValidationError(
+                        "Un documento reservado solo puede vincularse a un expediente reservado"
+                    )
+
                 max_order_row = await conn.fetchrow(
                     "SELECT COALESCE(MAX(order_number), 0) as max_order FROM case_official_documents WHERE case_id = $1",
                     case_id
                 )
                 next_order = (max_order_row['max_order'] + 1) if max_order_row else 1
 
-                # Insertar en case_official_documents
                 link_id = str(uuid.uuid4())
 
                 linking_row = await conn.fetchrow(
@@ -229,7 +263,6 @@ async def link_official_document(
                 )
                 linking_date = linking_row['linking_date']
 
-                # Obtener admin_sector_id del expediente para el movimiento
                 admin_result = await conn.fetchrow(
                     """
                     SELECT s.id as admin_sector_id
@@ -245,7 +278,6 @@ async def link_official_document(
                 )
                 admin_sector_id = admin_result['admin_sector_id'] if admin_result else user_sector_id
 
-                # Registrar acción en historial
                 movement_id = str(uuid.uuid4())
                 await conn.execute(
                     """
@@ -263,7 +295,7 @@ async def link_official_document(
                     reason_override or f"Vinculó documento: {official_number} ({doc_reference})"
                 )
 
-        except (AuthorizationError, NotFoundError, ValidationError):
+        except (AuthorizationError, NotFoundError, ValidationError, TransientLookupError):
             raise
         except Exception as e:
             raise DatabaseError(f"Error en transacción de vinculación: {str(e)}")
@@ -279,7 +311,7 @@ async def link_official_document(
             "linking_date": linking_date
         }
 
-    except (AuthorizationError, NotFoundError, ValidationError, DatabaseError):
+    except (AuthorizationError, NotFoundError, ValidationError, DatabaseError, TransientLookupError):
         raise
     except Exception as e:
         raise BusinessLogicError(f"Error vinculando documento: {str(e)}")
@@ -294,9 +326,6 @@ async def accept_proposed_document(
     schema_name: str,
     auth_source: str = "jwt"
 ) -> Dict[str, Any]:
-    """
-    Aceptar documento propuesto: vincular el documento oficial al expediente y desactivar la propuesta.
-    """
     from services.case_queries import get_proposed_document_by_id_query, deactivate_proposed_document_query
     from config.constants import (
         PROPOSED_DOCUMENT_NOT_FOUND,
@@ -347,7 +376,8 @@ async def accept_proposed_document(
 
         return link_result
 
-    except (AuthorizationError, NotFoundError, ValidationError, DatabaseError):
+    except (AuthorizationError, NotFoundError, ValidationError, DatabaseError,
+            TransientLookupError):
         raise
     except Exception as e:
         logger.error(f"Error accepting proposed document: {str(e)}")
@@ -363,9 +393,6 @@ async def reject_proposed_document(
     schema_name: str,
     auth_source: str = "jwt"
 ) -> Dict[str, Any]:
-    """
-    Rechazar documento propuesto: desactivar la propuesta sin vincular.
-    """
     from services.case_queries import get_proposed_document_by_id_query, deactivate_proposed_document_query
     from services.case_service import CaseService
     from config.constants import (
@@ -449,7 +476,6 @@ async def reject_proposed_document(
             schema_name=schema_name, user_id=user_id, auth_source=auth_source
         )
 
-        # Registrar en historial del expediente
         try:
             from services.cases.history import create_movement
             from config.constants import MOVEMENT_TYPE_DOCUMENT_PROPOSAL_REJECT
@@ -509,62 +535,137 @@ async def reject_proposed_document(
 async def propose_document_to_case(
     case_id: str,
     document_draft_id: str,
-    proposing_user_id: str,
+    proposing_user_id: Optional[str] = None,
     *,
     schema_name: str,
+    auth_source: str = "jwt",
+    proposing_citizen_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Proponer un documento borrador para vincularlo a un expediente.
-
-    Inserta un registro en case_proposed_documents. El documento queda como
-    propuesta activa hasta que un responsable del expediente la acepte o rechace.
-
-    Args:
-        case_id: UUID del expediente
-        document_draft_id: UUID del documento borrador a proponer
-        proposing_user_id: UUID del usuario que propone
-        schema_name: Schema de la municipalidad (keyword-only)
-
-    Returns:
-        Dict con case_id, document_draft_id y mensaje de confirmación
-
-    Raises:
-        ValidationError: Si faltan parámetros requeridos
-        NotFoundError: Si el borrador no existe en el tenant
-        BusinessLogicError: Si hay error de BD
-    """
     if not case_id:
         raise ValidationError("case_id es requerido")
     if not document_draft_id:
         raise ValidationError("document_draft_id es requerido")
-    if not proposing_user_id:
-        raise ValidationError("proposing_user_id es requerido")
+    if bool(proposing_user_id) == bool(proposing_citizen_id):
+        raise ValidationError("Se requiere exactamente uno de proposing_user_id o proposing_citizen_id")
+    is_citizen_actor = proposing_citizen_id is not None
+    proposer_id = proposing_citizen_id if is_citizen_actor else proposing_user_id
 
     try:
         logger.info(
             f"Proposing document {document_draft_id} to case {case_id} "
-            f"by user {proposing_user_id}"
+            f"by {'citizen' if is_citizen_actor else 'user'} {proposer_id}"
         )
 
-        # Validar que el borrador existe en el tenant antes del INSERT para
-        # evitar una violación de FK que llegaría al cliente como 500.
         from database import check_document_exists
         if not await check_document_exists(document_draft_id, schema_name=schema_name):
             raise NotFoundError(
                 f"Documento borrador no encontrado: {document_draft_id}"
             )
 
-        await execute(
-            """
-            INSERT INTO case_proposed_documents
-                (case_id, document_draft_id, proposing_user_id, proposing_date, is_active)
-            VALUES ($1, $2, $3, NOW(), true)
-            """,
-            case_id, document_draft_id, proposing_user_id,
-            schema_name=schema_name,
-        )
+        async with transaction(schema_name=schema_name, user_id=proposer_id, auth_source=auth_source) as conn:
+            reserved_check = await conn.fetchrow(
+                """
+                SELECT COALESCE(dt.is_reserved, false) AS doc_reserved, ct.is_reserved AS case_reserved
+                FROM document_draft dd
+                LEFT JOIN document_types dt ON dd.document_type_id = dt.id
+                CROSS JOIN cases c
+                JOIN case_templates ct ON ct.id = c.case_template_id
+                WHERE dd.id = $1 AND c.id = $2
+                """,
+                document_draft_id, case_id
+            )
+            if reserved_check is None:
+                logger.warning(
+                    "gdi276.reserved_check_phantom doc=%s case=%s — reserved_check "
+                    "volvió vacío; se responde 503 en vez de asumir 'no reservado'",
+                    document_draft_id[:8], case_id[:8],
+                )
+                raise TransientLookupError(
+                    "No se pudo verificar la política de reserva del documento "
+                    "en este momento. Reintentá en unos segundos."
+                )
+            if reserved_check['doc_reserved'] and not reserved_check['case_reserved']:
+                raise ValidationError(
+                    "Un documento reservado solo puede proponerse a un expediente reservado"
+                )
+
+            if is_citizen_actor:
+                await conn.execute(
+                    """
+                    INSERT INTO case_proposed_documents
+                        (case_id, document_draft_id, proposing_citizen_id, proposing_date, is_active)
+                    VALUES ($1, $2, $3, NOW(), true)
+                    """,
+                    case_id, document_draft_id, proposing_citizen_id,
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO case_proposed_documents
+                        (case_id, document_draft_id, proposing_user_id, proposing_date, is_active)
+                    VALUES ($1, $2, $3, NOW(), true)
+                    """,
+                    case_id, document_draft_id, proposing_user_id,
+                )
 
         logger.info(f"Document {document_draft_id} proposed to case {case_id}")
+
+        try:
+            from services.cases.history import create_movement
+            from config.constants import MOVEMENT_TYPE_DOCUMENT_PROPOSAL
+
+            admin_result = await fetch_all(
+                """SELECT admin_sector_id FROM case_movements
+                   WHERE case_id = $1 AND type IN ('creation', 'transfer')
+                   ORDER BY created_at DESC LIMIT 1""",
+                case_id, schema_name=schema_name
+            )
+            admin_sector_id = str(admin_result[0]['admin_sector_id']) if admin_result else None
+
+            if is_citizen_actor:
+                creator_sector_id = admin_sector_id
+            else:
+                user_sector_result = await fetch_all(
+                    "SELECT sector_id FROM users WHERE id = $1",
+                    proposing_user_id, schema_name=schema_name
+                )
+                creator_sector_id = (
+                    str(user_sector_result[0]['sector_id'])
+                    if user_sector_result and user_sector_result[0]['sector_id']
+                    else admin_sector_id
+                )
+
+            if admin_sector_id and creator_sector_id:
+                doc_row = await fetch_all(
+                    "SELECT reference, document_number FROM document_draft WHERE id = $1",
+                    document_draft_id, schema_name=schema_name
+                )
+                reference = doc_row[0]['reference'] if doc_row else 'Sin referencia'
+                doc_number = doc_row[0]['document_number'] if doc_row else None
+                reason = f"Propuso vincular {reference}"
+                if doc_number:
+                    reason += f" ({doc_number})"
+
+                await create_movement(
+                    case_id=case_id,
+                    movement_type=MOVEMENT_TYPE_DOCUMENT_PROPOSAL,
+                    user_id=None if is_citizen_actor else proposing_user_id,
+                    citizen_id=proposing_citizen_id if is_citizen_actor else None,
+                    creator_sector_id=creator_sector_id,
+                    admin_sector_id=admin_sector_id,
+                    reason=reason,
+                    supporting_document_id=document_draft_id,
+                    schema_name=schema_name,
+                    auth_source=auth_source,
+                )
+                logger.info(f"Proposal history recorded for case {case_id}")
+            else:
+                logger.warning(
+                    f"No se pudo registrar movement de propose para case {case_id}: "
+                    f"faltan sectores (admin={admin_sector_id}, creator={creator_sector_id})"
+                )
+        except Exception as hist_error:
+            logger.warning(f"Error recording proposal history for case {case_id}: {hist_error}")
 
         return {
             "case_id": case_id,
@@ -572,7 +673,7 @@ async def propose_document_to_case(
             "message": "Documento propuesto para vincular al expediente",
         }
 
-    except (ValidationError, NotFoundError):
+    except (ValidationError, NotFoundError, DatabaseError, TransientLookupError):
         raise
     except Exception as e:
         logger.error(f"Error proposing document to case: {str(e)}")

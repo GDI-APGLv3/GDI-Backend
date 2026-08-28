@@ -1,47 +1,64 @@
-fastapi>=0.104.0
-uvicorn>=0.24.0
-gunicorn>=21.0.0
-asyncpg>=0.30.0
-pydantic>=2.4.2
-pydantic-settings>=2.0.3
-requests>=2.31.0
-PyJWT[crypto]>=2.8.0
-python-multipart>=0.0.6
-email-validator>=2.0.0
-redis>=5.0.1
-python-dotenv>=1.0.0
+# DEUDA CONOCIDA (hallazgo #10, auditoria seguridad 2026-07-10): este archivo
+# usa solo floors `>=` + techos de major (agregados aqui), pero SIGUE SIN
+# lockfile (pip-tools/uv con hashes). Sin lockfile la resolucion no es
+# reproducible: dos builds del mismo commit pueden traer minors/patches
+# distintos. Migrar a `pip-tools` (requirements.in -> requirements.txt
+# compilado con hashes) o `uv pip compile` es el proximo paso pendiente.
+# Mientras tanto, `.github/workflows/pip-audit.yml` escanea CVEs conocidas
+# en cada push (no bloqueante).
+fastapi>=0.104.0,<1.0.0
+uvicorn>=0.24.0,<1.0.0
+gunicorn>=21.0.0,<27.0.0
+asyncpg>=0.30.0,<1.0.0
+pydantic>=2.4.2,<3.0.0
+requests>=2.31.0,<3.0.0
+PyJWT[crypto]>=2.8.0,<3.0.0
+# Floor subido de 0.0.6 a 0.0.18: cierra el DoS de parsing de multipart
+# (CVE-2024-24762 / GHSA-59g5-xgcq-4qw3), corregido en 0.0.7 y endurecido
+# en releases posteriores.
+python-multipart>=0.0.18,<1.0.0
+email-validator>=2.0.0,<3.0.0
+redis>=5.0.1,<9.0.0
+python-dotenv>=1.0.0,<2.0.0
+
+# Email via SMTP (on-premise; Resend usa httpx). Opcional en runtime: si no esta
+# y SMTP_HOST esta seteado, shared/email.py hace soft-fail.
+aiosmtplib>=3.0.0,<6.0.0
 
 # Testing dependencies
-pytest>=7.4.0
-pytest-asyncio>=0.23.0
-httpx>=0.25.0
+pytest>=7.4.0,<10.0.0
+pytest-asyncio>=0.23.0,<2.0.0
+httpx>=0.25.0,<1.0.0
 
 # Cloud storage
-boto3>=1.28.0
+boto3>=1.28.0,<2.0.0
 
 # PDF manipulation for FULLPAGE handling
-pypdf>=4.0.0
+pypdf>=4.0.0,<7.0.0
+
+
 
 # System metrics for health check
-psutil>=5.9.0
+psutil>=5.9.0,<8.0.0
 
 # MCP Server (incluye starlette, uvicorn, httpx)
-mcp>=1.25.0
+mcp>=1.25.0,<2.0.0
 
 # Retry/resilience para llamadas a microservicios
-tenacity>=8.2.0
+tenacity>=8.2.0,<10.0.0
 
 # Certificate management (Fernet decryption for cert passwords)
-cryptography>=42.0.0
+cryptography>=42.0.0,<50.0.0
 
 # HTML sanitization (XSS prevention)
-nh3>=0.2.14
+nh3>=0.2.14,<1.0.0
 
 # Background job scheduler (orphan_inprocess cron)
-apscheduler>=3.10.0
+apscheduler>=3.10.0,<4
+tzlocal>=5.2,<6.0.0  # dep de apscheduler 3.x; las releases recientes dejaron de arrastrarla sola
 
-# PDF manipulation for numerator stamp (digital signature flow)
-PyMuPDF>=1.24.0
+# Image resize for avatares (GDI-081): recorte cuadrado + reescalado a WEBP
+Pillow>=10.0.0,<13.0.0
 
 # Linter con reglas ASYNC para detectar coroutines sin await
-ruff>=0.4.0
+ruff>=0.4.0,<1.0.0

@@ -1,7 +1,3 @@
-"""
-Servicio para listar usuarios del sistema.
-Aplicando Clean Code: Servicio dedicado con responsabilidad única.
-"""
 
 from shared.logging import get_logger
 from typing import List, Dict, Any
@@ -13,25 +9,12 @@ logger = get_logger(__name__)
 
 
 async def list_all_active_users(*, schema_name: str) -> List[Dict[str, Any]]:
-    """
-    Lista todos los usuarios activos del sistema.
-
-    Args:
-        schema_name: Nombre del schema (para multi-tenant)
-
-    Returns:
-        Lista de usuarios con user_id, full_name y email
-
-    Raises:
-        DatabaseError: Si hay error al consultar la base de datos
-    """
     logger.info("Fetching all active users from database")
 
     try:
         query = list_all_users_query()
         results = await fetch_all(query, schema_name=schema_name)
 
-        # Convertir a lista de diccionarios con UUIDs como string
         users_list = []
         for user in results:
             users_list.append({

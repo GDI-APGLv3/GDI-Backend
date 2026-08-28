@@ -1,25 +1,22 @@
-"""
-Servicio para la generacion de documentos PDF utilizando WeasyPrint.
-
-Este modulo proporciona funciones para renderizar plantillas HTML y convertirlas
-a PDF usando WeasyPrint (Pango/Cairo).
-"""
 
 import os
 import functools
 import requests
 import base64
+import contextlib
 import io
+import re
 import socket
 import ipaddress
 import logging
+import threading
 import pdfplumber
 import nh3
 import concurrent.futures
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 from typing import Union, Optional, Tuple
-import fitz  # PyMuPDF
+import fitz
 from urllib.parse import urlparse, urlunparse
 from weasyprint import HTML
 from weasyprint.text.fonts import FontConfiguration
@@ -30,21 +27,13 @@ from app.config import DEFAULT_TIMEOUT, LOGO_FETCH_TIMEOUT, PDF_GENERATION_TIMEO
 
 logger = logging.getLogger(__name__)
 
-# Constante para el texto de anclaje que se buscara en el PDF
 SIGNATURE_ANCHOR_TEXT = "end-text"
 
-# Configuracion de plantillas
 templates_dir = Path(__file__).parent.parent / "templates"
 env = Environment(loader=FileSystemLoader(templates_dir), autoescape=True)
 
-# Cache de FontConfiguration a nivel modulo (Paso 0.2 Mejora-PDFComposer).
-# Con preload_app=False, cada worker importa este modulo post-fork de forma
-# independiente, asi que cada worker tiene su propia FontConfiguration. Evita
-# rescanear fontconfig en cada request: ahorro 5-20ms warm, 50-100ms en cold start.
 FONT_CONFIG = FontConfiguration()
 
-# Templates Jinja2 precompilados a nivel modulo (Paso 0.3 Mejora-PDFComposer).
-# Evita ir al loader/parser en cada request.
 TEMPLATE_PREVIEW = env.get_template("plantilla.html")
 TEMPLATE_GENERATE = env.get_template("generate-pdf.html")
 TEMPLATE_CASE = env.get_template("caratula.html")
@@ -54,7 +43,6 @@ TEMPLATE_NOTE = env.get_template("nota.html")
 TEMPLATE_NOTE_PREVIEW = env.get_template("nota_preview.html")
 TEMPLATE_IFRLM = env.get_template("ifrlm.html")
 
-# Tags y atributos permitidos para sanitizacion HTML (editor Quill)
 ALLOWED_TAGS = {
     "p", "br", "strong", "em", "u", "s", "ol", "ul", "li",
     "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "code",
@@ -70,18 +58,34 @@ ALLOWED_ATTRIBUTES = {
     "*": {"class", "style"},
 }
 
-# Hostnames bloqueados para prevencion de SSRF
 BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 
+_TRUSTED_HOST_EXACT = frozenset(
+    h.strip().lower()
+    for h in os.getenv("PDF_TRUSTED_HOSTS", "").split(",")
+    if h.strip()
+)
+_TRUSTED_HOST_SUFFIXES = tuple(
+    h.strip().lower()
+    for h in os.getenv(
+        "PDF_TRUSTED_HOST_SUFFIXES", ".r2.cloudflarestorage.com"
+    ).split(",")
+    if h.strip()
+)
+_TRUSTED_R2_DEV_RE = re.compile(r"^pub-[0-9a-f]+\.r2\.dev$", re.IGNORECASE)
 
-def validate_url_safety(url: str) -> None:
-    """
-    Valida que una URL sea segura antes de hacer requests externos.
-    Previene SSRF bloqueando IPs privadas, localhost y hosts internos.
 
-    Raises:
-        ValueError: Si la URL no es segura.
-    """
+def _is_trusted_host(hostname_lower: str) -> bool:
+    if hostname_lower in _TRUSTED_HOST_EXACT:
+        return True
+    if hostname_lower.endswith(_TRUSTED_HOST_SUFFIXES):
+        return True
+    if _TRUSTED_R2_DEV_RE.match(hostname_lower):
+        return True
+    return False
+
+
+def validate_url_safety(url: str) -> Optional[str]:
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
@@ -91,7 +95,6 @@ def validate_url_safety(url: str) -> None:
     if not hostname:
         raise ValueError("URL sin hostname")
 
-    # Bloquear hostnames conocidos
     hostname_lower = hostname.lower()
     if hostname_lower in BLOCKED_HOSTNAMES:
         raise ValueError(f"Hostname bloqueado: {hostname}")
@@ -99,73 +102,87 @@ def validate_url_safety(url: str) -> None:
     if hostname_lower.endswith(".internal"):
         raise ValueError(f"Hostname interno bloqueado: {hostname}")
 
-    # Resolver hostname y verificar que no sea IP privada
     try:
         addr_infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
         raise ValueError(f"No se pudo resolver hostname: {hostname}")
 
+    resolved_ip = None
     for addr_info in addr_infos:
         ip = ipaddress.ip_address(addr_info[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError(f"IP privada/reservada bloqueada: {ip}")
+        if resolved_ip is None:
+            resolved_ip = str(ip)
+
+    if _is_trusted_host(hostname_lower):
+        return None
+
+    return resolved_ip
+
+
+_dns_pin_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _pin_dns_to_ip(hostname: str, ip: str):
+    with _dns_pin_lock:
+        original_getaddrinfo = socket.getaddrinfo
+
+        def _pinned_getaddrinfo(host, *args, **kwargs):
+            if host == hostname:
+                return original_getaddrinfo(ip, *args, **kwargs)
+            return original_getaddrinfo(host, *args, **kwargs)
+
+        socket.getaddrinfo = _pinned_getaddrinfo
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = original_getaddrinfo
+
+
+_DATA_HREF_RE = re.compile(r'(<a\b[^>]*\bhref\s*=\s*)(["\'])data:(?!image/)([^"\']*)(\2)', re.IGNORECASE)
+
+
+def _strip_non_image_data_href(html_content: str) -> str:
+    return _DATA_HREF_RE.sub(lambda m: f'{m.group(1)}{m.group(2)}#{m.group(2)}', html_content)
 
 
 def sanitize_html(html_content: str) -> str:
-    """
-    Sanitiza HTML usando nh3, permitiendo solo tags seguros del editor Quill.
-    Elimina <script>, <iframe>, <object>, <embed>, event handlers, etc.
-    """
     if not html_content:
         return ""
-    return nh3.clean(
+    cleaned = nh3.clean(
         html_content,
         tags=ALLOWED_TAGS,
         attributes=ALLOWED_ATTRIBUTES,
+        url_schemes={"http", "https", "mailto", "data"},
     )
+    return _strip_non_image_data_href(cleaned)
 
 def safe_url_fetcher(url, timeout=None, ssl_context=None):
-    """
-    URL fetcher para WeasyPrint que valida SSRF y aplica timeout propio.
-
-    S6-003: WeasyPrint puede pasar timeout=None (sin limite). Se ignora el valor
-    que pase WeasyPrint y se usa WEASYPRINT_RESOURCE_TIMEOUT para garantizar que
-    un recurso externo caido no bloquee la generacion del PDF completo.
-
-    Si el fetch falla por red (timeout, conexion, SSL), se loguea y se re-raise
-    para que WeasyPrint omita el recurso sin colgar el worker.
-    """
-    # data: URIs (fuentes embebidas, imagenes base64) -> directo, sin red
     if url.startswith("data:"):
         return default_url_fetcher(url, timeout=WEASYPRINT_RESOURCE_TIMEOUT, ssl_context=ssl_context)
 
-    # file: URIs -> bloqueado (no se necesitan recursos del filesystem)
     if url.startswith("file:"):
         raise ValueError(f"URI file: bloqueada por seguridad: {url}")
 
-    # Validar SSRF antes de cualquier conexion
     try:
-        validate_url_safety(url)
+        pinned_ip = validate_url_safety(url)
     except ValueError as e:
         logger.warning(f"[S6-003] safe_url_fetcher: URL bloqueada SSRF url={url} err={e}")
         raise
 
-    # Fetch con timeout propio (ignora el valor que pase WeasyPrint, que puede ser None)
     try:
+        if pinned_ip:
+            with _pin_dns_to_ip(urlparse(url).hostname, pinned_ip):
+                return default_url_fetcher(url, timeout=WEASYPRINT_RESOURCE_TIMEOUT, ssl_context=ssl_context)
         return default_url_fetcher(url, timeout=WEASYPRINT_RESOURCE_TIMEOUT, ssl_context=ssl_context)
     except Exception as e:
-        # Loguear y re-raise: WeasyPrint ignorara el recurso fallido pero
-        # continuara generando el PDF en lugar de quedar colgado esperando.
         logger.warning(f"[S6-003] safe_url_fetcher: fetch fallido url={url} timeout={WEASYPRINT_RESOURCE_TIMEOUT}s err={type(e).__name__}: {e}")
         raise
 
 
-# --- Cache de logos (Paso 3 Mejora-PDFComposer) -------------------------------
-# Cachea hasta 128 logos por worker en memoria. Cada hit es 0ms (sin red).
-# Cuando el cliente sube un logo nuevo en BackOffice, R2 le da otra URL ->
-# cache miss automatico, sin redeploy. NO sobrevive al reciclaje del worker
-# (cada GUNICORN_MAX_REQUESTS), se asume y es trivial.
-MAX_LOGO_BYTES = 2 * 1024 * 1024  # 2MB
+MAX_LOGO_BYTES = 2 * 1024 * 1024
 
 ALLOWED_LOGO_MIMES = {
     "image/png", "image/jpeg", "image/jpg",
@@ -175,13 +192,13 @@ ALLOWED_LOGO_MIMES = {
 
 @functools.lru_cache(maxsize=128)
 def _fetch_logo_cached(url: str) -> Optional[Tuple[bytes, str]]:
-    """
-    Descarga el logo, valida tamano y mime, y devuelve (bytes, mime_type).
-    Cacheado en memoria por worker. Devuelve None si falla cualquier validacion.
-    """
     try:
-        validate_url_safety(url)
-        response = requests.get(url, timeout=LOGO_FETCH_TIMEOUT)
+        pinned_ip = validate_url_safety(url)
+        if pinned_ip:
+            with _pin_dns_to_ip(urlparse(url).hostname, pinned_ip):
+                response = requests.get(url, timeout=LOGO_FETCH_TIMEOUT)
+        else:
+            response = requests.get(url, timeout=LOGO_FETCH_TIMEOUT)
         response.raise_for_status()
 
         if len(response.content) > MAX_LOGO_BYTES:
@@ -204,10 +221,6 @@ def _fetch_logo_cached(url: str) -> Optional[Tuple[bytes, str]]:
 
 
 def get_logo_base64_cached(url: Optional[str]) -> Optional[str]:
-    """
-    Devuelve el logo como data URI base64. Cacheado en memoria via lru_cache.
-    Maneja None internamente (no hace falta el ternario en el caller).
-    """
     if not url:
         return None
     result = _fetch_logo_cached(url)
@@ -218,7 +231,6 @@ def get_logo_base64_cached(url: Optional[str]) -> Optional[str]:
 
 
 def get_logo_cache_stats() -> dict:
-    """Stats del cache de logos (per-worker). Expuesto via GET /cache/stats."""
     info = _fetch_logo_cached.cache_info()
     total = info.hits + info.misses
     hit_rate = round(info.hits / total, 3) if total > 0 else None
@@ -229,25 +241,18 @@ def get_logo_cache_stats() -> dict:
         "maxsize": info.maxsize,
         "hit_rate": hit_rate,
     }
-# --- Fin cache de logos -------------------------------------------------------
 
 
 def get_image_as_base64(url: str) -> Union[str, None]:
-    """
-    Obtiene una imagen desde una URL y la convierte a base64.
-    Valida la URL contra SSRF antes de hacer el request.
-
-    Args:
-        url (str): URL de la imagen a convertir.
-
-    Returns:
-        str: Representacion en base64 de la imagen, o None si falla.
-    """
     if not url:
         return None
     try:
-        validate_url_safety(url)
-        response = requests.get(url, timeout=DEFAULT_TIMEOUT)
+        pinned_ip = validate_url_safety(url)
+        if pinned_ip:
+            with _pin_dns_to_ip(urlparse(url).hostname, pinned_ip):
+                response = requests.get(url, timeout=DEFAULT_TIMEOUT)
+        else:
+            response = requests.get(url, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         image_data = base64.b64encode(response.content).decode('utf-8')
         content_type = response.headers.get('Content-Type', 'image/png')
@@ -260,39 +265,6 @@ def get_image_as_base64(url: str) -> Union[str, None]:
         return None
 
 def generate_pdf_from_html(html_content: str, pdf_variant: Optional[str] = None) -> bytes:
-    """
-    Convierte contenido HTML a PDF usando WeasyPrint.
-
-    S6-003: La generacion corre en un ThreadPoolExecutor con un timeout maximo
-    de PDF_GENERATION_TIMEOUT segundos. Si WeasyPrint se cuelga (ej. loop
-    infinito en el motor Pango/Cairo, recurso externo que no responde), el
-    worker no queda bloqueado indefinidamente: se cancela y se propaga
-    TimeoutError como HTTP 500 al caller.
-
-    Nota sobre cancelacion: concurrent.futures no puede interrumpir un hilo
-    en ejecucion (Python no tiene cancelacion cooperativa de hilos). El hilo
-    de WeasyPrint puede seguir corriendo en background hasta que termine o el
-    proceso se recicle. El timeout protege el worker de Gunicorn para que
-    pueda devolver error y recibir el siguiente request, no para matar el hilo.
-
-    S6-005: Soporte PDF/A via el parametro pdf_variant. Cuando se pasa
-    "pdf/a-3b" (o cualquier variante valida), WeasyPrint >= 60 agrega los
-    metadatos XMP requeridos por ISO 19005-3 y garantiza conformidad PDF/A.
-    Los previews (con marca de agua) usan pdf_variant=None (PDF 1.7 regular)
-    porque no son documentos oficiales y no requieren archivo a largo plazo.
-
-    Args:
-        html_content (str): El contenido HTML a convertir.
-        pdf_variant (Optional[str]): Variante PDF/A a generar. Opciones:
-            "pdf/a-1b", "pdf/a-2b", "pdf/a-3b". None = PDF regular.
-
-    Returns:
-        bytes: El contenido del archivo PDF generado.
-
-    Raises:
-        TimeoutError: Si la generacion supera PDF_GENERATION_TIMEOUT segundos.
-        Exception: Si la conversion falla por otro motivo.
-    """
     def _do_generate():
         html = HTML(string=html_content, url_fetcher=safe_url_fetcher)
         kwargs = {"font_config": FONT_CONFIG}
@@ -317,25 +289,12 @@ def generate_pdf_from_html(html_content: str, pdf_variant: Optional[str] = None)
             raise Exception("Fallo al generar el PDF.") from e
 
 def generate_preview_pdf(request_data: PDFRequest) -> bytes:
-    """
-    Prepara los datos, renderiza la plantilla HTML y llama al servicio de generacion de PDF.
-
-    Args:
-        request_data (PDFRequest): Objeto con los datos para la generacion del PDF.
-
-    Returns:
-        bytes: El contenido del PDF generado.
-    """
-    # Convertir logo a base64 si se proporciona una URL
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
-    # Cargar la plantilla (precompilada a nivel modulo)
     template = TEMPLATE_PREVIEW
 
-    # Extraer el HTML del campo Text (que es un dict con estructura {"html": "..."})
     text_html = sanitize_html(request_data.Text.get("html", ""))
 
-    # Renderizar la plantilla con los datos proporcionados
     html_content = template.render(
         logo_data=logo_data,
         name_acrony_type=request_data.NameAcronyType,
@@ -345,25 +304,13 @@ def generate_preview_pdf(request_data: PDFRequest) -> bytes:
         text=text_html
     )
 
-    # Generar el PDF desde el HTML usando WeasyPrint
-    # Preview: PDF regular (sin PDF/A — no es documento oficial)
     pdf_content = generate_pdf_from_html(html_content)
 
     return pdf_content
 
 def generate_case_pdf(request_data: CaseRequest) -> bytes:
-    """
-    Prepara los datos para la caratula, renderiza la plantilla y genera el PDF.
-
-    Args:
-        request_data (CaseRequest): Objeto con los datos para la caratula.
-
-    Returns:
-        bytes: El contenido del PDF de la caratula generado.
-    """
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
-    # Generar fecha de caratulacion automatica en UTC
     fecha_caratulacion_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
 
     template = TEMPLATE_CASE
@@ -383,28 +330,16 @@ def generate_case_pdf(request_data: CaseRequest) -> bytes:
         caratulador=request_data.creator
     )
 
-    # S6-005: PDF/A-3b para carátulas (documentos oficiales de archivo)
     pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 def generate_ifrlm_pdf(request_data: IFRLMRequest) -> bytes:
-    """
-    Prepara los datos para el informe de legajo, renderiza la plantilla y genera el PDF.
-
-    Args:
-        request_data (IFRLMRequest): Objeto con los datos para el informe de legajo.
-
-    Returns:
-        bytes: El contenido del PDF del informe de legajo generado.
-    """
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
-    # Generar fecha automatica en UTC
     generated_at_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
 
     template = TEMPLATE_IFRLM
 
-    # Sanitizar el snapshot HTML (viene del backend)
     snapshot_html_clean = sanitize_html(request_data.snapshot_html)
 
     html_content = template.render(
@@ -420,30 +355,16 @@ def generate_ifrlm_pdf(request_data: IFRLMRequest) -> bytes:
         snapshot_html=snapshot_html_clean,
     )
 
-    # S6-005: PDF/A-3b para informes de legajo (documentos oficiales de archivo)
     pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 def generate_general_pdf(request_data: PDFRequest) -> bytes:
-    """
-    Prepara los datos, renderiza la plantilla generate-pdf.html y llama al servicio de generacion de PDF.
-
-    Args:
-        request_data (PDFRequest): Objeto con los datos para la generacion del PDF.
-
-    Returns:
-        bytes: El contenido del PDF generado.
-    """
-    # Convertir logo a base64 si se proporciona una URL
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
-    # Cargar la plantilla generate-pdf.html (precompilada a nivel modulo)
     template = TEMPLATE_GENERATE
 
-    # Extraer el HTML del campo Text (que es un dict con estructura {"html": "..."})
     text_html = sanitize_html(request_data.Text.get("html", ""))
 
-    # Renderizar la plantilla con los datos proporcionados
     html_content = template.render(
         logo_data=logo_data,
         name_acrony_type=request_data.NameAcronyType,
@@ -453,23 +374,12 @@ def generate_general_pdf(request_data: PDFRequest) -> bytes:
         text=text_html
     )
 
-    # Generar el PDF desde el HTML usando WeasyPrint
-    # S6-005: PDF/A-3b para documentos finales (sin marca de agua = documentos oficiales)
     pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
 
     return pdf_content
 
 
 def generate_move_pdf(request_data: MoveRequest) -> bytes:
-    """
-    Prepara los datos para el movimiento, renderiza la plantilla y genera el PDF.
-
-    Args:
-        request_data (MoveRequest): Objeto con los datos para el movimiento.
-
-    Returns:
-        bytes: El contenido del PDF del movimiento generado.
-    """
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
     template = TEMPLATE_MOVE
@@ -486,21 +396,11 @@ def generate_move_pdf(request_data: MoveRequest) -> bytes:
         motivo=request_data.motivo
     )
 
-    # S6-005: PDF/A-3b para pases de expediente (documentos oficiales de archivo)
     pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 
 def generate_import_pdf(request_data: ImportRequest) -> bytes:
-    """
-    Genera la pagina informativa de documento importado.
-
-    Args:
-        request_data (ImportRequest): Objeto con los datos para el documento importado.
-
-    Returns:
-        bytes: El contenido del PDF de la pagina informativa generado.
-    """
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
     template = TEMPLATE_IMPORT
@@ -514,26 +414,15 @@ def generate_import_pdf(request_data: ImportRequest) -> bytes:
         cantidad_paginas=request_data.cantidad_paginas
     )
 
-    # S6-005: PDF/A-3b para documentos importados (documentos oficiales de archivo)
     pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 
 def generate_note_pdf(request_data: NoteRequest) -> bytes:
-    """
-    Genera un PDF de nota sin marca de agua.
-
-    Args:
-        request_data (NoteRequest): Objeto con los datos para la nota.
-
-    Returns:
-        bytes: El contenido del PDF de la nota generado.
-    """
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
     template = TEMPLATE_NOTE
 
-    # Extraer el HTML del campo Text
     text_html = sanitize_html(request_data.Text.get("html", ""))
 
     html_content = template.render(
@@ -547,26 +436,15 @@ def generate_note_pdf(request_data: NoteRequest) -> bytes:
         text_html=text_html
     )
 
-    # S6-005: PDF/A-3b para notas finales (documentos oficiales de archivo)
     pdf_content = generate_pdf_from_html(html_content, pdf_variant="pdf/a-3b")
     return pdf_content
 
 
 def generate_note_preview_pdf(request_data: NoteRequest) -> bytes:
-    """
-    Genera un PDF de nota con marca de agua de previsualizacion.
-
-    Args:
-        request_data (NoteRequest): Objeto con los datos para la nota.
-
-    Returns:
-        bytes: El contenido del PDF de la nota con marca de agua generado.
-    """
     logo_data = get_logo_base64_cached(request_data.urlLogo)
 
     template = TEMPLATE_NOTE_PREVIEW
 
-    # Extraer el HTML del campo Text
     text_html = sanitize_html(request_data.Text.get("html", ""))
 
     html_content = template.render(
@@ -585,23 +463,9 @@ def generate_note_preview_pdf(request_data: NoteRequest) -> bytes:
 
 
 def merge_pdfs(base_pdf: bytes, attachment_pdf: bytes) -> bytes:
-    """
-    Concatena las paginas del attachment_pdf al final del base_pdf.
-
-    Args:
-        base_pdf: PDF generado por WeasyPrint.
-        attachment_pdf: PDF adjunto a anexar.
-
-    Returns:
-        bytes: PDF combinado con todas las paginas.
-
-    Raises:
-        Exception: Si alguno de los PDFs no puede abrirse.
-    """
     doc_base = fitz.open(stream=base_pdf, filetype="pdf")
     doc_attachment = fitz.open(stream=attachment_pdf, filetype="pdf")
 
-    # Anexar todas las paginas del attachment al final
     doc_base.insert_pdf(doc_attachment)
 
     merged_pdf = doc_base.tobytes()
@@ -612,17 +476,31 @@ def merge_pdfs(base_pdf: bytes, attachment_pdf: bytes) -> bytes:
     return merged_pdf
 
 
+def embed_files_in_pdf(base_pdf: bytes, embedded: list) -> bytes:
+    doc = fitz.open(stream=base_pdf, filetype="pdf")
+
+    used_names: dict[str, int] = {}
+    for file_name, content in embedded:
+        safe_name = file_name
+        if safe_name in used_names:
+            used_names[safe_name] += 1
+            stem, dot, ext = file_name.rpartition(".")
+            if dot:
+                safe_name = f"{stem}_{used_names[file_name]}.{ext}"
+            else:
+                safe_name = f"{file_name}_{used_names[file_name]}"
+        else:
+            used_names[safe_name] = 1
+
+        doc.embfile_add(safe_name, content, filename=safe_name, desc="Adjunto GDI")
+
+    result = doc.tobytes()
+    doc.close()
+
+    return result
+
+
 def find_text_position_in_pdf(pdf_bytes: bytes, text_to_find: str) -> Optional[float]:
-    """
-    Busca un texto en un PDF y devuelve su posicion vertical (coordenada 'top').
-
-    Args:
-        pdf_bytes (bytes): El contenido del PDF en bytes.
-        text_to_find (str): El texto a buscar.
-
-    Returns:
-        Optional[float]: La coordenada 'top' del texto si se encuentra, de lo contrario None.
-    """
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             words = page.extract_words()

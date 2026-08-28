@@ -1,10 +1,3 @@
-"""
-Endpoints para gestión de responsables de expedientes.
-GET  /{case_id}/responsibles                        → listar responsables activos
-GET  /{case_id}/available-responsibles?type=...     → usuarios disponibles para agregar
-POST /{case_id}/responsibles                        → agregar responsable
-DELETE /{case_id}/responsibles/{responsible_id}     → quitar responsable (soft delete)
-"""
 
 from fastapi import APIRouter, Depends, Path, Query, Request
 from pydantic import BaseModel, Field
@@ -30,10 +23,6 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["expedientes"])
 
 
-# ============================================================================
-# REQUEST / RESPONSE MODELS
-# ============================================================================
-
 class AddResponsibleRequest(BaseModel):
     user_id: str = Field(..., description="ID del usuario a agregar como responsable")
     type: str = Field(..., description="Tipo: ADMIN o ADDITIONAL")
@@ -51,11 +40,13 @@ class ResponsableItem(BaseModel):
     sector_acronym: str
     department_name: str
     department_acronym: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    seal_name: Optional[str] = None
     added_at: Optional[str] = None
 
 
 class ResponsablesData(BaseModel):
-    admin: Optional[ResponsableItem] = None
+    admin: List[ResponsableItem] = Field(default_factory=list)
     additional: List[ResponsableItem] = Field(default_factory=list)
 
 
@@ -70,8 +61,10 @@ class AvailableResponsableItem(BaseModel):
     full_name: str
     sector_id: str
     sector_acronym: str
+    department_name: Optional[str] = None
     profile_picture_url: Optional[str] = None
     department_acronym: Optional[str] = None
+    seal_name: Optional[str] = None
 
 
 class AvailableResponsablesResponse(BaseModel):
@@ -87,10 +80,6 @@ class AddResponsibleResponse(BaseModel):
     message: str
 
 
-# ============================================================================
-# ENDPOINTS
-# ============================================================================
-
 @router.get("/{case_id}/responsibles", response_model=ResponsablesResponse)
 async def list_responsibles(
     request: Request,
@@ -100,12 +89,11 @@ async def list_responsibles(
 ):
     """
     Listar responsables activos de un expediente.
-    Retorna el responsable administrador (único) y los adicionales (lista).
+    Retorna los responsables administradores (lista) y los adicionales (lista).
     """
     try:
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # Verificar permisos de visualización (404 para no revelar existencia)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for list_responsibles: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
@@ -141,7 +129,6 @@ async def list_available_responsibles(
     try:
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # Verificar permisos de visualización (404 para no revelar existencia)
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for list_available_responsibles: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
@@ -174,20 +161,18 @@ async def add_case_responsible(
     """
     Agregar un responsable al expediente.
 
-    - type=ADMIN: reemplaza al responsable admin actual (desactiva el anterior).
-    - type=ADDITIONAL: agrega como responsable adicional sin tocar el admin.
+    - type=ADMIN: agrega un nuevo responsable admin (coexiste con los existentes, no reemplaza).
+    - type=ADDITIONAL: agrega como responsable adicional sin tocar los admins.
 
     Requiere ser admin o actuante con can_edit=true y expediente activo.
     """
     try:
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # 404 si el expediente no existe o el usuario no puede verlo
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for add_case_responsible: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # 403 si puede verlo pero no tiene permisos de edición
         if not await CaseService.can_user_edit_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Edit denied for add_case_responsible: user={db_user_id[:8]}, case={case_id[:8]}")
             raise AuthorizationError("Sin permisos para modificar responsables de este expediente")
@@ -233,12 +218,10 @@ async def remove_case_responsible(
     try:
         db_user_id = await get_authenticated_user(request.state.tenant_user_id, schema_name=schema_name)
 
-        # 404 si el expediente no existe o el usuario no puede verlo
         if not await CaseService.can_user_view_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Access denied for remove_case_responsible: user={db_user_id[:8]}, case={case_id[:8]}")
             raise NotFoundError(CASE_NOT_FOUND_ERROR)
 
-        # 403 si puede verlo pero no tiene permisos de edición
         if not await CaseService.can_user_edit_case(case_id, db_user_id, schema_name=schema_name):
             logger.warning(f"Edit denied for remove_case_responsible: user={db_user_id[:8]}, case={case_id[:8]}")
             raise AuthorizationError("Sin permisos para modificar responsables de este expediente")

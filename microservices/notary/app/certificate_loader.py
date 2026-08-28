@@ -1,17 +1,3 @@
-"""
-Módulo para cargar certificados PKCS#12 por tenant.
-
-Este módulo maneja la carga y validación de certificados .p12
-para firma digital PAdES, organizados por tenant_id.
-
-Estructura de archivos esperada:
-    certs/
-    ├── {tenant_id}.p12      # Certificado del tenant
-    └── passwords.json       # Mapeo tenant_id → password
-
-Autor: GDI Latam
-Versión: 1.0.0
-"""
 
 import json
 import logging
@@ -32,28 +18,23 @@ logger = logging.getLogger(__name__)
 
 
 class CertificateError(Exception):
-    """Excepción para errores relacionados con certificados."""
     pass
 
 
 class CertificateNotFoundError(CertificateError):
-    """Certificado no encontrado para el tenant."""
     pass
 
 
 class CertificateLoadError(CertificateError):
-    """Error al cargar el certificado."""
     pass
 
 
 class PasswordNotFoundError(CertificateError):
-    """Password no encontrado para el tenant."""
     pass
 
 
 @dataclass
 class LoadedCertificate:
-    """Certificado cargado con su clave privada."""
     private_key: PrivateKeyTypes
     certificate: Certificate
     additional_certs: Optional[list] = None
@@ -64,15 +45,6 @@ class LoadedCertificate:
 
 
 def load_passwords() -> dict:
-    """
-    Carga el archivo de passwords.
-
-    Returns:
-        dict: Mapeo tenant_id → password
-
-    Raises:
-        CertificateError: Si no se puede leer el archivo
-    """
     if not PASSWORDS_FILE.exists():
         logger.warning(f"Archivo de passwords no encontrado: {PASSWORDS_FILE}")
         return {}
@@ -87,19 +59,6 @@ def load_passwords() -> dict:
 
 
 def get_certificate_path(tenant_id: str) -> Path:
-    """
-    Obtiene la ruta del certificado para un tenant.
-    Incluye verificación de contención de path para prevenir path traversal.
-
-    Args:
-        tenant_id: ID del tenant
-
-    Returns:
-        Path: Ruta al archivo .p12
-
-    Raises:
-        CertificateError: Si el path resultante escapa del directorio de certificados
-    """
     certs_dir = Path(CERTS_DIR).resolve()
     cert_path = (certs_dir / f"{tenant_id}.p12").resolve()
 
@@ -112,43 +71,18 @@ def get_certificate_path(tenant_id: str) -> Path:
 
 
 def certificate_exists(tenant_id: str) -> bool:
-    """
-    Verifica si existe un certificado para el tenant.
-
-    Args:
-        tenant_id: ID del tenant
-
-    Returns:
-        bool: True si existe el certificado
-    """
     cert_path = get_certificate_path(tenant_id)
     return cert_path.exists()
 
 
 def load_certificate(tenant_id: str) -> LoadedCertificate:
-    """
-    Carga un certificado PKCS#12 para un tenant específico.
-
-    Args:
-        tenant_id: ID del tenant
-
-    Returns:
-        LoadedCertificate: Certificado cargado con clave privada
-
-    Raises:
-        CertificateNotFoundError: Si no existe el certificado
-        PasswordNotFoundError: Si no hay password para el tenant
-        CertificateLoadError: Si hay error al cargar el certificado
-    """
     cert_path = get_certificate_path(tenant_id)
 
-    # Verificar que existe el archivo
     if not cert_path.exists():
         raise CertificateNotFoundError(
             f"Certificado no encontrado para tenant '{tenant_id}': {cert_path}"
         )
 
-    # Obtener password
     passwords = load_passwords()
     password = passwords.get(tenant_id)
 
@@ -157,7 +91,6 @@ def load_certificate(tenant_id: str) -> LoadedCertificate:
             f"Password no encontrado para tenant '{tenant_id}' en passwords.json"
         )
 
-    # Cargar el certificado PKCS#12
     try:
         with open(cert_path, 'rb') as f:
             p12_data = f.read()
@@ -193,7 +126,6 @@ def load_certificate(tenant_id: str) -> LoadedCertificate:
         )
 
     except ValueError as e:
-        # Password incorrecto o formato inválido
         raise CertificateLoadError(
             f"Error al cargar certificado para tenant '{tenant_id}': {e}"
         )
@@ -204,20 +136,10 @@ def load_certificate(tenant_id: str) -> LoadedCertificate:
 
 
 def validate_certificate(cert: LoadedCertificate) -> Tuple[bool, str]:
-    """
-    Valida que el certificado sea usable para firma.
-
-    Args:
-        cert: Certificado cargado
-
-    Returns:
-        Tuple[bool, str]: (es_válido, mensaje)
-    """
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
 
-    # Verificar vigencia
     not_before = cert.certificate.not_valid_before_utc
     not_after = cert.certificate.not_valid_after_utc
 
@@ -227,7 +149,6 @@ def validate_certificate(cert: LoadedCertificate) -> Tuple[bool, str]:
     if now > not_after:
         return False, f"Certificado expirado. Expiró el: {not_after}"
 
-    # Verificar key usage si está presente
     try:
         from cryptography.x509 import ExtensionOID
         key_usage = cert.certificate.extensions.get_extension_for_oid(
@@ -236,22 +157,12 @@ def validate_certificate(cert: LoadedCertificate) -> Tuple[bool, str]:
         if not key_usage.value.digital_signature:
             return False, "Certificado no permite firma digital (key_usage)"
     except Exception:
-        # Si no tiene key_usage extension, asumimos que es válido
         pass
 
     return True, "Certificado válido"
 
 
 def get_certificate_info(tenant_id: str) -> dict:
-    """
-    Obtiene información del certificado sin cargar la clave privada.
-
-    Args:
-        tenant_id: ID del tenant
-
-    Returns:
-        dict: Información del certificado
-    """
     cert_path = get_certificate_path(tenant_id)
 
     if not cert_path.exists():
@@ -284,12 +195,6 @@ def get_certificate_info(tenant_id: str) -> dict:
 
 
 def list_available_certificates() -> list:
-    """
-    Lista todos los certificados disponibles.
-
-    Returns:
-        list: Lista de tenant_ids con certificados
-    """
     certs_dir = Path(CERTS_DIR)
     if not certs_dir.exists():
         return []
@@ -300,15 +205,6 @@ def list_available_certificates() -> list:
 
 
 def _secure_tmp_dir() -> str:
-    """
-    Devuelve el directorio más seguro disponible para tempfiles con material clave.
-
-    Preferencia:
-    1. /dev/shm  — tmpfs en memoria (Linux/Fly.io). El archivo NUNCA toca disco.
-    2. tempfile.gettempdir() — fallback para Windows/dev-local.
-
-    En ambos casos el caller debe aplicar chmod 0o600 antes de escribir contenido.
-    """
     shm = "/dev/shm"
     if os.path.isdir(shm) and os.access(shm, os.W_OK):
         return shm
@@ -321,21 +217,6 @@ def _secure_tmp_dir() -> str:
 
 
 def load_certificate_from_bytes(p12_bytes: bytes, password: str, tenant_id: str = "") -> LoadedCertificate:
-    """
-    Carga certificado PKCS#12 desde bytes en memoria (sin filesystem).
-    Escribe a tempfile porque pyHanko requiere un path al .p12.
-
-    Args:
-        p12_bytes: Contenido del archivo .p12
-        password: Password del certificado
-        tenant_id: ID del tenant (para logging)
-
-    Returns:
-        LoadedCertificate con path a tempfile y _password/_temp_file seteados
-
-    Raises:
-        CertificateLoadError: Si hay error al cargar
-    """
     try:
         private_key, certificate, additional_certs = pkcs12.load_key_and_certificates(
             p12_bytes, password.encode("utf-8"), default_backend()
@@ -346,21 +227,13 @@ def load_certificate_from_bytes(p12_bytes: bytes, password: str, tenant_id: str 
         if certificate is None:
             raise CertificateLoadError("El .p12 no contiene certificado")
 
-        # pyHanko necesita un path al archivo .p12.
-        # Escribimos en /dev/shm (tmpfs en memoria, nunca toca disco) cuando está
-        # disponible — caso nominal en Linux/Fly.io. En Windows/dev-local caemos a
-        # tempfile.gettempdir(). En ambos casos aplicamos chmod 0o600 inmediatamente
-        # antes de escribir el contenido sensible.
         tmp_dir = _secure_tmp_dir()
         fd, tmp_path = tempfile.mkstemp(suffix=".p12", dir=tmp_dir)
         try:
-            os.chmod(tmp_path, 0o600)  # owner-only ANTES de escribir la clave
+            os.chmod(tmp_path, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(p12_bytes)
         except Exception:
-            # Si algo falla al preparar el file, cerramos el fd (si sigue abierto,
-            # ej. chmod fallo antes del fdopen) y limpiamos antes de re-lanzar.
-            # Si fdopen ya consumio el fd, os.close lanza OSError -> se ignora.
             try:
                 os.close(fd)
             except OSError:

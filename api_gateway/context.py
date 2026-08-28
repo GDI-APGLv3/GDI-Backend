@@ -1,50 +1,22 @@
-"""
-Context para operaciones MCP.
-Maneja el mapping de municipality_id -> schema_name.
-"""
-import logging
+from shared.logging import get_logger
 from dataclasses import dataclass
 from typing import Optional
 from database import fetch_one
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
 class MCPContext:
-    """
-    Contexto de ejecución para herramientas MCP.
-
-    Attributes:
-        api_key: API Key validada
-        municipality_id: ID de la municipalidad (requerido)
-        schema_name: Schema derivado del municipality_id
-        auth_source: Origen de la autenticación para trazabilidad.
-                     Valores: "api_key" (REST API), "mcp_oauth" (Claude/ChatGPT/Gemini)
-        user_id: ID del usuario que ejecuta la operación (requerido para REST API)
-    """
     api_key: str
     municipality_id: str
     schema_name: str
-    auth_source: str = "api_key"  # Default para REST API
-    user_id: Optional[str] = None  # Requerido para REST API con X-User-ID
+    auth_source: str = "api_key"
+    user_id: Optional[str] = None
 
 
 async def get_schema_from_municipality(municipality_id: str) -> Optional[str]:
-    """
-    Obtiene el schema_name correspondiente a un municipality_id.
-
-    Args:
-        municipality_id: ID de la municipalidad
-
-    Returns:
-        Schema name (ej: "100_test") o None si no existe
-
-    Raises:
-        Exception: Si hay error de BD
-    """
     try:
-        # Query contra tabla public.municipalities
         query = """
             SELECT schema_name
             FROM public.municipalities
@@ -54,7 +26,7 @@ async def get_schema_from_municipality(municipality_id: str) -> Optional[str]:
         result = await fetch_one(
             query,
             municipality_id,
-            schema_name="public"  # Tabla municipalities está en schema public
+            schema_name="public"
         )
 
         if not result:
@@ -77,21 +49,6 @@ async def create_context(
     auth_source: str = "api_key",
     user_id: Optional[str] = None
 ) -> MCPContext:
-    """
-    Crea contexto MCP validado.
-
-    Args:
-        api_key: API Key validada
-        municipality_id: ID de municipalidad
-        auth_source: Origen de la autenticación (api_key, mcp_oauth)
-        user_id: ID del usuario que ejecuta la operación (requerido para REST API)
-
-    Returns:
-        MCPContext con schema_name resuelto
-
-    Raises:
-        ValueError: Si municipality_id no es válido
-    """
     schema_name = await get_schema_from_municipality(municipality_id)
 
     if not schema_name:

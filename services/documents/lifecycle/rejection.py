@@ -1,9 +1,3 @@
-"""
-Servicio para rechazar documentos.
-
-Ubicacion real: services/documents/lifecycle/rejection.py
-MIGRADO: Fase 6 asyncpg
-"""
 
 from shared.logging import get_logger
 import uuid
@@ -14,6 +8,7 @@ from shared.exceptions import (
     DocumentNotFoundError,
     DocumentAlreadyRejectedError,
     DocumentStateError,
+    DocumentSignedWhileRejectingError,
     AuthorizationError
 )
 from shared.validation import validate_document_id, validate_user_id, validate_rejection_reason
@@ -46,23 +41,6 @@ logger = get_logger(__name__)
 
 
 async def reject_document(document_id: str, user_id: str, reason: str, *, schema_name: str) -> Dict[str, Any]:
-    """Rechaza un documento con un motivo especifico.
-
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del usuario que rechaza
-        reason: Motivo del rechazo
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con resultado de la operacion
-
-    Raises:
-        DocumentNotFoundError: Documento no existe
-        DocumentAlreadyRejectedError: Documento ya rechazado
-        DocumentStateError: Documento no puede rechazarse
-        AuthorizationError: Usuario sin permisos
-    """
     logger.info(
         "Iniciando proceso de rechazo de documento",
         extra={
@@ -73,22 +51,18 @@ async def reject_document(document_id: str, user_id: str, reason: str, *, schema
         }
     )
 
-    # Validaciones (schema_name se pasa para queries a BD)
     await validate_document_id(document_id, schema_name=schema_name)
     await validate_user_id(user_id, schema_name=schema_name)
     validate_rejection_reason(reason)
 
-    # Obtener documento
     document = await fetch_one(get_document_info_for_rejection_query(), document_id, schema_name=schema_name)
 
     if not document:
         raise DocumentNotFoundError(document_id)
 
-    # Verificar estado
     if document['status'] == 'rejected':
         raise DocumentAlreadyRejectedError(REJECTION_ALREADY_REJECTED_ERROR)
 
-    # Verificar si es oficial
     official_count = await fetch_val(
         check_document_is_official_query(), document_id, schema_name=schema_name
     )
@@ -99,23 +73,71 @@ async def reject_document(document_id: str, user_id: str, reason: str, *, schema
             required_state="draft, sent_to_sign o signed"
         )
 
-    # Verificar permisos
     can_reject = await _check_user_permissions(document_id, user_id, str(document['created_by']), schema_name=schema_name)
     if not can_reject['allowed']:
         raise AuthorizationError(f"Usuario no autorizado: {can_reject['reason']}")
 
-    # Limpiar PDF de R2 (soft-fail)
+    doc_status = document['status']
+
     pdf_cleanup_info = await _cleanup_pdf_from_r2(document_id, schema_name=schema_name)
 
-    # Ejecutar operaciones en transaccion
     rejection_id = str(uuid.uuid4())
 
     async with transaction(schema_name=schema_name) as conn:
-        await conn.execute(update_document_to_rejected_query(), document_id)
+        od_lock_row = await conn.fetchrow(
+            """
+            SELECT reservation_status, numbering_regime,
+                   document_type_id, department_id, year
+            FROM official_documents
+            WHERE id = $1
+            FOR UPDATE
+            """,
+            document_id,
+        )
+        if od_lock_row is not None:
+            rs = od_lock_row["reservation_status"]
+            if rs in ("CONFIRMING", "CONFIRMED"):
+                raise DocumentSignedWhileRejectingError(document_id)
+            if rs == "RESERVED":
+                await conn.execute(
+                    """
+                    UPDATE official_documents
+                    SET reservation_status = 'CANCELLED'
+                    WHERE id = $1 AND reservation_status = 'RESERVED'
+                    """,
+                    document_id,
+                )
+                if od_lock_row["numbering_regime"] == "SPECIAL":
+                    await conn.execute(
+                        """
+                        UPDATE document_number_counters
+                        SET active_reservation_document_id = NULL,
+                            updated_at = NOW()
+                        WHERE document_type_id = $1
+                          AND year           = $2
+                          AND department_id  = $3
+                          AND active_reservation_document_id = $4
+                        """,
+                        od_lock_row["document_type_id"],
+                        od_lock_row["year"],
+                        od_lock_row["department_id"],
+                        document_id,
+                    )
+
+        rejected_row = await conn.fetchrow(update_document_to_rejected_query(), document_id)
+        if rejected_row is None:
+            raise DocumentSignedWhileRejectingError(document_id)
         await conn.execute(insert_rejection_record_query(), rejection_id, document_id, user_id, reason)
         await conn.execute(update_signers_to_rejected_query(), document_id)
 
-    # Obtener info del usuario
+    await _expire_pending_signing_sessions(document_id, schema_name=schema_name)
+
+    await _cancel_reserved_number_if_exists(document_id, schema_name=schema_name)
+
+    if doc_status == 'sent_to_sign':
+        from services.documents.signing.r2_lock import delete_inprocess_on_reject
+        await delete_inprocess_on_reject(schema_name=schema_name, doc_id=document_id)
+
     rejector_info = await fetch_one(get_rejector_info_query(), user_id, schema_name=schema_name)
 
     from datetime import datetime
@@ -142,7 +164,6 @@ async def reject_document(document_id: str, user_id: str, reason: str, *, schema
 
 
 async def _check_user_permissions(document_id: str, user_id: str, creator_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Verifica si usuario puede rechazar el documento."""
     if user_id == creator_id:
         return {"allowed": True, "reason": REJECTION_USER_CREATOR_REASON}
 
@@ -154,7 +175,6 @@ async def _check_user_permissions(document_id: str, user_id: str, creator_id: st
 
 
 async def _cleanup_pdf_from_r2(document_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Intenta eliminar PDF de R2 (soft-fail)."""
     doc_gen_result = await fetch_one(get_document_generate_id_query(), document_id, schema_name=schema_name)
     document_generate_id = doc_gen_result.get('document_generate_id') if doc_gen_result else None
 
@@ -187,16 +207,61 @@ async def _cleanup_pdf_from_r2(document_id: str, *, schema_name: str) -> Dict[st
         }
 
 
+async def _expire_pending_signing_sessions(document_id: str, *, schema_name: str) -> None:
+    try:
+        result = await execute(
+            """
+            UPDATE public.signing_sessions
+               SET status         = 'expired',
+                   failure_reason = 'document_rejected',
+                   updated_at     = NOW()
+             WHERE document_id = $1::uuid
+               AND status IN ('pending', 'processing')
+               AND schema_name = $2
+            """,
+            document_id,
+            schema_name,
+            schema_name="public",
+        )
+        logger.info(
+            "reject: sesiones async expiradas",
+            extra={"document_id": document_id, "pg_status": result},
+        )
+    except Exception as exc:
+        logger.warning(
+            "reject._expire_pending_signing_sessions soft-fail: %s doc=%s",
+            exc, document_id,
+        )
+
+
+async def _cancel_reserved_number_if_exists(document_id: str, *, schema_name: str) -> None:
+    try:
+        reserved_row = await fetch_one(
+            "SELECT id FROM official_documents WHERE id = $1 AND reservation_status = 'RESERVED'",
+            document_id,
+            schema_name=schema_name,
+        )
+        if not reserved_row:
+            return
+
+        from shared.numbering import cancel_number
+        await cancel_number(
+            document_id,
+            schema_name=schema_name,
+            reason="document_rejected",
+        )
+        logger.info(
+            "reject: reserva RESERVED cancelada",
+            extra={"document_id": document_id},
+        )
+    except Exception as exc:
+        logger.warning(
+            "reject._cancel_reserved_number_if_exists soft-fail: %s doc=%s",
+            exc, document_id,
+        )
+
+
 async def get_document_rejections(document_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Obtiene el historial de rechazos de un documento.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con el historial de rechazos
-    """
     await validate_document_id(document_id, schema_name=schema_name)
 
     rejections_data = await fetch_all(get_document_rejections_history_query(), document_id, schema_name=schema_name)
@@ -222,17 +287,6 @@ async def get_document_rejections(document_id: str, *, schema_name: str) -> Dict
 
 
 async def get_rejected_documents_for_user(user_id: str, page: int = 1, page_size: int = 20, *, schema_name: str) -> Dict[str, Any]:
-    """Obtiene documentos rechazados donde el usuario es creador o firmante.
-
-    Args:
-        user_id: UUID del usuario
-        page: Pagina a obtener
-        page_size: Tamano de pagina
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con documentos rechazados paginados
-    """
     await validate_user_id(user_id, schema_name=schema_name)
 
     offset = (page - 1) * page_size
@@ -265,16 +319,6 @@ async def get_rejected_documents_for_user(user_id: str, page: int = 1, page_size
 
 
 async def can_user_reject_document(document_id: str, user_id: str, *, schema_name: str) -> Dict[str, Any]:
-    """Verifica si un usuario puede rechazar un documento especifico.
-
-    Args:
-        document_id: UUID del documento
-        user_id: UUID del usuario
-        schema_name: Schema del tenant (multi-tenant)
-
-    Returns:
-        Dict con can_reject (bool) y reason (str)
-    """
     await validate_document_id(document_id, schema_name=schema_name)
     await validate_user_id(user_id, schema_name=schema_name)
 

@@ -1,38 +1,17 @@
-"""
-Servicio para busqueda de documentos oficiales por numero exacto.
-Busca unicamente en la tabla official_documents sin restricciones de usuario.
-Optimizado siguiendo principios de Clean Code.
-"""
 
 from shared.logging import get_logger
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from database import fetch_one
 from shared.exceptions import ValidationError
 from ..core.queries import search_official_document_by_number_query
 
-# === CONFIGURACION ===
 logger = get_logger(__name__)
 
-async def search_official_document_by_number(doc_number: str, *, user_id: str = None, schema_name: str) -> Dict[str, Any]:
-    """
-    Busca un documento oficial por su numero exacto.
-    Si user_id es None: busqueda global sin restricciones.
-    Si user_id se proporciona: filtra por sectores del usuario (signer_sector_ids).
-
-    Args:
-        doc_number: Numero oficial del documento (ej: "ANEXO-2025-00000002-SMG-ADGEN")
-        user_id: ID del usuario para filtrar por sectores (opcional)
-        schema_name: Nombre del esquema de base de datos (multi-tenant)
-
-    Returns:
-        Dict con informacion del documento o None si no se encuentra
-
-    Raises:
-        ValidationError: Si el numero de documento no es valido
-    """
+async def search_official_document_by_number(
+    doc_number: str, *, user_id: str = None, exclude_reserved: bool = False, schema_name: str
+) -> Dict[str, Any]:
     logger.info(f"Buscando documento oficial por numero: {doc_number[:15]}...")
 
-    # Validar formato basico del numero
     if not doc_number or len(doc_number.strip()) == 0:
         raise ValidationError("El numero de documento no puede estar vacio")
 
@@ -53,11 +32,23 @@ async def search_official_document_by_number(doc_number: str, *, user_id: str = 
                 "search_term": doc_number
             }
 
-        # Si user_id proporcionado, verificar que el documento tenga relacion con el usuario
+        if exclude_reserved:
+            _is_reserved = result.get("document_type_is_reserved")
+            if _is_reserved is None or _is_reserved:
+                logger.info(
+                    "Documento %s... excluido por exclude_reserved (reservado=%s)",
+                    doc_number[:15],
+                    "sin determinar" if _is_reserved is None else "sí",
+                )
+                return {
+                    "found": False,
+                    "document": None,
+                    "search_term": doc_number
+                }
+
         if user_id:
-            # Si es tipo MEMO, verificar acceso por memo_recipients
-            doc_type_acronym = result['document_type_acronym'] or ''
-            if doc_type_acronym == 'MEMO':
+            doc_base_type = (result['document_base_type'] or '').upper()
+            if doc_base_type == 'MEMO':
                 access_check = await fetch_one(
                     """
                     SELECT EXISTS(
@@ -103,21 +94,19 @@ async def search_official_document_by_number(doc_number: str, *, user_id: str = 
 
         logger.info(f"Documento oficial encontrado: {result['document_id'][:8]}...")
 
-        # Construir respuesta con exactamente la misma estructura que UserDocumentInfo
         document_info = {
             "id": result["document_id"],
-            "reference": result["official_number"],  # Para documentos oficiales, reference es el numero oficial
-            "display_status": "Firmado",  # Los documentos oficiales siempre estan firmados
+            "reference": result["official_number"],
+            "display_status": "Firmado",
             "updated_at": result["updated_at"].isoformat() if result["updated_at"] else None,
             "document_type": {
                 "name": result["document_type_name"] or "Documento",
                 "acronym": result["document_type_acronym"] or "DOC"
             },
-            "user_role": "public",  # Para documentos oficiales, acceso publico
-            # Para documentos oficiales, el ultimo editor es el numerador (quien lo oficializo)
+            "user_role": "public",
             "last_editor_name": result["numerator_name"] or result["creator_name"],
-            "last_editor_profile_picture_id": None,  # Por simplicidad, no incluir foto en busqueda publica
-            "official_number": result["official_number"]  # Siempre presente en documentos oficiales
+            "last_editor_profile_picture_id": None,
+            "official_number": result["official_number"]
         }
 
         return {

@@ -1,14 +1,3 @@
-"""
-Endpoint GET /api/v1/cases/counts
-
-Retorna los conteos de expedientes por vista para el usuario autenticado:
-  - asignado:  expedientes en case_responsibles donde user_id = yo AND is_active = true
-  - admin:     expedientes donde el sector admin actual pertenece al usuario (sector principal o adicionales con can_view=true)
-  - actuante:  expedientes con un case_movements activo (type=assignment) asignado a un sector del usuario
-  - favoritos: expedientes en case_favorites del usuario
-
-Estos conteos se usan para los badges de los tabs en la UI.
-"""
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -16,6 +5,7 @@ from pydantic import BaseModel, Field
 from auth import get_current_user
 from models.schemas import AuthenticatedUser
 from database import fetch_all
+from services.cases.reserved_predicate import build_reserved_or_exists
 from shared.exceptions import exception_to_http_exception, ValidationError
 from shared.utils import get_authenticated_user
 from shared.dependencies import get_tenant_schema
@@ -27,7 +17,6 @@ router = APIRouter(tags=["expedientes"])
 
 
 class CaseCountsResponse(BaseModel):
-    """Conteos de expedientes por vista."""
     asignado: int = Field(..., example=5, description="Expedientes asignados directamente al usuario")
     admin: int = Field(..., example=12, description="Expedientes administrados por el sector del usuario")
     actuante: int = Field(..., example=3, description="Expedientes donde el sector del usuario es actuante activo")
@@ -55,22 +44,33 @@ async def get_case_counts(
 
         logger.info(f"Getting case counts - User: {db_user_id[:8]}")
 
-        # Count asignado: case_responsibles donde user_id = yo AND is_active = true
-        asignado_query = """
+        reserved_gate = f"""
+            AND (
+                NOT ct.is_reserved
+                OR ({build_reserved_or_exists(case_ref="c.id", user_ph="$1")})
+            )
+        """
+        templates_join = "JOIN case_templates ct ON ct.id = c.case_template_id"
+
+        asignado_query = f"""
             SELECT COUNT(DISTINCT c.id) AS total
             FROM cases c
-            INNER JOIN case_responsibles cr
-                ON cr.case_id = c.id
-                AND cr.user_id = $1
-                AND cr.is_active = true
+            {templates_join}
+            INNER JOIN (
+                SELECT case_id FROM case_responsibles
+                WHERE user_id = $1 AND is_active = true
+                UNION
+                SELECT case_id FROM case_assignment_tasks
+                WHERE assigned_user_id = $1 AND status = 'open'
+            ) cr ON cr.case_id = c.id
             WHERE c.status = 'active'
+            {reserved_gate}
         """
 
-        # Count admin: casos donde soy el admin actual (por movimientos, no owner_sector_id)
-        # Usa can_view=true para ser consistente con el listado base (mismo sector set).
-        admin_query = """
+        admin_query = f"""
             SELECT COUNT(DISTINCT c.id) AS total
             FROM cases c
+            {templates_join}
             WHERE c.status = 'active'
               AND (
                 EXISTS (
@@ -103,13 +103,13 @@ async def get_case_counts(
                     )
                 )
               )
+            {reserved_gate}
         """
 
-        # Count actuante: movimiento activo tipo 'assignment' en sector del usuario
-        # Usa can_view=true para ser consistente con el listado base (mismo sector set).
-        actuante_query = """
+        actuante_query = f"""
             SELECT COUNT(DISTINCT c.id) AS total
             FROM cases c
+            {templates_join}
             WHERE c.status = 'active'
               AND EXISTS (
                 SELECT 1
@@ -124,19 +124,20 @@ async def get_case_counts(
                       WHERE user_id = $2 AND can_view = true
                   )
               )
+            {reserved_gate}
         """
 
-        # Count favoritos: case_favorites del usuario
-        favoritos_query = """
+        favoritos_query = f"""
             SELECT COUNT(DISTINCT c.id) AS total
             FROM cases c
+            {templates_join}
             INNER JOIN case_favorites cf
                 ON cf.case_id = c.id
                 AND cf.user_id = $1
             WHERE c.status = 'active'
+            {reserved_gate}
         """
 
-        # Ejecutar las 4 queries
         r_asignado = await fetch_all(asignado_query, db_user_id, schema_name=schema_name)
         r_admin = await fetch_all(admin_query, db_user_id, db_user_id, db_user_id, db_user_id, schema_name=schema_name)
         r_actuante = await fetch_all(actuante_query, db_user_id, db_user_id, schema_name=schema_name)

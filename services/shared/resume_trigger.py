@@ -1,4 +1,3 @@
-"""Resume trigger - Encola documentos para generacion de resumen."""
 
 import asyncio
 from shared.logging import get_logger
@@ -8,24 +7,17 @@ logger = get_logger(__name__)
 
 
 async def _enqueue_document_resume(document_id: str, schema_name: str) -> None:
-    """Encola documento para generar resumen automatico. Best-effort, no bloquea.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant
-    """
     import httpx
 
     agent_url = os.getenv('AGENT_URL')
     agent_api_key = os.getenv('INTERNAL_API_KEY')
 
-    # Best-effort: si no está configurado, solo loguear y retornar
     if not agent_url or not agent_api_key:
         logger.warning("AGENT_URL o INTERNAL_API_KEY no configurado. Saltando generación de resumen.")
         return
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 f"{agent_url}/api/v1/resume-document",
                 json={"document_id": document_id, "schema_name": schema_name},
@@ -36,39 +28,25 @@ async def _enqueue_document_resume(document_id: str, schema_name: str) -> None:
             else:
                 logger.warning(f"Resume endpoint returned {response.status_code}")
     except Exception as e:
-        # Best-effort: log y continua sin fallar el proceso principal
         logger.warning(f"Failed to enqueue resume for {document_id[:8]}...: {e}")
 
 
 def enqueue_resume_fire_and_forget(document_id: str, schema_name: str) -> None:
-    """Fire-and-forget: encola resumen async sin bloquear el proceso principal.
-
-    Args:
-        document_id: UUID del documento
-        schema_name: Schema del tenant
-    """
     asyncio.create_task(_enqueue_document_resume(document_id, schema_name))
 
 
 async def _enqueue_record_resume(record_id: str, schema_name: str) -> None:
-    """Encola legajo para generar resumen automatico. Best-effort, no bloquea.
-
-    Args:
-        record_id: UUID del legajo
-        schema_name: Schema del tenant
-    """
     import httpx
 
     agent_url = os.getenv('AGENT_URL')
     agent_api_key = os.getenv('INTERNAL_API_KEY')
 
-    # Best-effort: si no está configurado, solo loguear y retornar
     if not agent_url or not agent_api_key:
         logger.warning("AGENT_URL o INTERNAL_API_KEY no configurado. Saltando generación de resumen de legajo.")
         return
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 f"{agent_url}/api/v1/resume-record",
                 json={"record_id": record_id, "schema_name": schema_name},
@@ -79,15 +57,8 @@ async def _enqueue_record_resume(record_id: str, schema_name: str) -> None:
             else:
                 logger.warning(f"Resume-record endpoint returned {response.status_code}")
     except Exception as e:
-        # Best-effort: log y continua sin fallar el proceso principal
         logger.warning(f"Failed to enqueue resume for record {record_id[:8]}...: {e}")
 
 
 def enqueue_record_resume_fire_and_forget(record_id: str, schema_name: str) -> None:
-    """Fire-and-forget: encola resumen de legajo async sin bloquear el proceso principal.
-
-    Args:
-        record_id: UUID del legajo
-        schema_name: Schema del tenant
-    """
     asyncio.create_task(_enqueue_record_resume(record_id, schema_name))

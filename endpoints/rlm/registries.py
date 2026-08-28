@@ -1,4 +1,3 @@
-"""Endpoints para registros (registry_families) del módulo RLM."""
 
 from uuid import UUID
 

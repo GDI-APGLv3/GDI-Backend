@@ -1,4 +1,3 @@
-"""Semantic search service - orchestrates embedding + SQL + formatting."""
 
 import re
 import time
@@ -13,13 +12,8 @@ from config.constants import SEMANTIC_SEARCH_EXCLUDED_TYPES
 
 logger = get_logger(__name__)
 
-# Umbral mínimo de similitud coseno para candidatos vector.
-# 0.30 es el punto de partida validado para text-embedding-3-small en corpus legal español.
-# Ajustar con evidencia del eval set; cualquier cambio debe ir en un commit con justificación.
 THRESHOLD = 0.30
 
-# Detecta queries de tipo lookup: número de ordenanza, resolución, decreto,
-# comunicación, o el código official_number (PL***-YYYY-NNNNN-MUN-ORG).
 _LOOKUP_PATTERN = re.compile(
     r"""
     (?:
@@ -33,14 +27,11 @@ _LOOKUP_PATTERN = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Palabras que indican intención semántica aunque la query tenga número.
-# Ej: "qué dice la ordenanza 6057 sobre habilitaciones" → RAG, no lookup.
 _SEMANTIC_OVERRIDE = re.compile(
     r'\b(qu[eé]|dice|habla|trata|sobre|acerca|relacionado|contenido|explica|significa|define)\b',
     re.IGNORECASE,
 )
 
-# Detecta el número de documento (3+ dígitos) y el tipo textual dentro de la query.
 _TYPE_NUMBER_EXTRACT = re.compile(
     r'(ordenanza|resoluci[oó]n|comunicaci[oó]n|decreto)(?:\s+hcd)?\s+(\d+)',
     re.IGNORECASE,
@@ -58,8 +49,6 @@ def classify_intent(query: str) -> Literal["lookup", "rag"]:
 
 
 def _build_lookup_params(query: str, result_limit: int, user_id: str) -> tuple:
-    """Construye los params posicionales para LOOKUP_DOCUMENT_SQL tokenizando la query."""
-    # Caso 1: official_number exacto (PLORD-2026-...)
     if _OFFICIAL_NUMBER_EXTRACT.search(query):
         return (
             user_id,
@@ -68,7 +57,6 @@ def _build_lookup_params(query: str, result_limit: int, user_id: str) -> tuple:
             f"%{query.strip()}%",
             result_limit,
         )
-    # Caso 2: tipo + número (ej: "Ordenanza 6057")
     m = _TYPE_NUMBER_EXTRACT.search(query)
     if m:
         tipo = m.group(1)
@@ -80,7 +68,6 @@ def _build_lookup_params(query: str, result_limit: int, user_id: str) -> tuple:
             f"%{numero}%",
             result_limit,
         )
-    # Fallback
     return (
         user_id,
         f"%{query}%",
@@ -106,7 +93,6 @@ async def _log_query(
     latency_ms: int,
     results_doc_ids: list,
 ) -> None:
-    """Fire-and-forget: inserta en public.rag_query_log. Nunca lanza error al caller."""
     try:
         await execute(
             """
@@ -145,7 +131,6 @@ _background_tasks: set = set()
 
 
 def _fire_and_forget_log(**kwargs) -> None:
-    """Schedules the async log insert as a background task (fire-and-forget)."""
     try:
         loop = asyncio.get_running_loop()
         task = loop.create_task(_log_query(**kwargs))
@@ -182,7 +167,6 @@ async def _lookup_document(
     source: str,
     t0: float,
 ) -> dict:
-    """Búsqueda directa por número/código de documento. Omite el embedding."""
     params = _build_lookup_params(query, limit, user_id)
     rows = await fetch_all(
         LOOKUP_DOCUMENT_SQL,
@@ -225,14 +209,12 @@ async def semantic_search(
     limit: int = 20,
     source: str = "api",
 ):
-    """Busqueda semantica de documentos con filtro de permisos."""
     t0 = time.time()
     intent = classify_intent(query)
 
     if intent == "lookup":
         return await _lookup_document(query, user_id, schema_name=schema_name, limit=limit, source=source, t0=t0)
 
-    # RAG path: embedding + BM25 hybrid + RRF
     result = await get_embedding(query, schema_name=schema_name, rewrite=True)
     if not result.get("embedding"):
         latency_ms = int((time.time() - t0) * 1000)
@@ -256,8 +238,6 @@ async def semantic_search(
     embedding_str = "[" + ",".join(str(x) for x in result["embedding"]) + "]"
     query_text = result.get("rewritten_text") or query
 
-    # SEMANTIC_SEARCH_SQL uses positional params ($1..$7).
-    # $7 = excluded_types: tipos de documento excluidos (PV, CAEX, TST, IFRLM).
     rows = await fetch_all(
         SEMANTIC_SEARCH_SQL,
         user_id,
@@ -266,12 +246,11 @@ async def semantic_search(
         THRESHOLD,
         200,
         limit,
-        list(SEMANTIC_SEARCH_EXCLUDED_TYPES),   # $7: text[] para NOT (acronym = ANY($7))
+        list(SEMANTIC_SEARCH_EXCLUDED_TYPES),
         schema_name=schema_name,
     )
 
     results = [_format_row(dict(row)) for row in (rows or [])]
-    # Solo consideramos similarity > 0 (docs solo-BM25 tienen similarity=0.0)
     vec_sims = [r["similarity"] for r in results if r["similarity"] > 0]
     latency_ms = int((time.time() - t0) * 1000)
     _fire_and_forget_log(

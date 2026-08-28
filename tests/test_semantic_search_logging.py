@@ -1,23 +1,9 @@
-"""
-Tests unitarios para el logging fire-and-forget de semantic_search.
-
-Verifica:
-1. Si el INSERT falla, semantic_search NO rompe la response al cliente.
-2. Si todo va bien, _log_query se llama con los campos correctos.
-3. source="mcp" llega correctamente desde el MCP tool.
-
-Estos tests NO requieren BD ni AgenteLANG; mockean todas las dependencias externas.
-"""
 import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 
-# ---------------------------------------------------------------------------
-# Fixtures de embedding mock
-# ---------------------------------------------------------------------------
-
-MOCK_EMBEDDING = [0.1] * 1536  # Dimensión típica de embeddings
+MOCK_EMBEDDING = [0.1] * 768
 
 MOCK_EMBEDDING_RESULT_OK = {
     "embedding": MOCK_EMBEDDING,
@@ -59,12 +45,7 @@ MOCK_ROWS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Helper async
-# ---------------------------------------------------------------------------
-
 async def _run_semantic_search(source: str = "api", rows=None, embedding_result=None):
-    """Ejecuta semantic_search con todos los deps mockeados."""
     if embedding_result is None:
         embedding_result = MOCK_EMBEDDING_RESULT_OK
     if rows is None:
@@ -82,20 +63,14 @@ async def _run_semantic_search(source: str = "api", rows=None, embedding_result=
             limit=20,
             source=source,
         )
-        # Yield al event loop para que los background tasks se completen
         await asyncio.sleep(0)
         return result, mock_execute
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 class TestSemanticSearchLogging:
 
     @pytest.mark.asyncio
     async def test_log_failure_does_not_break_response(self):
-        """Si execute lanza Exception, semantic_search igual devuelve resultados."""
         with patch("services.search.semantic_search.get_embedding", new_callable=AsyncMock, return_value=MOCK_EMBEDDING_RESULT_OK), \
              patch("services.search.semantic_search.fetch_all", new_callable=AsyncMock, return_value=MOCK_ROWS), \
              patch("services.search.semantic_search.execute", new_callable=AsyncMock, side_effect=Exception("BD unavailable")):
@@ -110,7 +85,6 @@ class TestSemanticSearchLogging:
             )
             await asyncio.sleep(0)
 
-        # La respuesta al cliente debe ser correcta a pesar del error de log
         assert result["success"] is True
         assert len(result["results"]) == 2
         assert result["total"] == 2
@@ -119,7 +93,6 @@ class TestSemanticSearchLogging:
 
     @pytest.mark.asyncio
     async def test_log_called_with_correct_fields(self):
-        """_log_query se llama con los campos correctos cuando todo va bien."""
         with patch("services.search.semantic_search.get_embedding", new_callable=AsyncMock, return_value=MOCK_EMBEDDING_RESULT_OK), \
              patch("services.search.semantic_search.fetch_all", new_callable=AsyncMock, return_value=MOCK_ROWS), \
              patch("services.search.semantic_search.execute", new_callable=AsyncMock) as mock_execute:
@@ -134,22 +107,17 @@ class TestSemanticSearchLogging:
             )
             await asyncio.sleep(0)
 
-        # Verificar que execute fue llamado (para el log)
         assert mock_execute.called, "execute debería haberse llamado para el log"
 
-        # asyncpg: execute(sql, p1, p2, ..., schema_name=...)
         args, kwargs = mock_execute.call_args
         sql = args[0]
 
         assert "rag_query_log" in sql
         assert "INSERT INTO public.rag_query_log" in sql
 
-        # Verificar schema_name="public" en el kwarg
         assert kwargs.get("schema_name") == "public", \
             f"El log debe ir a public, no a schema del tenant. Got: {kwargs.get('schema_name')}"
 
-        # Params positionales: (sql, schema_name, user_id, source, intent, query, rewritten_query,
-        #                        candidates, final, top_sim, bottom_sim, threshold, latency, doc_ids)
         (
             _sql,
             schema_name_val, user_id_val, source_val, intent_val, query_val, rewritten_val,
@@ -174,7 +142,6 @@ class TestSemanticSearchLogging:
 
     @pytest.mark.asyncio
     async def test_log_called_on_empty_embedding(self):
-        """Cuando embedding está vacío (early return), también se loggea con candidates=0, final=0."""
         with patch("services.search.semantic_search.get_embedding", new_callable=AsyncMock, return_value=MOCK_EMBEDDING_RESULT_EMPTY), \
              patch("services.search.semantic_search.fetch_all", new_callable=AsyncMock) as mock_fetch, \
              patch("services.search.semantic_search.execute", new_callable=AsyncMock) as mock_execute:
@@ -189,14 +156,11 @@ class TestSemanticSearchLogging:
             )
             await asyncio.sleep(0)
 
-        # fetch_all NO debe haberse llamado (early return antes de la query)
         mock_fetch.assert_not_called()
 
-        # Pero el log SÍ debe haberse llamado
         assert mock_execute.called
 
         args, kwargs = mock_execute.call_args
-        # args: (sql, schema_name, user_id, source, intent, query, rewritten, candidates, final, ...)
         candidates_val = args[7]
         final_val = args[8]
 
@@ -204,13 +168,11 @@ class TestSemanticSearchLogging:
         assert final_val == 0
         assert kwargs.get("schema_name") == "public"
 
-        # Response al cliente también debe ser la correcta
         assert result["success"] is True
         assert result["results"] == []
 
     @pytest.mark.asyncio
     async def test_source_mcp_passed_correctly(self):
-        """source='mcp' se propaga correctamente al log."""
         with patch("services.search.semantic_search.get_embedding", new_callable=AsyncMock, return_value=MOCK_EMBEDDING_RESULT_OK), \
              patch("services.search.semantic_search.fetch_all", new_callable=AsyncMock, return_value=[]), \
              patch("services.search.semantic_search.execute", new_callable=AsyncMock) as mock_execute:
@@ -227,13 +189,11 @@ class TestSemanticSearchLogging:
 
         assert mock_execute.called
         args, _ = mock_execute.call_args
-        # args[3] = source (after sql, schema_name, user_id)
         source_val = args[3]
         assert source_val == "mcp"
 
     @pytest.mark.asyncio
     async def test_result_fields_are_correct(self):
-        """Verifica que la response al cliente no se vea alterada por el logging."""
         result, _ = await _run_semantic_search(source="api")
 
         assert result["success"] is True
@@ -241,12 +201,11 @@ class TestSemanticSearchLogging:
         assert result["intent"] == "rag"
         assert result["results"][0]["similarity"] == round(0.9123, 4)
         assert result["results"][0]["rrf_score"] == round(0.030, 6)
-        assert result["results"][1]["linked_cases"] == []   # None → []
+        assert result["results"][1]["linked_cases"] == []
         assert result["results"][1]["linked_records"] == []
 
     @pytest.mark.asyncio
     async def test_semantic_search_tool_default_source_mcp(self):
-        """semantic_search_tool sin source explicito debe pasar source='mcp' al service."""
         mock_ctx = MagicMock()
         mock_ctx.user_id = "user-uuid-tool-001"
         mock_ctx.schema_name = "100_test"
@@ -263,7 +222,6 @@ class TestSemanticSearchLogging:
 
     @pytest.mark.asyncio
     async def test_semantic_search_tool_explicit_source_api(self):
-        """semantic_search_tool con source='api' debe pasar source='api' al service."""
         mock_ctx = MagicMock()
         mock_ctx.user_id = "user-uuid-tool-002"
         mock_ctx.schema_name = "100_test"
@@ -279,7 +237,6 @@ class TestSemanticSearchLogging:
             f"Source explicito 'api' debe propagarse, got: {kwargs.get('source')}"
 
     def test_classify_intent_lookup(self):
-        """classify_intent detecta correctamente queries de tipo lookup."""
         from services.search.semantic_search import classify_intent
         assert classify_intent("Ordenanza 6057") == "lookup"
         assert classify_intent("ordenanza hcd 14918") == "lookup"
@@ -288,7 +245,6 @@ class TestSemanticSearchLogging:
         assert classify_intent("PLORD-2026-00001523-ESCO-DIGE") == "lookup"
 
     def test_classify_intent_rag(self):
-        """classify_intent enruta a RAG queries semánticas aunque tengan número."""
         from services.search.semantic_search import classify_intent
         assert classify_intent("donaciones municipales") == "rag"
         assert classify_intent("habilitaciones comerciales") == "rag"

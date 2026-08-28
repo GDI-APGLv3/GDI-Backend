@@ -11,3 +11,4 @@ logtail-python==0.2.8
 PyMuPDF>=1.24,<2.0
 nh3==0.2.18
 weasyprint==68.1
+httpx>=0.27.0

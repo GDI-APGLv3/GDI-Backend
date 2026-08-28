@@ -1,15 +1,3 @@
-"""
-Endpoint para consultar información de un usuario del tenant.
-
-`GET /api/v1/system/users/{user_id}`
-
-Equivalente al handler REST del Gateway (SET B) `api_get_user_info`
-(api_gateway/rest_api.py → api_gateway/tools/system.py::get_user_info).
-
-Regla de seguridad SEC-12 (heredada de SET B): un usuario sólo puede
-consultar su propia información. Accesible por JWT y por API Key
-(auth pluggable, Fase 1 S8-001).
-"""
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
@@ -26,10 +14,6 @@ from services.users.info import get_user_info
 logger = get_logger(__name__)
 router = APIRouter(tags=[Tags.SISTEMA])
 
-
-# ---------------------------------------------------------------------------
-# Modelos de respuesta
-# ---------------------------------------------------------------------------
 
 class UserSector(BaseModel):
     id: Optional[str] = Field(None, example="660e8400-e29b-41d4-a716-446655440001")
@@ -61,10 +45,6 @@ class SystemUserResponse(BaseModel):
     additional_sectors: List[AdditionalSector] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Endpoint
-# ---------------------------------------------------------------------------
-
 @router.get(
     "/api/v1/system/users/{user_id}",
     response_model=SystemUserResponse,
@@ -94,7 +74,6 @@ async def get_system_user(
     """
     auth_user_id = request.state.tenant_user_id
 
-    # SEC-12 – igual que en SET B (api_gateway/rest_api.py líneas 535-539)
     if user_id != auth_user_id:
         raise HTTPException(
             status_code=403,

@@ -1,18 +1,15 @@
-"""
-Servicio de negocio para el Dashboard (Feed de actividad).
-Contiene toda la lógica de negocio para obtener el feed y estadísticas.
-"""
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from shared.logging import get_logger
+import asyncio
 import math
 
 from database import fetch_all, fetch_one
 from services.dashboard_queries import (
     get_feed_movements_query,
+    get_feed_movements_count_query,
     get_cases_in_sector_count_query
 )
-from shared.exceptions import ValidationError, NotFoundError
 from config.constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from services.shared.sector_utils import get_user_sector_ids
 
@@ -20,24 +17,11 @@ logger = get_logger(__name__)
 
 
 class DashboardService:
-    """Servicio para el Dashboard de actividad"""
 
-    # Alias para backward compatibility
     _get_user_sector_ids = staticmethod(get_user_sector_ids)
 
     @staticmethod
     def _generate_movement_message(movement_type: str, user_name: str, reason: str) -> str:
-        """
-        Genera un mensaje legible para el movimiento.
-
-        Args:
-            movement_type: Tipo de movimiento (creation, transfer, etc.)
-            user_name: Nombre del usuario que realizó el movimiento
-            reason: Razón del movimiento
-
-        Returns:
-            Mensaje legible
-        """
         messages = {
             'creation': f"{user_name} creó el expediente",
             'transfer': f"{user_name} transfirió el expediente",
@@ -57,27 +41,13 @@ class DashboardService:
         *,
         schema_name: str
     ) -> Dict[str, Any]:
-        """
-        Obtiene el feed de movimientos para el usuario.
 
-        Args:
-            user_id: UUID del usuario
-            page: Numero de pagina (1-based)
-            page_size: Elementos por pagina
-            schema_name: Schema del tenant (requerido)
-
-        Returns:
-            Dict con items, total, page, page_size, total_pages
-        """
-
-        # Validar paginación
         page = max(1, page)
         page_size = min(max(1, page_size), MAX_PAGE_SIZE)
         offset = (page - 1) * page_size
 
         logger.info(f"Getting feed for user {user_id[:8]}... page={page}, size={page_size}")
 
-        # Obtener sectores del usuario
         sector_ids = await DashboardService._get_user_sector_ids(user_id, schema_name=schema_name)
 
         if not sector_ids:
@@ -90,23 +60,24 @@ class DashboardService:
                 "total_pages": 0
             }
 
-        # Ejecutar query del feed
-        # La query usa CTEs internas para sectores del usuario, solo necesita user_id 2 veces
-        # y luego page_size y offset
         query = get_feed_movements_query("")
-        results = await fetch_all(query, user_id, user_id, page_size, offset, schema_name=schema_name)
+        count_query = get_feed_movements_count_query()
+        results, count_row = await asyncio.gather(
+            fetch_all(query, user_id, user_id, page_size, offset, schema_name=schema_name),
+            fetch_one(count_query, user_id, user_id, schema_name=schema_name),
+        )
+
+        total = count_row['total_count'] if count_row else 0
 
         if not results:
             return {
                 "items": [],
-                "total": 0,
+                "total": total,
                 "page": page,
                 "page_size": page_size,
-                "total_pages": 0
+                "total_pages": math.ceil(total / page_size) if total > 0 else 0
             }
 
-        # Procesar resultados
-        total = results[0]['total_count'] if results else 0
         total_pages = math.ceil(total / page_size) if total > 0 else 0
 
         items = []
@@ -143,7 +114,6 @@ class DashboardService:
                 "supporting_document": None
             }
 
-            # Agregar documento de soporte si existe
             if row['doc_number']:
                 item["supporting_document"] = {
                     "official_number": row['doc_number'],
@@ -166,20 +136,9 @@ class DashboardService:
 
     @staticmethod
     async def get_stats(user_id: str, *, schema_name: str) -> Dict[str, Any]:
-        """
-        Obtiene estadisticas del dashboard para el usuario.
-
-        Args:
-            user_id: UUID del usuario
-            schema_name: Schema del tenant (requerido)
-
-        Returns:
-            Dict con cases_in_sector
-        """
 
         logger.info(f"Getting stats for user {user_id[:8]}...")
 
-        # Contar expedientes donde el usuario es admin
         query = get_cases_in_sector_count_query()
         result = await fetch_one(query, user_id, schema_name=schema_name)
 

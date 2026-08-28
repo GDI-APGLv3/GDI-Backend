@@ -1,11 +1,7 @@
-"""
-Módulo de transferencia para expedientes.
-Funciones para transferir y cerrar asignaciones de expedientes.
-"""
 
 from typing import List, Dict, Optional, Any
 from shared.logging import get_logger
-from database import fetch_all, fetch_one, execute
+from database import fetch_all, execute
 from config.constants import (
     MOVEMENT_TYPES,
     TRANSFER_USER_NOT_FOUND,
@@ -16,7 +12,6 @@ from config.constants import (
     TRANSFER_ASSIGNED_USER_INVALID,
     TRANSFER_ERROR,
     TRANSFER_CLOSING_REASON,
-    TRANSFER_DUPLICATE_ASSIGNMENT,
     CLOSE_ASSIGNMENT_USER_NO_SECTORS,
     CLOSE_ASSIGNMENT_MOVEMENT_NOT_FOUND,
     CLOSE_ASSIGNMENT_WRONG_TYPE,
@@ -50,34 +45,23 @@ async def transfer_case(
     schema_name: str,
     auth_source: str = "jwt"
 ) -> Dict[str, Any]:
-    """
-    Transferir expediente a otro sector o asignar tarea.
-
-    Args:
-        case_id: ID del expediente
-        target_sector_id: ID del sector destino
-        reason: Motivo de la transferencia/asignación
-        user_id: ID del usuario que realiza la operación
-        transfer_ownership: Si True transfiere propiedad, si False solo asigna tarea
-        assigned_user_id: ID del usuario específico asignado (opcional)
-        supporting_document_id: ID del documento oficial de soporte (PV creado automáticamente)
-        schema_name: Nombre del schema (opcional, para multi-tenant)
-
-    Returns:
-        Dict con información del movimiento creado
-    """
     from services.case_service import CaseService
     from services.case_queries import (
         get_user_with_sector_query, get_case_with_target_sector_query,
         get_admin_sector_query, get_target_sector_query,
         get_assigned_user_query, update_case_ownership_query,
-        close_movement_query, check_duplicate_assignment_query
+        close_movement_query
     )
+
+    if not transfer_ownership:
+        raise ValueError(
+            "transfer_case ya no acepta transfer_ownership=False. "
+            "Usá services.cases.tasks.ensure_assignment_and_create_task."
+        )
 
     try:
         logger.info(f"Starting transfer for case {case_id} to sector {target_sector_id}, ownership={transfer_ownership}")
 
-        # 1. Obtener datos del usuario con su sector
         user_result = await fetch_all(get_user_with_sector_query(), user_id, schema_name=schema_name)
 
         if not user_result:
@@ -87,11 +71,9 @@ async def transfer_case(
         user_data = user_result[0]
         user_sector_id = user_data['sector_id']
 
-        # 1.1 Obtener TODOS los sectores donde el usuario puede EDITAR
         user_editable_sectors = await CaseService.get_user_editable_sector_ids(user_id, schema_name=schema_name)
         logger.debug(f"User {user_id} editable sectors: {user_editable_sectors}")
 
-        # 2. Obtener datos del expediente con sector destino
         case_result = await fetch_all(
             get_case_with_target_sector_query(),
             target_sector_id, case_id,
@@ -104,7 +86,6 @@ async def transfer_case(
 
         case_data = case_result[0]
 
-        # 3. Si es transferencia de propiedad, verificar permisos del sector administrador
         if transfer_ownership:
             admin_result = await fetch_all(get_admin_sector_query(), case_id, schema_name=schema_name)
 
@@ -114,12 +95,10 @@ async def transfer_case(
 
             admin_sector_id = str(admin_result[0]['admin_sector_id'])
 
-            # Validar que el usuario tenga permiso de EDICION en el sector admin del expediente
             if admin_sector_id not in user_editable_sectors:
                 logger.warning(f"Permission denied: admin sector {admin_sector_id} not in user editable sectors {user_editable_sectors}")
                 raise AuthorizationError(TRANSFER_PERMISSION_DENIED)
 
-        # 4. Verificar que el sector destino existe y está activo
         target_result = await fetch_all(get_target_sector_query(), target_sector_id, schema_name=schema_name)
 
         if not target_result:
@@ -128,7 +107,6 @@ async def transfer_case(
 
         target_sector_data = target_result[0]
 
-        # 5. Verificar usuario asignado si se proporciona
         assigned_user_name = None
         if assigned_user_id:
             assigned_result = await fetch_all(
@@ -143,20 +121,8 @@ async def transfer_case(
 
             assigned_user_name = assigned_result[0]['full_name']
 
-        # 6. Determinar tipo de movimiento
         movement_type = MOVEMENT_TYPES["TRANSFER"] if transfer_ownership else MOVEMENT_TYPES["ASSIGNMENT"]
 
-        # 6.5. Si es asignación, verificar que no exista una asignación activa al mismo sector
-        if not transfer_ownership:
-            duplicate_check = await fetch_all(
-                check_duplicate_assignment_query(),
-                case_id, target_sector_id,
-                schema_name=schema_name
-            )
-            if duplicate_check:
-                raise ValidationError(TRANSFER_DUPLICATE_ASSIGNMENT)
-
-        # 7. Crear el movimiento
         logger.info(f"Creating movement: type={movement_type}, user={user_id}, target_sector={target_sector_id}")
         movement_id = await CaseService.create_movement(
             case_id=case_id,
@@ -172,7 +138,6 @@ async def transfer_case(
             auth_source=auth_source
         )
 
-        # 8. Si es transferencia de propiedad, cerrar movimiento y actualizar expediente
         if transfer_ownership:
             await execute(close_movement_query(), TRANSFER_CLOSING_REASON, user_id, movement_id, schema_name=schema_name)
             await execute(
@@ -182,14 +147,18 @@ async def transfer_case(
             )
             logger.info(f"Transfer completed: movement closed and ownership updated")
 
-            # 8a. Gestionar responsable ADMIN al transferir
             try:
                 from services.cases.responsibles import (
                     add_responsible as _add_responsible,
-                    _deactivate_current_admin,
+                    _deactivate_all_admins,
+                )
+                await _deactivate_all_admins(
+                    case_id=case_id,
+                    removed_by=user_id,
+                    reason=reason.strip(),
+                    schema_name=schema_name,
                 )
                 if assigned_user_id:
-                    # CON responsable: desactivar admin actual → crear nuevo ADMIN
                     await _add_responsible(
                         case_id=case_id,
                         user_id=assigned_user_id,
@@ -199,32 +168,8 @@ async def transfer_case(
                         movement_reason=reason.strip(),
                         schema_name=schema_name,
                     )
-                else:
-                    # SIN responsable: solo desactivar admin actual (queda vacío)
-                    await _deactivate_current_admin(
-                        case_id=case_id,
-                        removed_by=user_id,
-                        reason=reason.strip(),
-                        schema_name=schema_name,
-                    )
             except Exception as resp_err:
                 logger.warning(f"Error gestionando responsable ADMIN en transferencia: {resp_err}")
-
-        # 8b. Asignación (sin transferencia de propiedad) CON responsable → ADDITIONAL
-        elif not transfer_ownership and assigned_user_id:
-            try:
-                from services.cases.responsibles import add_responsible as _add_responsible
-                await _add_responsible(
-                    case_id=case_id,
-                    user_id=assigned_user_id,
-                    responsible_type="ADDITIONAL",
-                    sector_id=target_sector_id,
-                    added_by=user_id,
-                    movement_reason=reason.strip(),
-                    schema_name=schema_name,
-                )
-            except Exception as resp_err:
-                logger.warning(f"Error agregando responsable ADDITIONAL en asignación: {resp_err}")
 
         action_type = "transferido" if transfer_ownership else "asignado"
 
@@ -256,19 +201,6 @@ async def close_assignment(
     schema_name: str,
     auth_source: str = "jwt"
 ) -> Dict[str, Any]:
-    """
-    Cerrar asignación de expediente.
-
-    Args:
-        case_id: ID del expediente
-        movement_id: ID del movimiento a cerrar
-        reason: Razón del cierre
-        user_id: ID del usuario que cierra
-        schema_name: Nombre del schema (opcional, para multi-tenant)
-
-    Returns:
-        Dict con información del movimiento cerrado
-    """
     from services.case_service import CaseService
     from services.case_queries import (
         get_movement_for_closing_query,
@@ -278,7 +210,6 @@ async def close_assignment(
     try:
         logger.info(f"Closing assignment: case={case_id}, movement={movement_id}, user={user_id}")
 
-        # 1. Obtener sectores donde el usuario puede EDITAR (respeta can_edit)
         user_sector_ids = await CaseService.get_user_editable_sector_ids(user_id, schema_name=schema_name)
         logger.debug(f"User {user_id} editable sectors for close_assignment: {user_sector_ids}")
 
@@ -286,7 +217,6 @@ async def close_assignment(
             logger.error(f"User {user_id} has no editable sectors")
             raise AuthorizationError(CLOSE_ASSIGNMENT_USER_NO_SECTORS)
 
-        # 2. Verificar que el movimiento existe y pertenece al expediente
         movement_result = await fetch_all(
             get_movement_for_closing_query(),
             movement_id, case_id,
@@ -299,17 +229,14 @@ async def close_assignment(
 
         movement_data = movement_result[0]
 
-        # 3. Verificar que sea tipo assignment
         if movement_data['type'] != MOVEMENT_TYPE_ASSIGNMENT:
             logger.error(f"Wrong movement type: {movement_data['type']} (expected assignment)")
             raise ValidationError(f"{CLOSE_ASSIGNMENT_WRONG_TYPE}. Este movimiento es tipo '{movement_data['type']}'")
 
-        # 4. Verificar que no esté cerrado
         if movement_data['closed_at'] is not None:
             logger.error(f"Movement already closed at: {movement_data['closed_at']}")
             raise BusinessLogicError(f"{CLOSE_ASSIGNMENT_ALREADY_CLOSED} el {movement_data['closed_at']}")
 
-        # 5. Obtener sector administrador
         admin_result = await fetch_all(get_admin_sector_query(), case_id, schema_name=schema_name)
 
         if not admin_result:
@@ -319,7 +246,6 @@ async def close_assignment(
         admin_sector_id = str(admin_result[0]['admin_sector_id'])
         assigned_sector_id = str(movement_data['assigned_sector_id']) if movement_data['assigned_sector_id'] else None
 
-        # 6. Verificar permisos: usuario debe pertenecer al sector admin O al sector asignado
         has_permission = (
             admin_sector_id in user_sector_ids or
             (assigned_sector_id and assigned_sector_id in user_sector_ids)
@@ -329,57 +255,38 @@ async def close_assignment(
             logger.warning(f"Permission denied: user sectors {user_sector_ids} not in [admin={admin_sector_id}, assigned={assigned_sector_id}]")
             raise AuthorizationError(CLOSE_ASSIGNMENT_PERMISSION_DENIED)
 
-        # 7. Cerrar el movimiento
-        await execute(close_movement_query(), reason.strip(), user_id, movement_id, schema_name=schema_name)
+        from database import transaction as db_transaction
+        from services.cases.tasks import _record_assignment_close
+        async with db_transaction(schema_name=schema_name, user_id=user_id, auth_source=auth_source) as conn:
+            await conn.execute(
+                close_movement_query(),
+                reason.strip(), user_id, movement_id,
+            )
+            await conn.execute(
+                """
+                UPDATE case_assignment_tasks
+                SET status = 'closed',
+                    closed_at = NOW(),
+                    closed_by = $1,
+                    closing_reason = $2
+                WHERE assignment_id = $3
+                  AND status = 'open'
+                """,
+                user_id,
+                reason.strip(),
+                movement_id,
+            )
+            await _record_assignment_close(
+                conn,
+                case_id=case_id,
+                assignment_id=movement_id,
+                assigned_sector_id=assigned_sector_id,
+                user_id=user_id,
+                reason=reason.strip(),
+                schema_name=schema_name,
+            )
 
         logger.info(f"Assignment closed successfully: movement_id={movement_id}")
-
-        # 8. Registrar cierre en historial del expediente
-        try:
-            import uuid as uuid_mod
-            from config.constants import MOVEMENT_TYPE_ASSIGNMENT_CLOSE
-
-            user_sector_result = await fetch_all(
-                "SELECT sector_id FROM users WHERE id = $1",
-                user_id, schema_name=schema_name
-            )
-            closer_sector_id = str(user_sector_result[0]['sector_id']) if user_sector_result else assigned_sector_id or admin_sector_id
-
-            close_history_id = str(uuid_mod.uuid4())
-            await execute("""
-                INSERT INTO case_movements (
-                    id, case_id, type, user_id,
-                    creator_sector_id, admin_sector_id,
-                    assigned_sector_id, reason,
-                    is_active, closed_at, closing_reason
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8,
-                    false, NOW(), $9
-                )
-            """,
-                close_history_id, case_id, MOVEMENT_TYPE_ASSIGNMENT_CLOSE, user_id,
-                closer_sector_id, admin_sector_id,
-                assigned_sector_id, reason.strip(),
-                reason.strip(),
-                schema_name=schema_name
-            )
-            logger.info(f"Assignment close history recorded for case {case_id}")
-        except Exception as hist_error:
-            logger.warning(f"Error recording close history for case {case_id}: {hist_error}")
-
-        # 9. Desactivar responsables ADDITIONAL del sector que se está cerrando
-        if assigned_sector_id:
-            try:
-                from services.cases.responsibles import remove_responsibles_for_sector
-                await remove_responsibles_for_sector(
-                    case_id=case_id,
-                    sector_id=assigned_sector_id,
-                    removed_by=user_id,
-                    schema_name=schema_name,
-                )
-                logger.info(f"Responsibles for sector {assigned_sector_id} removed after close_assignment")
-            except Exception as resp_err:
-                logger.warning(f"Error removiendo responsables ADDITIONAL al cerrar asignación: {resp_err}")
 
         return {
             "movement_id": movement_id,
@@ -399,29 +306,16 @@ async def close_assignment(
 
 
 async def get_available_sectors_for_transfer(case_id: str, user_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
-    """
-    Obtener sectores disponibles para transferencia (mismo municipio).
-
-    Args:
-        case_id: ID del expediente
-        user_id: ID del usuario (para validar acceso)
-        schema_name: Nombre del schema (opcional, para multi-tenant)
-
-    Returns:
-        Lista de sectores con información completa
-    """
     from services.case_service import CaseService
     from services.case_queries import get_available_sectors_for_transfer_query
 
     try:
         logger.info(f"Fetching available sectors for case {case_id}")
 
-        # Verificar acceso al expediente
         if not await CaseService.can_user_view_case(case_id, user_id, schema_name=schema_name):
             logger.warning(f"User {user_id} cannot access case {case_id}")
             raise AuthorizationError(AVAILABLE_SECTORS_NO_ACCESS)
 
-        # Obtener sectores disponibles
         sectors_result = await fetch_all(get_available_sectors_for_transfer_query(), case_id, case_id, schema_name=schema_name)
 
         sectors = []
@@ -447,16 +341,6 @@ async def get_available_sectors_for_transfer(case_id: str, user_id: str, *, sche
 
 
 async def get_sector_users(sector_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
-    """
-    Obtener usuarios activos de un sector.
-
-    Args:
-        sector_id: ID del sector
-        schema_name: Nombre del schema (opcional, para multi-tenant)
-
-    Returns:
-        Lista de usuarios con user_id y full_name
-    """
     from services.case_queries import get_sector_users_query
 
     try:

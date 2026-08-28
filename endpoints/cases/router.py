@@ -1,7 +1,3 @@
-"""
-Router principal para todos los endpoints de expedientes
-Registra y configura todas las rutas del sistema de expedientes
-"""
 
 from fastapi import APIRouter
 from .list_cases import router as list_router
@@ -16,9 +12,13 @@ from .proposed_documents import router as proposed_documents_router
 from .download_case_zip import router as download_case_zip_router
 from .favorites import router as favorites_router
 from .responsibles import router as responsibles_router
+from .comments import router as comments_router
 from .counts import router as counts_router
+from .tasks import router as tasks_router
+from .citizen_shares import router as citizen_shares_router
+from .notify_citizen import router as notify_citizen_router
+from .view import router as view_router
 
-# Router principal para expedientes
 cases_router = APIRouter(
     prefix="/api/v1/cases",
     tags=["expedientes"],
@@ -30,10 +30,8 @@ cases_router = APIRouter(
     }
 )
 
-# IMPORTANTE: registrar rutas estáticas ANTES que /{case_id} para evitar
-# que FastAPI interprete "counts" u otros literales como un UUID de expediente.
 cases_router.include_router(list_router)
-cases_router.include_router(counts_router)   # GET /counts — debe ir antes de detail_router
+cases_router.include_router(counts_router)
 cases_router.include_router(create_router)
 cases_router.include_router(detail_router)
 cases_router.include_router(transfer_router)
@@ -45,3 +43,8 @@ cases_router.include_router(proposed_documents_router)
 cases_router.include_router(download_case_zip_router)
 cases_router.include_router(favorites_router)
 cases_router.include_router(responsibles_router)
+cases_router.include_router(comments_router)
+cases_router.include_router(tasks_router)
+cases_router.include_router(citizen_shares_router)
+cases_router.include_router(notify_citizen_router)
+cases_router.include_router(view_router)

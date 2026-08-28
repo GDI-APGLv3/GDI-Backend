@@ -1,26 +1,12 @@
-"""
-Repository para operaciones de documentos - REFACTORIZADO
-Centraliza acceso a datos siguiendo el patron Repository.
-
-UBICACION: services/documents/core/repository.py
-MIGRADO: Fase 6 asyncpg
-"""
 from typing import Dict, Any, List, Optional
 from database import fetch_all, fetch_one, fetch_val
 from shared.exceptions import DocumentNotFoundError
 
 
 class DocumentRepository:
-    """
-    Repository para acceso a datos de documentos.
-    Aplica Single Responsibility: Solo acceso a datos.
-
-    IMPORTANTE: Todas las funciones requieren schema_name para multi-tenant.
-    """
 
     @staticmethod
     async def get_basic_details(document_id: str, *, schema_name: str) -> Dict[str, Any]:
-        """Obtiene datos basicos del documento."""
         row = await fetch_one(
             """
             SELECT
@@ -47,7 +33,6 @@ class DocumentRepository:
 
     @staticmethod
     async def get_signers(document_id: str, *, schema_name: str) -> List[Dict[str, Any]]:
-        """Obtiene firmantes del documento con informacion completa."""
         rows = await fetch_all(
             """
             SELECT
@@ -75,7 +60,6 @@ class DocumentRepository:
 
     @staticmethod
     async def get_rejection_info(document_id: str, *, schema_name: str) -> Optional[Dict[str, Any]]:
-        """Obtiene informacion del ultimo rechazo."""
         row = await fetch_one(
             """
             SELECT
@@ -96,7 +80,6 @@ class DocumentRepository:
 
     @staticmethod
     async def get_status(document_id: str, *, schema_name: str) -> Optional[str]:
-        """Obtiene solo el estado del documento (operacion rapida)."""
         return await fetch_val(
             "SELECT status FROM document_draft WHERE id = $1",
             document_id,
@@ -105,5 +88,4 @@ class DocumentRepository:
 
     @staticmethod
     async def exists(document_id: str, *, schema_name: str) -> bool:
-        """Verifica si el documento existe."""
         return await DocumentRepository.get_status(document_id, schema_name=schema_name) is not None
